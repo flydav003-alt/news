@@ -59,12 +59,14 @@ def crawl_and_save(enabled_names=None) -> dict:
         db.close()
 
     elapsed = (datetime.now() - t0).seconds
+    from datetime import timezone, timedelta
+    tw_time = datetime.now(timezone(timedelta(hours=8))).strftime("%H:%M:%S")
     return {
         "total":   len(articles),
         "saved":   saved,
         "skipped": skipped,
         "elapsed": elapsed,
-        "time":    datetime.now().strftime("%H:%M:%S"),
+        "time":    tw_time,
     }
 
 
@@ -99,5 +101,7 @@ def next_run_time() -> str:
     if _sched and _sched.running:
         job = _sched.get_job("news_crawl")
         if job and job.next_run_time:
-            return job.next_run_time.strftime("%H:%M:%S")
+            from datetime import timezone, timedelta
+            tw = job.next_run_time.astimezone(timezone(timedelta(hours=8)))
+            return tw.strftime("%H:%M:%S")
     return "—"
