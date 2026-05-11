@@ -10,6 +10,11 @@ app.py — 主入口
 """
 
 import os, sys, logging
+from datetime import timezone, timedelta
+TZ_TW = timezone(timedelta(hours=8))
+def now_tw():
+    from datetime import datetime
+    return datetime.now(TZ_TW).strftime("%H:%M:%S")
 import streamlit as st
 import plotly.express as px
 import pandas as pd
@@ -67,7 +72,7 @@ with st.sidebar:
     if st.button("🔄 立即抓取新聞", use_container_width=True, type="primary"):
         with st.spinner("抓取中，約需 15～30 秒…"):
             result = crawl_and_save(st.session_state["enabled_srcs"])
-            st.session_state["last_update"] = result["time"]
+            st.session_state["last_update"] = now_tw()
             st.cache_data.clear()
         st.success(
             f"完成！新增 **{result['saved']}** 則｜"
@@ -419,9 +424,16 @@ with tab_sector:
         st.plotly_chart(fig_r, use_container_width=True)
 
         st.markdown("#### 詳細統計")
+        def _color_score(val):
+            try:
+                v = float(val)
+                if v >= 0.15:  return "color:#1D9E75;font-weight:500"
+                if v <= -0.15: return "color:#D85A30;font-weight:500"
+            except Exception:
+                pass
+            return "color:#888"
         st.dataframe(
-            rank_df.style.background_gradient(
-                subset=["平均情緒"], cmap="RdYlGn", vmin=-1, vmax=1),
+            rank_df.style.applymap(_color_score, subset=["平均情緒"]),
             use_container_width=True, hide_index=True,
         )
 
@@ -509,7 +521,8 @@ with tab_settings:
                      "error":"background:#FCEBEB",
                      "empty":"background:#FAEEDA"}
                 return m.get(val, "")
-            st.dataframe(
-                log_df.style.applymap(_style, subset=["狀態"]),
-                use_container_width=True, hide_index=True,
-            )
+            try:
+                styled = log_df.style.map(_style, subset=["狀態"])
+            except AttributeError:
+                styled = log_df.style.applymap(_style, subset=["狀態"])
+            st.dataframe(styled, use_container_width=True, hide_index=True)
