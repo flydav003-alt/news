@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 MODEL        = "llama-3.3-70b-versatile"
-MAX_TOKENS   = 300   # 夠用且省 quota
+MAX_TOKENS   = 400   # 夠用且省 quota
 TEMPERATURE  = 0.1   # 盡量穩定輸出
 
 
@@ -59,7 +59,7 @@ def _build_prompt(title: str, summary: str, category: str) -> str:
 {{
   "sentiment": "bullish/bearish/neutral（三擇一）",
   "score": 數字（-10到+10，+10極度利多，-10極度利空，0中性）,
-  "summary": "30字內的影響摘要",
+  "summary": "請用40至60字說明這則新聞對台灣股市或相關個股的具體影響，包含影響方向和原因",
   "affected_tickers": ["受影響的股票代碼，台股用4位數字如2330，美股用英文如NVDA，最多3個，若不確定給空陣列"],
   "reason": "一句話說明判斷依據（20字內）",
   "confidence": "high/medium/low（三擇一）"
