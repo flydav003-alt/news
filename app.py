@@ -5,6 +5,12 @@ app.py — FinNews AI 財經新聞智慧分析系統
 來源：鉅亨網 / MoneyDJ / Yahoo奇摩 / 經濟日報 / 工商時報 / 科技新報
 AI：Groq Llama 3.3 70B（選擇性觸發，節省 quota）
 時間：全部台灣時間（UTC+8）
+
+[修改]
+- 總覽 Tab：新增「今日重點」區塊，僅顯示高重要性非中性新聞
+- 新聞列表 Tab：新增「隱藏中性」預設勾選，減少雜訊
+- AI 分析 Tab：新增按重要性排序選項
+- scheduler.py 呼叫 should_use_ai 時傳入 has_tickers 參數
 """
 
 import json
@@ -51,17 +57,48 @@ st.markdown("""
   div[data-testid="stSidebarContent"] { background:#FAFAFA; }
   .stButton > button { border-radius:8px; }
   /* 台灣習慣：漲紅跌綠 */
-  /* 向上箭頭（正值）→ 紅色 */
   [data-testid="stMetricDelta"] svg { color: #C0392B !important; }
   [data-testid="stMetricDelta"][data-direction="up"] {
       color: #C0392B !important;
   }
-  /* 向下箭頭（負值）→ 綠色 */
   [data-testid="stMetricDelta"][data-direction="down"] {
       color: #1B7A34 !important;
   }
-  /* 側邊欄 progress bar 利多紅 */
   .stProgress > div > div > div > div { background-color: #C0392B; }
+  /* 今日重點卡片 */
+  .key-news-card {
+      background: #fff;
+      border-radius: 10px;
+      padding: 12px 16px;
+      margin-bottom: 8px;
+      border-left: 4px solid #ccc;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+  }
+  .key-news-card.bullish { border-left-color: #C0392B; }
+  .key-news-card.bearish { border-left-color: #1D9E75; }
+  .key-news-card-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: #1a1a1a;
+      margin-bottom: 4px;
+  }
+  .key-news-card-summary {
+      font-size: 12px;
+      color: #555;
+      line-height: 1.6;
+  }
+  .key-news-card-meta {
+      font-size: 11px;
+      color: #999;
+      margin-top: 5px;
+  }
+  .importance-dot {
+      display:inline-block;
+      width:8px; height:8px;
+      border-radius:50%;
+      margin-right:4px;
+      vertical-align:middle;
+  }
 </style>
 """, unsafe_allow_html=True)
 
@@ -70,7 +107,6 @@ st.markdown("""
 if "initialized" not in st.session_state:
     init_db()
     start_scheduler(interval_minutes=30)
-    # 檢查 Groq Key 是否設定
     try:
         groq_ok = bool(st.secrets.get("GROQ_API_KEY", ""))
     except Exception:
@@ -94,7 +130,6 @@ with st.sidebar:
     st.markdown("## 📈 FinNews AI")
     st.caption("台灣財經新聞智慧分析")
 
-    # Groq 狀態
     if st.session_state["groq_ok"]:
         st.markdown(
             '<div style="background:#EAF3DE;border-radius:8px;padding:6px 12px;'
@@ -112,7 +147,6 @@ with st.sidebar:
 
     st.divider()
 
-    # 排程狀態
     col_dot, col_info = st.columns([1, 7])
     with col_dot:
         st.markdown(
@@ -125,7 +159,6 @@ with st.sidebar:
     st.caption(f"最後更新：{st.session_state['last_update']}（台灣時間）")
     st.divider()
 
-    # 手動抓取按鈕
     use_ai_cb = st.checkbox(
         "啟用 AI 深度分析",
         value=st.session_state["use_ai"],
@@ -156,7 +189,6 @@ with st.sidebar:
 
     st.divider()
 
-    # 快速統計
     _db = SessionLocal()
     _counts = get_sentiment_counts(_db)
     _db.close()
@@ -214,6 +246,92 @@ with tab_dash:
               delta_color="inverse")
     c4.metric("🏭 涵蓋類股", len(secs) if not secs.empty else 0)
 
+    # ── [新增] 今日重點區塊 ────────────────────────────────────────────────────
+    st.divider()
+    st.markdown("### 🔑 今日重點")
+    st.caption("高影響力利多／利空新聞，依重要性排序（中性與低分雜訊已過濾）")
+
+    if df.empty:
+        st.info("請先點選「立即抓取新聞」")
+    else:
+        # 撈出非中性 + importance_score >= 2.0，最多顯示 12 則
+        if "importance_score" in df.columns:
+            key_df = (
+                df[
+                    (df["sentiment"] != "neutral") &
+                    (df["importance_score"] >= 2.0)
+                ]
+                .sort_values("importance_score", ascending=False)
+                .head(12)
+            )
+        else:
+            # 相容舊資料（沒有 importance_score 欄位時，用 |sentiment_score| 代替）
+            key_df = (
+                df[df["sentiment"] != "neutral"]
+                .assign(_abs=df["sentiment_score"].abs())
+                .sort_values("_abs", ascending=False)
+                .head(12)
+            )
+
+        if key_df.empty:
+            st.info("目前沒有高影響力新聞，或資料還不夠多——可嘗試調低重要性門檻或先抓取新聞。")
+        else:
+            # 分左右兩欄顯示
+            left_col, right_col = st.columns(2)
+            for i, (_, row) in enumerate(key_df.iterrows()):
+                is_bull    = row["sentiment"] == "bullish"
+                color_cls  = "bullish" if is_bull else "bearish"
+                icon       = "🔴" if is_bull else "🟢"
+                label      = row.get("sentiment_label", "利多" if is_bull else "利空")
+                imp        = row.get("importance_score", 0)
+                # 優先顯示 AI 摘要，否則顯示原始摘要前 80 字
+                summary    = (row.get("ai_summary") or
+                              row.get("summary", "")[:80])
+                ticker_str = row.get("tickers", "") or row.get("ai_affected_tickers", "")
+                tickers    = [t.strip() for t in ticker_str.split(",") if t.strip()]
+                ticker_tag = (
+                    " ".join(
+                        f'<span style="background:#F0F0F0;border-radius:4px;'
+                        f'padding:1px 6px;font-size:11px;color:#333">{t}</span>'
+                        for t in tickers[:3]
+                    )
+                    if tickers else ""
+                )
+                # 重要性顏色點
+                imp_color  = "#C0392B" if imp >= 4 else "#E67E22" if imp >= 3 else "#3498DB"
+                pub_str    = ""
+                if row.get("published_at") is not None:
+                    try:
+                        pub_str = row["published_at"].strftime("%m/%d %H:%M")
+                    except Exception:
+                        pass
+
+                card_html = f"""
+                <div class="key-news-card {color_cls}">
+                  <div class="key-news-card-title">
+                    {icon} {row['title']}
+                  </div>
+                  <div class="key-news-card-summary">{summary}</div>
+                  <div class="key-news-card-meta">
+                    <span class="importance-dot" style="background:{imp_color}"></span>
+                    重要性 {imp:.1f}　{label}　{row.get('source','')}
+                    {'　' + ticker_tag if ticker_tag else ''}
+                    {'　' + pub_str if pub_str else ''}
+                  </div>
+                </div>"""
+
+                target_col = left_col if i % 2 == 0 else right_col
+                with target_col:
+                    st.markdown(card_html, unsafe_allow_html=True)
+                    if row.get("url"):
+                        st.markdown(
+                            f'<a href="{row["url"]}" target="_blank" '
+                            f'style="font-size:11px;color:#888;text-decoration:none">'
+                            f'→ 查看原文</a>',
+                            unsafe_allow_html=True,
+                        )
+
+    # ── 圖表區 ────────────────────────────────────────────────────────────────
     st.divider()
     col_pie, col_bar = st.columns(2)
 
@@ -284,13 +402,12 @@ with tab_dash:
     news_table(ddf, key="dash", show_ai=True)
 
 
-
 # ════════════════════════════════════════════════════════════════════════════
 # TAB 2：AI 分析專頁
 # ════════════════════════════════════════════════════════════════════════════
 with tab_ai:
     st.markdown("### ✦ Groq AI 深度分析")
-    st.caption("只顯示已通過 AI 分析的新聞（情緒模糊、含否定詞、地緣政治）")
+    st.caption("只顯示已通過 AI 分析的新聞（情緒模糊、含否定詞、地緣政治、強烈訊號、有個股代碼）")
 
     if not st.session_state["groq_ok"]:
         st.warning(
@@ -344,8 +461,7 @@ with tab_ai:
             st.divider()
             st.markdown("##### 全部 AI 分析新聞")
 
-            # 篩選
-            af1, af2 = st.columns([1, 2])
+            af1, af2, af3 = st.columns([1, 2, 1])   # [修改] 多一個排序欄
             with af1:
                 ai_sent_f = st.selectbox(
                     "AI 情緒篩選",
@@ -358,6 +474,13 @@ with tab_ai:
                     ["全部", "high（高）", "medium（中）", "low（低）"],
                     key="ai_conf_f",
                 )
+            with af3:
+                # [新增] 重要性排序
+                ai_sort_f = st.selectbox(
+                    "排序",
+                    ["重要性↓", "最新優先", "AI分數↓"],
+                    key="ai_sort_f",
+                )
 
             fai = ai_df.copy()
             sm  = {"利多": "bullish", "利空": "bearish", "中性": "neutral"}
@@ -366,6 +489,13 @@ with tab_ai:
             if ai_conf_f != "全部":
                 conf_key = ai_conf_f.split("（")[0]
                 fai = fai[fai["ai_confidence"] == conf_key]
+
+            # [新增] 套用排序
+            if ai_sort_f == "重要性↓" and "importance_score" in fai.columns:
+                fai = fai.sort_values("importance_score", ascending=False)
+            elif ai_sort_f == "AI分數↓":
+                fai = fai.reindex(fai["ai_score"].abs().sort_values(ascending=False).index)
+            # "最新優先" 維持原本順序（published_at desc）
 
             st.caption(f"顯示 {len(fai)} 則")
             news_table(fai, key="ai_all", show_summary=True, show_ai=True)
@@ -498,10 +628,18 @@ with tab_news:
     with nf4:
         nkw = st.text_input("🔍 搜尋", placeholder="標題或摘要…", key="n_kw")
     with nf5:
-        nsort = st.selectbox("排序", ["最新優先", "強度↓", "強度↑"], key="n_sort")
+        nsort = st.selectbox("排序", ["最新優先", "強度↓", "強度↑", "重要性↓"], key="n_sort")
+
+    # [新增] 隱藏中性開關，預設勾選（讓使用者預設看不到雜訊）
+    hide_neutral = st.checkbox("🙈 隱藏中性新聞（預設開啟，只看利多/利空）",
+                               value=True, key="n_hide_neutral")
 
     fdf = ndf.copy() if not ndf.empty else pd.DataFrame()
     if not fdf.empty:
+        # [新增] 優先套用隱藏中性
+        if hide_neutral:
+            fdf = fdf[fdf["sentiment"] != "neutral"]
+
         sm = {"利多": "bullish", "利空": "bearish", "中性": "neutral"}
         if nsent != "全部":
             fdf = fdf[fdf["sentiment"] == sm[nsent]]
@@ -518,6 +656,8 @@ with tab_news:
             fdf = fdf.reindex(fdf["sentiment_score"].abs().sort_values(ascending=False).index)
         elif nsort == "強度↑":
             fdf = fdf.reindex(fdf["sentiment_score"].abs().sort_values(ascending=True).index)
+        elif nsort == "重要性↓" and "importance_score" in fdf.columns:
+            fdf = fdf.sort_values("importance_score", ascending=False)
 
     col_cap, col_btn = st.columns([3, 1])
     with col_cap:
