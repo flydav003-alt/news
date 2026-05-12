@@ -5,6 +5,7 @@ analyzer.py — 分析模組（強化版）
 - 美股中文名稱 ↔ 代碼對照
 - 類股深度對照（12個板塊）
 - 地緣政治新聞自動標記
+- [修改] 中性門檻提高至 ±0.25，減少雜訊
 """
 
 import re
@@ -478,9 +479,10 @@ class Analyzer:
 
     @staticmethod
     def _classify(score: float):
-        if score >= 0.15:
+        # [修改] 門檻從 ±0.15 提高至 ±0.25，減少中性雜訊誤判為利多/利空
+        if score >= 0.25:
             return "bullish", "利多"
-        if score <= -0.15:
+        if score <= -0.25:
             return "bearish", "利空"
         return "neutral", "中性"
 
