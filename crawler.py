@@ -1,12 +1,16 @@
 """
-crawler.py — 新聞抓取模組
-確定採用 5 個 RSS 來源：
-  1. Yahoo Finance   (美股主力)
-  2. Reuters         (財經 + 地緣政治)
-  3. CNBC            (科技財經)
-  4. 鉅亨網          (台股中文)
-  5. BBC World       (戰爭 / 地緣政治)
-全部走 RSS，穩定免費不會被擋。
+crawler.py — 新聞抓取模組（全中文來源版）
+來源（全部 RSS，穩定免費）：
+  1. 鉅亨網-台股        (台股主力)
+  2. 鉅亨網-美股        (美股中文)
+  3. 鉅亨網-總覽        (綜合財經)
+  4. MoneyDJ-台股       (台股深度)
+  5. MoneyDJ-國際       (國際財經)
+  6. Yahoo奇摩股市      (台股綜合)
+  7. 經濟日報           (財經新聞)
+  8. 工商時報           (產業新聞)
+  9. 聯合報財經         (財經綜合)
+ 10. 科技新報           (科技產業)
 """
 
 import logging
@@ -28,47 +32,21 @@ logger = logging.getLogger(__name__)
 
 HEADERS = {
     "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/124.0.0.0 Safari/537.36"
     ),
-    "Accept": "application/rss+xml,application/xml,text/html,*/*",
-    "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+    "Accept": "application/rss+xml,application/xml,text/html,*/*;q=0.8",
+    "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.3",
+    "Accept-Encoding": "gzip, deflate",
 }
-TIMEOUT    = 15
-MAX_ITEMS  = 30   # 每個來源最多抓幾則
+TIMEOUT   = 20
+MAX_ITEMS = 30
 
 
-# ── 5 個確定來源 ──────────────────────────────────────────────────────────────
+# ── 中文來源清單 ──────────────────────────────────────────────────────────────
 SOURCES = [
-    {
-        "name":     "Yahoo Finance",
-        "url":      "https://finance.yahoo.com/news/rssindex",
-        "language": "en",
-        "category": "財經",
-        "enabled":  True,
-    },
-    {
-        "name":     "Reuters Business",
-        "url":      "https://feeds.reuters.com/reuters/businessNews",
-        "language": "en",
-        "category": "財經",
-        "enabled":  True,
-    },
-    {
-        "name":     "Reuters World",
-        "url":      "https://feeds.reuters.com/Reuters/worldNews",
-        "language": "en",
-        "category": "地緣政治",
-        "enabled":  True,
-    },
-    {
-        "name":     "CNBC Top News",
-        "url":      "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114",
-        "language": "en",
-        "category": "財經",
-        "enabled":  True,
-    },
+    # ── 鉅亨網 ────────────────────────────────────────────────
     {
         "name":     "鉅亨網-台股",
         "url":      "https://feeds.feedburner.com/cnyes-tw-stock",
@@ -84,16 +62,61 @@ SOURCES = [
         "enabled":  True,
     },
     {
-        "name":     "BBC World News",
-        "url":      "https://feeds.bbci.co.uk/news/world/rss.xml",
-        "language": "en",
-        "category": "地緣政治",
+        "name":     "鉅亨網-總覽",
+        "url":      "https://feeds.feedburner.com/cnyes",
+        "language": "zh",
+        "category": "財經",
+        "enabled":  True,
+    },
+    # ── MoneyDJ ───────────────────────────────────────────────
+    {
+        "name":     "MoneyDJ-台股",
+        "url":      "https://www.moneydj.com/KMDJ/RssCenter/RssCenter.djrss?type=2",
+        "language": "zh",
+        "category": "台股",
         "enabled":  True,
     },
     {
-        "name":     "BBC Business",
-        "url":      "https://feeds.bbci.co.uk/news/business/rss.xml",
-        "language": "en",
+        "name":     "MoneyDJ-國際",
+        "url":      "https://www.moneydj.com/KMDJ/RssCenter/RssCenter.djrss?type=3",
+        "language": "zh",
+        "category": "國際財經",
+        "enabled":  True,
+    },
+    # ── Yahoo 台灣 ────────────────────────────────────────────
+    {
+        "name":     "Yahoo奇摩股市",
+        "url":      "https://tw.news.yahoo.com/rss/finance",
+        "language": "zh",
+        "category": "財經",
+        "enabled":  True,
+    },
+    # ── 報紙類 ────────────────────────────────────────────────
+    {
+        "name":     "經濟日報",
+        "url":      "https://money.udn.com/rssfeed/news/1001/5591?ch=money",
+        "language": "zh",
+        "category": "財經",
+        "enabled":  True,
+    },
+    {
+        "name":     "工商時報",
+        "url":      "https://www.ctee.com.tw/feed",
+        "language": "zh",
+        "category": "產業",
+        "enabled":  True,
+    },
+    {
+        "name":     "科技新報",
+        "url":      "https://technews.tw/feed/",
+        "language": "zh",
+        "category": "科技",
+        "enabled":  True,
+    },
+    {
+        "name":     "聯合報財經",
+        "url":      "https://udn.com/rssfeed/news/2/6641?ch=news",
+        "language": "zh",
         "category": "財經",
         "enabled":  True,
     },
@@ -115,7 +138,6 @@ def fetch_rss(source: dict) -> list[dict]:
             agent=HEADERS["User-Agent"],
         )
 
-        # bozo=True 表示 RSS 格式有問題，但還是可能有部分內容
         if feed.bozo and not feed.entries:
             logger.warning(f"[{source['name']}] RSS 格式異常：{feed.bozo_exception}")
             return []
@@ -125,16 +147,16 @@ def fetch_rss(source: dict) -> list[dict]:
             summary = _clean(getattr(entry, "summary", ""))
             url     = getattr(entry, "link", "")
 
-            if not title or len(title) < 5:
+            if not title or len(title) < 4:
                 continue
 
             results.append({
-                "title":       title,
-                "summary":     summary[:500],
-                "url":         url,
-                "source":      source["name"],
-                "language":    source["language"],
-                "category":    source.get("category", "財經"),
+                "title":        title,
+                "summary":      summary[:600],
+                "url":          url,
+                "source":       source["name"],
+                "language":     source["language"],
+                "category":     source.get("category", "財經"),
                 "published_at": _parse_time(entry),
             })
 
@@ -157,7 +179,6 @@ def run_crawl(enabled_names: Optional[list[str]] = None) -> tuple[list[dict], li
     all_articles, logs = [], []
 
     for src in SOURCES:
-        # 判斷是否啟用
         if enabled_names is not None:
             if src["name"] not in enabled_names:
                 continue
@@ -171,7 +192,7 @@ def run_crawl(enabled_names: Optional[list[str]] = None) -> tuple[list[dict], li
             "count":   len(articles),
         })
         all_articles.extend(articles)
-        time.sleep(0.8)   # 禮貌延遲，避免被擋
+        time.sleep(0.5)
 
     return all_articles, logs
 
