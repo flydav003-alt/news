@@ -6,6 +6,7 @@ database.py — 資料庫模組
 """
 
 import hashlib
+import json
 import os
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
@@ -16,7 +17,7 @@ from sqlalchemy import (Boolean, Column, DateTime, Float,
                         Integer, String, Text, create_engine, text)
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
-# ── 資料庫路徑（Streamlit Cloud 寫入 /tmp 最穩定）────────────────────────────
+# ── 資料庫路徑 ────────────────────────────────────────────────────────────────
 DB_DIR = "/tmp" if os.path.exists("/tmp") else "data"
 os.makedirs(DB_DIR, exist_ok=True)
 DATABASE_URL = f"sqlite:///{DB_DIR}/finnews.db"
@@ -41,13 +42,15 @@ class NewsArticle(Base):
     summary         = Column(Text, default="")
     url             = Column(Text, default="")
     source          = Column(String(100), default="")
-    language        = Column(String(10), default="en")
+    language        = Column(String(10), default="zh")
+    category        = Column(String(50), default="財經")
     sentiment       = Column(String(10), default="neutral")
     sentiment_score = Column(Float, default=0.0)
     sentiment_label = Column(String(10), default="中性")
-    tickers         = Column(Text, default="")
+    tickers         = Column(Text, default="")      # 逗號分隔代碼
+    ticker_details  = Column(Text, default="")      # JSON: [{code, name, market}]
     sectors         = Column(Text, default="")
-    is_geo          = Column(Boolean, default=False)   # 是否為地緣政治/戰爭新聞
+    is_geo          = Column(Boolean, default=False)
     published_at    = Column(DateTime, default=datetime.utcnow)
     fetched_at      = Column(DateTime, default=datetime.utcnow)
 
@@ -66,6 +69,18 @@ class CrawlLog(Base):
 def init_db():
     os.makedirs("data", exist_ok=True)
     Base.metadata.create_all(bind=engine)
+    # 如果舊資料庫缺少新欄位，自動補上
+    with engine.connect() as conn:
+        try:
+            conn.execute(text("ALTER TABLE news_articles ADD COLUMN ticker_details TEXT DEFAULT ''"))
+            conn.commit()
+        except Exception:
+            pass
+        try:
+            conn.execute(text("ALTER TABLE news_articles ADD COLUMN category TEXT DEFAULT '財經'"))
+            conn.commit()
+        except Exception:
+            pass
 
 
 # ── 去重工具 ──────────────────────────────────────────────────────────────────
@@ -74,52 +89,54 @@ def _make_hash(title: str, url: str) -> str:
 
 
 def _similar(a: str, b: str) -> float:
-    """計算兩個標題的相似度（0~1）"""
     return SequenceMatcher(None, a.lower(), b.lower()).ratio()
 
 
 def _is_duplicate(db: Session, title: str, url: str) -> bool:
-    """
-    三層去重：
-    1. Hash 完全比對
-    2. 標題相似度 > 0.80（6小時內）
-    3. 都通過才是真正新文章
-    """
     hash_id = _make_hash(title, url)
-
-    # 第一層：Hash
     if db.query(NewsArticle).filter(NewsArticle.hash_id == hash_id).first():
         return True
-
-    # 第二層：標題相似度（只查最近6小時）
     cutoff = datetime.utcnow() - timedelta(hours=6)
     recent = (db.query(NewsArticle.title)
                .filter(NewsArticle.fetched_at >= cutoff)
                .all())
     for (existing_title,) in recent:
-        if _similar(title, existing_title) > 0.80:
+        if _similar(title, existing_title) > 0.82:
             return True
-
     return False
 
 
 def save_article(db: Session, data: dict) -> bool:
-    """儲存文章，回傳 True 表示成功新增，False 表示重複跳過"""
     if _is_duplicate(db, data.get("title", ""), data.get("url", "")):
         return False
 
     hash_id = _make_hash(data.get("title", ""), data.get("url", ""))
+
+    # ticker_details 序列化
+    td = data.get("ticker_details", [])
+    if td and hasattr(td[0], "__dataclass_fields__"):
+        td_json = json.dumps([
+            {"code": t.code, "name": t.name, "market": t.market}
+            for t in td
+        ], ensure_ascii=False)
+    elif isinstance(td, list) and td and isinstance(td[0], dict):
+        td_json = json.dumps(td, ensure_ascii=False)
+    else:
+        td_json = "[]"
+
     art = NewsArticle(
         hash_id         = hash_id,
         title           = data.get("title", ""),
         summary         = data.get("summary", "")[:600],
         url             = data.get("url", ""),
         source          = data.get("source", ""),
-        language        = data.get("language", "en"),
+        language        = data.get("language", "zh"),
+        category        = data.get("category", "財經"),
         sentiment       = data.get("sentiment", "neutral"),
         sentiment_score = data.get("sentiment_score", 0.0),
         sentiment_label = data.get("sentiment_label", "中性"),
         tickers         = ",".join(data.get("tickers", [])),
+        ticker_details  = td_json,
         sectors         = ",".join(data.get("sectors", [])),
         is_geo          = data.get("is_geo", False),
         published_at    = data.get("published_at", datetime.utcnow()),
@@ -139,26 +156,42 @@ def log_crawl(db: Session, source: str, status: str,
 
 # ── 查詢 ──────────────────────────────────────────────────────────────────────
 def get_articles_df(db: Session, sentiment=None, ticker=None,
-                    sector=None, geo_only=False, limit=300) -> pd.DataFrame:
+                    sector=None, geo_only=False,
+                    category=None, keyword=None, limit=300) -> pd.DataFrame:
     q = db.query(NewsArticle)
     if geo_only:
         q = q.filter(NewsArticle.is_geo == True)
     if sentiment and sentiment != "all":
         q = q.filter(NewsArticle.sentiment == sentiment)
     if ticker:
-        q = q.filter(NewsArticle.tickers.ilike(f"%{ticker}%"))
+        q = q.filter(NewsArticle.tickers.ilike(f"%{ticker}%") |
+                     NewsArticle.ticker_details.ilike(f"%{ticker}%"))
     if sector:
         q = q.filter(NewsArticle.sectors.ilike(f"%{sector}%"))
+    if category:
+        q = q.filter(NewsArticle.category == category)
+    if keyword:
+        q = q.filter(NewsArticle.title.ilike(f"%{keyword}%") |
+                     NewsArticle.summary.ilike(f"%{keyword}%"))
     rows = q.order_by(NewsArticle.published_at.desc()).limit(limit).all()
     if not rows:
         return pd.DataFrame()
     return pd.DataFrame([{
-        "id": r.id, "title": r.title, "summary": r.summary,
-        "url": r.url, "source": r.source, "language": r.language,
-        "sentiment": r.sentiment, "sentiment_score": round(r.sentiment_score, 3),
+        "id":             r.id,
+        "title":          r.title,
+        "summary":        r.summary,
+        "url":            r.url,
+        "source":         r.source,
+        "language":       r.language,
+        "category":       r.category or "財經",
+        "sentiment":      r.sentiment,
+        "sentiment_score": round(r.sentiment_score, 3),
         "sentiment_label": r.sentiment_label,
-        "tickers": r.tickers, "sectors": r.sectors,
-        "is_geo": r.is_geo, "published_at": r.published_at,
+        "tickers":        r.tickers,
+        "ticker_details": r.ticker_details or "[]",
+        "sectors":        r.sectors,
+        "is_geo":         r.is_geo,
+        "published_at":   r.published_at,
     } for r in rows])
 
 
@@ -184,6 +217,41 @@ def get_sector_counts(db: Session) -> pd.DataFrame:
         return pd.DataFrame(columns=["sector", "count"])
     df = pd.DataFrame(list(counter.items()), columns=["sector", "count"])
     return df.sort_values("count", ascending=False).reset_index(drop=True)
+
+
+def get_ticker_counts(db: Session, limit=20) -> pd.DataFrame:
+    """統計最常出現的股票代碼"""
+    rows = db.query(NewsArticle.ticker_details, NewsArticle.sentiment_score).all()
+    counter: dict[str, dict] = {}
+    for (td_json, score) in rows:
+        try:
+            items = json.loads(td_json or "[]")
+        except Exception:
+            continue
+        for item in items:
+            code = item.get("code", "")
+            name = item.get("name", code)
+            market = item.get("market", "TW")
+            if not code:
+                continue
+            if code not in counter:
+                counter[code] = {"code": code, "name": name,
+                                 "market": market, "count": 0, "score_sum": 0.0}
+            counter[code]["count"] += 1
+            counter[code]["score_sum"] += score or 0.0
+    if not counter:
+        return pd.DataFrame(columns=["code", "name", "market", "count", "avg_score"])
+    rows_out = []
+    for v in counter.values():
+        rows_out.append({
+            "代碼":   v["code"],
+            "名稱":   v["name"],
+            "市場":   v["market"],
+            "出現次數": v["count"],
+            "平均情緒": round(v["score_sum"] / v["count"], 3) if v["count"] else 0.0,
+        })
+    df = pd.DataFrame(rows_out).sort_values("出現次數", ascending=False)
+    return df.head(limit).reset_index(drop=True)
 
 
 def get_crawl_logs(db: Session, limit=30) -> pd.DataFrame:
