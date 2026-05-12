@@ -3,6 +3,7 @@ scheduler.py — 背景排程模組
 - APScheduler 定時抓取
 - 整合 Groq AI 選擇性分析（符合觸發條件才送）
 - 所有時間顯示台灣時間
+- [修改] should_use_ai 呼叫新增 has_tickers 參數
 """
 
 import logging
@@ -69,8 +70,10 @@ def crawl_and_save(enabled_names=None,
             })
 
             # ── Step 2：AI 分析（條件觸發）────────────────────
+            # [修改] 新增 has_tickers 參數，有個股代碼也觸發 AI
+            has_tickers = bool(r.tickers)
             if groq_key and should_use_ai(
-                r.sentiment_score, item["title"], r.is_geo
+                r.sentiment_score, item["title"], r.is_geo, has_tickers
             ):
                 ai = groq_analyze(
                     title    = item["title"],
@@ -92,7 +95,7 @@ def crawl_and_save(enabled_names=None,
             else:
                 _clear_ai_fields(item)
 
-            # ── Step 3：存庫 ───────────────────────────────────
+            # ── Step 3：存庫（importance_score 在 save_article 內自動計算）──
             if save_article(db, item):
                 saved += 1
             else:
