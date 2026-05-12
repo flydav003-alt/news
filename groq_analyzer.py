@@ -1,7 +1,7 @@
 """
 groq_analyzer.py — Groq AI 深度分析模組
 - 使用 Llama 3.3 70B（Groq 免費額度）
-- 只在關鍵字分析不確定時觸發（省 token）
+- [修改] 擴大觸發條件：強烈訊號（|score|≥0.3）+ 有個股代碼 也觸發
 - 輸出結構化 JSON：情緒、影響摘要、受影響個股、信心度
 """
 
@@ -22,13 +22,20 @@ TEMPERATURE  = 0.1   # 盡量穩定輸出
 
 
 # ── 觸發條件判斷 ──────────────────────────────────────────────────────────────
-def should_use_ai(keyword_score: float, title: str, is_geo: bool) -> bool:
+def should_use_ai(
+    keyword_score: float,
+    title: str,
+    is_geo: bool,
+    has_tickers: bool = False,   # [新增] 有個股代碼就送 AI
+) -> bool:
     """
     判斷這則新聞是否需要送 Groq 做 AI 分析。
     觸發條件（任一符合即送）：
       1. 關鍵字分數在模糊帶（-0.2 ~ +0.2）
       2. 標題含否定詞（容易誤判）
       3. 地緣政治新聞（需要深度解讀）
+      4. [新增] 強烈訊號（|score| >= 0.3）── 高確信也要 AI 確認影響範圍
+      5. [新增] 有個股代碼 ── 個股影響最需要精準解讀
     """
     # 條件 1：模糊帶
     if -0.20 <= keyword_score <= 0.20:
@@ -41,6 +48,14 @@ def should_use_ai(keyword_score: float, title: str, is_geo: bool) -> bool:
 
     # 條件 3：地緣政治
     if is_geo:
+        return True
+
+    # 條件 4：強烈訊號（方向明確但影響範圍仍需 AI 解讀）
+    if abs(keyword_score) >= 0.30:
+        return True
+
+    # 條件 5：有個股代碼（精準到個股層面必須 AI 分析）
+    if has_tickers:
         return True
 
     return False
@@ -165,13 +180,14 @@ def batch_groq_analyze(
     total   = len(articles)
 
     for i, article in enumerate(articles):
-        title    = article.get("title", "")
-        summary  = article.get("summary", "")
-        category = article.get("category", "財經")
-        kw_score = article.get("sentiment_score", 0.0)
-        is_geo   = article.get("is_geo", False)
+        title      = article.get("title", "")
+        summary    = article.get("summary", "")
+        category   = article.get("category", "財經")
+        kw_score   = article.get("sentiment_score", 0.0)
+        is_geo     = article.get("is_geo", False)
+        has_tickers = bool(article.get("tickers"))   # [新增]
 
-        if should_use_ai(kw_score, title, is_geo):
+        if should_use_ai(kw_score, title, is_geo, has_tickers):
             ai = groq_analyze(title, summary, category, api_key)
             if ai:
                 article["ai_sentiment"]        = ai["sentiment"]
