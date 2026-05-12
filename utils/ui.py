@@ -12,15 +12,15 @@ import pandas as pd
 import streamlit as st
 
 
-# ── 情緒樣式 ──────────────────────────────────────────────────────────────────
+# ── 情緒樣式（台灣習慣：漲紅跌綠）─────────────────────────────────────────────
 SENT_STYLE = {
-    "bullish": ("利多", "#EAF3DE", "#2D6A0F"),
-    "bearish": ("利空", "#FCEBEB", "#9B2020"),
-    "neutral": ("中性", "#F1EFE8", "#5F5E5A"),
+    "bullish": ("利多", "#FDECEA", "#C0392B"),   # 紅色系
+    "bearish": ("利空", "#E8F5E9", "#1B7A34"),   # 綠色系
+    "neutral": ("中性", "#F1EFE8", "#5F5E5A"),   # 灰色系
 }
 
 CONF_STYLE = {
-    "high":   ("高", "#EAF3DE", "#2D6A0F"),
+    "high":   ("高", "#FDECEA", "#C0392B"),
     "medium": ("中", "#FEF9E7", "#7D6608"),
     "low":    ("低", "#F1EFE8", "#888"),
 }
@@ -65,7 +65,7 @@ def score_bar(score: float, scale10: bool = False) -> str:
     else:
         pct   = int(abs(score) * 100)
         disp  = f"{score:+.2f}"
-    color = "#1D9E75" if score > 0 else ("#D85A30" if score < 0 else "#B4B2A9")
+    color = "#C0392B" if score > 0 else ("#1B7A34" if score < 0 else "#B4B2A9")  # 台灣：漲紅跌綠
     return (
         f'<div style="display:flex;align-items:center;gap:6px">'
         f'<div style="width:60px;background:#EBEBEB;border-radius:4px;'
@@ -196,7 +196,7 @@ def ai_summary_block(ai_summary: str, ai_reason: str,
     if not ai_summary:
         return ""
     _, bg, color = SENT_STYLE.get(ai_sentiment, ("", "#F1EFE8", "#5F5E5A"))
-    score_color  = "#1D9E75" if ai_score > 0 else ("#D85A30" if ai_score < 0 else "#888")
+    score_color  = "#C0392B" if ai_score > 0 else ("#1B7A34" if ai_score < 0 else "#888")  # 台灣：漲紅跌綠
     sign         = "+" if ai_score > 0 else ""
     conf_label, conf_bg, conf_c = CONF_STYLE.get(ai_confidence, ("", "#F1EFE8", "#888"))
 
