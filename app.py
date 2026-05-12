@@ -50,6 +50,18 @@ st.markdown("""
   .stMetric { background:#F7F7F7; border-radius:8px; padding:12px; }
   div[data-testid="stSidebarContent"] { background:#FAFAFA; }
   .stButton > button { border-radius:8px; }
+  /* 台灣習慣：漲紅跌綠 */
+  /* 向上箭頭（正值）→ 紅色 */
+  [data-testid="stMetricDelta"] svg { color: #C0392B !important; }
+  [data-testid="stMetricDelta"][data-direction="up"] {
+      color: #C0392B !important;
+  }
+  /* 向下箭頭（負值）→ 綠色 */
+  [data-testid="stMetricDelta"][data-direction="down"] {
+      color: #1B7A34 !important;
+  }
+  /* 側邊欄 progress bar 利多紅 */
+  .stProgress > div > div > div > div { background-color: #C0392B; }
 </style>
 """, unsafe_allow_html=True)
 
