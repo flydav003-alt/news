@@ -408,22 +408,23 @@ class Analyzer:
 
     # ── 股票代碼抽取（三層：中文名稱→代碼、4位數字、英文代碼）──────────────────
     def _tickers(self, text: str) -> list[TickerMatch]:
-    found: dict[str, TickerMatch] = {}
+        found: dict[str, TickerMatch] = {}
 
-       # 第一層：台股公司名稱對照
-       for name, code in TW_COMPANY_TO_CODE.items():
-           if name in text and code not in found:
-            found[code] = TickerMatch(code=code, name=name, market="TW")
+        # 第一層：台股公司名稱對照
+        for name, code in TW_COMPANY_TO_CODE.items():
+            if name in text and code not in found:
+                found[code] = TickerMatch(code=code, name=name, market="TW")
 
-       # 第二層：4位數字直接出現（排除年份 2000-2030）
-       for m in re.finditer(r"(?<!\d)(\d{4})(?!\d)", text):
-           code = m.group(1)
-           code_int = int(code)
-           if (1000 <= code_int <= 9999
-                and not (2000 <= code_int <= 2030)
-                and code not in found):
-            name = CODE_TO_COMPANY.get(code, f"台股{code}")
-            found[code] = TickerMatch(code=code, name=name, market="TW")
+        # 第二層：4位數字直接出現（排除年份 2000-2030 及常見非代碼數字）
+        EXCLUDE_NUMS = set(str(y) for y in range(2000, 2031))
+        for m in re.finditer(r"(?<!\d)(\d{4})(?!\d)", text):
+            code = m.group(1)
+            code_int = int(code)
+            if (1000 <= code_int <= 9999
+                    and code not in EXCLUDE_NUMS
+                    and code not in found):
+                name = CODE_TO_COMPANY.get(code, f"台股{code}")
+                found[code] = TickerMatch(code=code, name=name, market="TW")
 
         # 第三層：美股中文名稱
         for name, code in US_NAME_TO_CODE.items():
