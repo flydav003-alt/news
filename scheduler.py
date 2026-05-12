@@ -5,7 +5,7 @@ Streamlit 多次 re-run 時用全域變數防止重複啟動。
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -14,13 +14,21 @@ from analyzer import Analyzer
 from crawler import run_crawl
 from database import SessionLocal, save_article, log_crawl
 
-logger   = logging.getLogger(__name__)
-_sched   = None
+logger    = logging.getLogger(__name__)
+_sched    = None
 _analyzer = Analyzer()
 
+TZ_TW = timezone(timedelta(hours=8))
 
-def crawl_and_save(enabled_names=None) -> dict:
-    """一次完整的抓取 → 分析 → 存庫流程，回傳摘要供 UI 顯示"""
+
+def crawl_and_save(enabled_names=None, custom_bull=None, custom_bear=None) -> dict:
+    """一次完整的抓取 → 分析 → 存庫流程"""
+    # 若有自訂詞典，動態建立分析器
+    if custom_bull or custom_bear:
+        analyzer = Analyzer(extra_bullish=custom_bull, extra_bearish=custom_bear)
+    else:
+        analyzer = _analyzer
+
     t0 = datetime.now()
     articles, logs = run_crawl(enabled_names)
 
@@ -28,16 +36,17 @@ def crawl_and_save(enabled_names=None) -> dict:
     db = SessionLocal()
     try:
         for item in articles:
-            r = _analyzer.analyze(
+            r = analyzer.analyze(
                 item["title"],
                 item.get("summary", ""),
-                item.get("language", "en"),
+                item.get("language", "zh"),
             )
             item.update({
                 "sentiment":       r.sentiment,
                 "sentiment_score": r.sentiment_score,
                 "sentiment_label": r.sentiment_label,
                 "tickers":         r.tickers,
+                "ticker_details":  r.ticker_details,
                 "sectors":         r.sectors,
                 "is_geo":          r.is_geo,
             })
@@ -59,28 +68,27 @@ def crawl_and_save(enabled_names=None) -> dict:
         db.close()
 
     elapsed = (datetime.now() - t0).seconds
-    from datetime import timezone, timedelta
-    tw_time = datetime.now(timezone(timedelta(hours=8))).strftime("%H:%M:%S")
+    tw_time = datetime.now(TZ_TW).strftime("%H:%M:%S")
     return {
         "total":   len(articles),
         "saved":   saved,
         "skipped": skipped,
         "elapsed": elapsed,
         "time":    tw_time,
+        "logs":    logs,
     }
 
 
 def start_scheduler(interval_minutes: int = 30) -> None:
-    """啟動背景排程（只啟動一次）"""
     global _sched
     if _sched and _sched.running:
         return
     _sched = BackgroundScheduler(timezone="Asia/Taipei")
     _sched.add_job(
         crawl_and_save,
-        trigger         = IntervalTrigger(minutes=interval_minutes),
-        id              = "news_crawl",
-        replace_existing= True,
+        trigger          = IntervalTrigger(minutes=interval_minutes),
+        id               = "news_crawl",
+        replace_existing = True,
         misfire_grace_time = 120,
     )
     _sched.start()
@@ -101,7 +109,6 @@ def next_run_time() -> str:
     if _sched and _sched.running:
         job = _sched.get_job("news_crawl")
         if job and job.next_run_time:
-            from datetime import timezone, timedelta
-            tw = job.next_run_time.astimezone(timezone(timedelta(hours=8)))
+            tw = job.next_run_time.astimezone(TZ_TW)
             return tw.strftime("%H:%M:%S")
     return "—"
