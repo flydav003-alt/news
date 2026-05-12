@@ -283,23 +283,7 @@ with tab_dash:
     st.caption(f"顯示 {len(ddf)} 則")
     news_table(ddf, key="dash", show_ai=True)
 
-HIGH_BULL = df[
-    (df["sentiment"] == "bullish") & 
-    (df["sentiment_score"].abs() >= 0.3)
-].head(10)
 
-HIGH_BEAR = df[
-    (df["sentiment"] == "bearish") & 
-    (df["sentiment_score"].abs() >= 0.3)
-].head(10)
-
-GEO_NEWS = df[df["is_geo"] == True].head(5)
-
-# AI 分數 ≥ 3 才算重要
-AI_IMPORTANT = df[
-    (df["ai_summary"] != "") & 
-    (df["ai_score"].abs() >= 3.0)
-]
 
 # ════════════════════════════════════════════════════════════════════════════
 # TAB 2：AI 分析專頁
