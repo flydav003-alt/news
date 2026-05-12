@@ -418,7 +418,12 @@ class Analyzer:
         # 第二層：4位數字直接出現
         for m in re.finditer(r"(?<!\d)(\d{4})(?!\d)", text):
             code = m.group(1)
-            if 1000 <= int(code) <= 9999 and code not in found:
+            if 1000 <= int(code)
+            code_int = int(code)
+            # 排除年份（2000-2030）和常見非代碼數字
+            if (1000 <= code_int <= 9999 
+                and not (2000 <= code_int <= 2030)
+                and code not in found):
                 name = CODE_TO_COMPANY.get(code, f"台股{code}")
                 found[code] = TickerMatch(code=code, name=name, market="TW")
 
