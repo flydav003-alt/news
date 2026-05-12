@@ -4,6 +4,8 @@ database.py — 資料庫模組
 - 三層去重：Hash / 標題相似度 / 時間窗口
 - 新增 AI 分析欄位（ai_sentiment / ai_score / ai_summary 等）
 - 所有時間統一台灣時間（UTC+8）顯示
+- [修改] 新增 importance_score 欄位（重要性分數 0~5）
+- [修改] get_articles_df 支援 importance_only 過濾
 """
 
 import hashlib
@@ -74,6 +76,8 @@ class NewsArticle(Base):
     ai_affected_tickers = Column(Text, default="")
     ai_reason           = Column(Text, default="")
     ai_confidence       = Column(String(10), default="")
+    # ── [新增] 重要性分數（0~5）──────────────────────────────
+    importance_score    = Column(Float, default=0.0)
     # ── 時間（存 UTC，顯示時轉台灣）──────────────────────────
     published_at    = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     fetched_at      = Column(DateTime, default=lambda: datetime.now(timezone.utc))
@@ -103,6 +107,7 @@ def init_db():
         ("ai_affected_tickers", "TEXT DEFAULT ''"),
         ("ai_reason",           "TEXT DEFAULT ''"),
         ("ai_confidence",       "TEXT DEFAULT ''"),
+        ("importance_score",    "REAL DEFAULT 0.0"),   # [新增]
     ]
     with engine.connect() as conn:
         for col, col_def in new_cols:
@@ -133,6 +138,31 @@ def _is_duplicate(db: Session, title: str, url: str) -> bool:
         if _similar(title, existing_title) > 0.82:
             return True
     return False
+
+
+# ── [新增] 重要性分數計算 ─────────────────────────────────────────────────────
+def _calc_importance(data: dict) -> float:
+    """
+    重要性分數（0~5）計算規則：
+      情緒強度（|score| × 2）     最高 2.0
+      有 AI 摘要                  +1.5
+      地緣政治                    +1.0
+      有個股代碼                  +0.5
+    只有非中性才真正計入（中性固定給 0）
+    """
+    sentiment = data.get("sentiment", "neutral")
+    if sentiment == "neutral":
+        return 0.0
+
+    score = abs(data.get("sentiment_score", 0.0)) * 2.0        # 最高 2.0
+    if data.get("ai_summary"):
+        score += 1.5
+    if data.get("is_geo"):
+        score += 1.0
+    if data.get("tickers") or data.get("ai_affected_tickers"):
+        score += 0.5
+
+    return round(min(score, 5.0), 3)
 
 
 # ── 存入 ──────────────────────────────────────────────────────────────────────
@@ -178,6 +208,7 @@ def save_article(db: Session, data: dict) -> bool:
         ai_affected_tickers = data.get("ai_affected_tickers", ""),
         ai_reason           = data.get("ai_reason", ""),
         ai_confidence       = data.get("ai_confidence", ""),
+        importance_score    = _calc_importance(data),   # [新增]
         published_at        = pub,
         fetched_at          = datetime.now(timezone.utc),
     )
@@ -219,6 +250,7 @@ def _row_to_dict(r: NewsArticle) -> dict:
         "ai_affected_tickers": r.ai_affected_tickers or "",
         "ai_reason":           r.ai_reason or "",
         "ai_confidence":       r.ai_confidence or "",
+        "importance_score":    r.importance_score or 0.0,   # [新增]
         "published_at":        to_tw(r.published_at),
         "fetched_at":          to_tw(r.fetched_at),
     }
@@ -227,12 +259,21 @@ def _row_to_dict(r: NewsArticle) -> dict:
 def get_articles_df(db: Session, sentiment=None, ticker=None,
                     sector=None, geo_only=False,
                     category=None, keyword=None,
-                    ai_only=False, limit=300) -> pd.DataFrame:
+                    ai_only=False,
+                    importance_only=False,   # [新增] 只撈重要新聞
+                    min_importance: float = 2.0,   # [新增] 重要性門檻
+                    limit=300) -> pd.DataFrame:
     q = db.query(NewsArticle)
     if geo_only:
         q = q.filter(NewsArticle.is_geo == True)
     if ai_only:
         q = q.filter(NewsArticle.ai_summary != "")
+    if importance_only:
+        # [新增] 過濾掉中性 + 低重要性
+        q = q.filter(
+            NewsArticle.sentiment != "neutral",
+            NewsArticle.importance_score >= min_importance,
+        )
     if sentiment and sentiment != "all":
         q = q.filter(NewsArticle.sentiment == sentiment)
     if ticker:
