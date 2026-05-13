@@ -1,7 +1,7 @@
 """
 groq_analyzer.py — Groq AI 深度分析模組
 - 使用 Llama 3.3 70B（Groq 免費額度）
-- [修改] 擴大觸發條件：強烈訊號（|score|≥0.3）+ 有個股代碼 也觸發
+- [修改] 收窄觸發條件：只送真正有分析價值的新聞，避免每則都送導致超慢
 - 輸出結構化 JSON：情緒、影響摘要、受影響個股、信心度
 """
 
@@ -26,36 +26,40 @@ def should_use_ai(
     keyword_score: float,
     title: str,
     is_geo: bool,
-    has_tickers: bool = False,   # [新增] 有個股代碼就送 AI
+    has_tickers: bool = False,
 ) -> bool:
     """
     判斷這則新聞是否需要送 Groq 做 AI 分析。
+
+    設計原則：寧可少送，不要每則都送。
+    送 AI 的目的是「補關鍵字判斷不足」，不是替每則新聞都加摘要。
+
     觸發條件（任一符合即送）：
-      1. 關鍵字分數在模糊帶（-0.2 ~ +0.2）
-      2. 標題含否定詞（容易誤判）
-      3. 地緣政治新聞（需要深度解讀）
-      4. [新增] 強烈訊號（|score| >= 0.3）── 高確信也要 AI 確認影響範圍
-      5. [新增] 有個股代碼 ── 個股影響最需要精準解讀
+      1. 情緒模糊帶（-0.15 ~ +0.15）：關鍵字沒把握，需要 AI
+      2. 含否定詞且有強烈情緒（|score|>0.2）：否定詞可能反轉方向
+      3. 地緣政治新聞：影響複雜，需要深度解讀
+      4. 有個股代碼 + 強烈訊號（|score|>=0.4）：個股影響才送，避免雜訊
+         （純中性個股新聞不送，節省 quota）
+
+    不送的情況：
+      - 分數明確（|score|>0.15）且無否定詞、無地緣政治、無個股 → 關鍵字夠用
+      - 分數很強（|score|>0.4）但沒有個股代碼 → 影響範圍不精確，不值得送
     """
-    # 條件 1：模糊帶
-    if -0.20 <= keyword_score <= 0.20:
+    # 條件 1：情緒模糊帶（縮小至 ±0.15，原本 ±0.20 太寬）
+    if -0.15 <= keyword_score <= 0.15:
         return True
 
-    # 條件 2：否定詞
-    negation_words = ["不", "未", "沒有", "擬", "傳", "疑", "恐", "或", "待"]
-    if any(w in title for w in negation_words):
+    # 條件 2：含否定詞 且 情緒有一定強度（否定詞+中性不送，節省 quota）
+    negation_words = ["不", "未", "沒有", "擬", "傳", "疑", "恐"]
+    if any(w in title for w in negation_words) and abs(keyword_score) > 0.20:
         return True
 
-    # 條件 3：地緣政治
+    # 條件 3：地緣政治（一律送，影響範圍需要 AI 解讀）
     if is_geo:
         return True
 
-    # 條件 4：強烈訊號（方向明確但影響範圍仍需 AI 解讀）
-    if abs(keyword_score) >= 0.30:
-        return True
-
-    # 條件 5：有個股代碼（精準到個股層面必須 AI 分析）
-    if has_tickers:
+    # 條件 4：有個股代碼 且 訊號夠強（避免每個有代碼的新聞都送）
+    if has_tickers and abs(keyword_score) >= 0.40:
         return True
 
     return False
