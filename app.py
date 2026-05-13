@@ -327,7 +327,28 @@ with tab_dash:
             db.close()
         return df, counts, secs
 
+    @st.cache_data(ttl=60, show_spinner=False)
+    def load_ai_24h():
+        """撈過去 24 小時內有 AI 摘要的新聞，不限筆數"""
+        db = SessionLocal()
+        try:
+            all_ai = get_articles_df(db, ai_only=True, limit=2000)
+        finally:
+            db.close()
+        if all_ai.empty:
+            return all_ai
+        cutoff = datetime.now(TZ_TW) - timedelta(hours=24)
+        mask = all_ai["published_at"].apply(
+            lambda x: x is not None and (
+                x >= cutoff if getattr(x, "tzinfo", None) else True
+            )
+        )
+        result = all_ai[mask]
+        # 若 24h 內一筆都沒有（資料庫偏舊），退而用全部 AI 資料
+        return result if not result.empty else all_ai
+
     df, counts, secs = load_dash()
+    ai_24h_df = load_ai_24h()   # 24小時 AI 新聞，專給總結＆重點新聞用
     total  = sum(counts.values())
     bull_n = counts.get("bullish", 0)
     bear_n = counts.get("bearish", 0)
@@ -346,84 +367,80 @@ with tab_dash:
     # ── 今日 AI 市場總結 ──────────────────────────────────────────────────────
     st.divider()
     st.markdown("### ✦ 今日 AI 市場總結")
+    st.caption("根據過去 24 小時內所有 AI 分析新聞生成")
 
-    if df.empty:
-        st.info("請先點選「立即抓取新聞」")
+    if not st.session_state["groq_ok"]:
+        st.markdown(
+            '<div style="background:#FEF9E7;border-radius:10px;padding:14px 18px;'
+            'color:#7D6608;font-size:13px">'
+            '⚠ 需要設定 Groq API Key 才能顯示 AI 市場總結</div>',
+            unsafe_allow_html=True,
+        )
+    elif ai_24h_df.empty:
+        st.markdown(
+            '<div style="background:#F7F7F7;border-radius:10px;padding:14px 18px;'
+            'color:#888;font-size:13px">'
+            '尚無 AI 分析資料，請先抓取新聞並啟用 AI 深度分析</div>',
+            unsafe_allow_html=True,
+        )
     else:
-        # 取有 AI 摘要的新聞做為素材
-        ai_for_summary = df[
-            df["ai_summary"].notna() & (df["ai_summary"] != "")
-        ].sort_values("importance_score" if "importance_score" in df.columns
-                      else "sentiment_score", ascending=False)
+        # 用最新一則的時間做 cache key，有新資料才重新呼叫 Groq
+        latest_ts = str(ai_24h_df.iloc[0].get("published_at", ""))
+        cache_key = f"daily_summary_{latest_ts}"
 
-        if not st.session_state["groq_ok"]:
-            st.markdown(
-                '<div style="background:#FEF9E7;border-radius:10px;padding:14px 18px;'
-                'color:#7D6608;font-size:13px">'
-                '⚠ 需要設定 Groq API Key 才能顯示 AI 市場總結</div>',
-                unsafe_allow_html=True,
-            )
-        elif ai_for_summary.empty:
-            st.markdown(
-                '<div style="background:#F7F7F7;border-radius:10px;padding:14px 18px;'
-                'color:#888;font-size:13px">'
-                '尚無 AI 分析資料，請先抓取新聞並啟用 AI 深度分析</div>',
-                unsafe_allow_html=True,
-            )
-        else:
-            # cache key：用最新一則 AI 新聞的時間，避免每次 rerun 重複呼叫
-            latest_ts = str(ai_for_summary.iloc[0].get("published_at", ""))
-            cache_key = f"daily_summary_{latest_ts}"
-
-            if st.session_state.get("_summary_cache_key") != cache_key:
-                # 第一次或資料有更新才重新呼叫 Groq
-                with st.spinner("AI 正在生成今日市場總結…"):
-                    summary_text = get_daily_ai_summary(ai_for_summary)
-                st.session_state["_daily_summary"] = summary_text
-                st.session_state["_summary_cache_key"] = cache_key
-                st.session_state["_summary_time"] = datetime.now(TZ_TW).strftime("%H:%M")
-            else:
-                summary_text = st.session_state.get("_daily_summary", "")
-
-            if summary_text:
-                gen_time = st.session_state.get("_summary_time", "")
-                ai_count_for_summary = len(ai_for_summary)
-                st.markdown(
-                    f'<div class="ai-daily-summary">'
-                    f'<div class="ai-daily-summary-label">✦ Groq AI · 今日市場總結</div>'
-                    f'<div class="ai-daily-summary-text">{summary_text}</div>'
-                    f'<div class="ai-daily-summary-footer">'
-                    f'根據 {ai_count_for_summary} 則 AI 分析新聞生成　·　{gen_time} 台灣時間</div>'
-                    f'</div>',
-                    unsafe_allow_html=True,
+        if st.session_state.get("_summary_cache_key") != cache_key:
+            with st.spinner("AI 正在生成今日市場總結…"):
+                ai_for_summary = ai_24h_df.sort_values(
+                    "importance_score" if "importance_score" in ai_24h_df.columns
+                    else "ai_score", ascending=False
                 )
-                # 手動重新整理按鈕
-                if st.button("🔄 重新生成總結", key="regen_summary"):
-                    st.session_state.pop("_summary_cache_key", None)
-                    st.rerun()
-            else:
-                st.caption("AI 總結生成失敗，請稍後再試")
+                summary_text = get_daily_ai_summary(ai_for_summary)
+            st.session_state["_daily_summary"] = summary_text
+            st.session_state["_summary_cache_key"] = cache_key
+            st.session_state["_summary_time"] = datetime.now(TZ_TW).strftime("%H:%M")
+        else:
+            summary_text = st.session_state.get("_daily_summary", "")
+
+        if summary_text:
+            gen_time = st.session_state.get("_summary_time", "")
+            st.markdown(
+                f'<div class="ai-daily-summary">'
+                f'<div class="ai-daily-summary-label">✦ Groq AI · 今日市場總結</div>'
+                f'<div class="ai-daily-summary-text">{summary_text}</div>'
+                f'<div class="ai-daily-summary-footer">'
+                f'根據過去 24 小時 {len(ai_24h_df)} 則 AI 分析新聞生成　·　{gen_time} 台灣時間</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+            if st.button("🔄 重新生成總結", key="regen_summary"):
+                st.session_state.pop("_summary_cache_key", None)
+                st.rerun()
+        else:
+            st.caption("AI 總結生成失敗，請稍後再試")
 
     # ── 今日 AI 重點新聞 ──────────────────────────────────────────────────────
     st.divider()
     st.markdown("### 🔑 今日 AI 重點新聞")
-    st.caption("僅顯示有 AI 分析的高影響力新聞，依重要性排序")
+    st.caption("過去 24 小時內所有有 AI 分析的新聞，依重要性排序（無數量上限）")
 
-    if df.empty:
-        st.info("請先點選「立即抓取新聞」")
+    if ai_24h_df.empty:
+        st.info("目前沒有符合條件的 AI 重點新聞，請先抓取並啟用 AI 分析。")
     else:
-        # 只取有 AI 摘要 + 非中性 + importance >= 2.0
-        has_imp = "importance_score" in df.columns
-        ai_key_df = df[
-            df["ai_summary"].notna() & (df["ai_summary"] != "") &
-            (df["ai_sentiment"].isin(["bullish", "bearish"]))
+        # 只過濾非中性（ai_sentiment 為 bullish 或 bearish），不加 importance 限制
+        ai_key_df = ai_24h_df[
+            ai_24h_df["ai_sentiment"].isin(["bullish", "bearish"])
         ]
-        if has_imp:
-            ai_key_df = ai_key_df[ai_key_df["importance_score"] >= 2.0]
+        # 若 bullish/bearish 都沒有，退而顯示全部（含 neutral）
+        if ai_key_df.empty:
+            ai_key_df = ai_24h_df.copy()
+
+        # 排序：importance_score 優先，沒有就用 ai_score 絕對值
+        if "importance_score" in ai_key_df.columns:
             ai_key_df = ai_key_df.sort_values("importance_score", ascending=False)
         else:
-            ai_key_df = ai_key_df.sort_values("ai_score", key=abs, ascending=False)
-        ai_key_df = ai_key_df.head(12)
+            ai_key_df = ai_key_df.reindex(
+                ai_key_df["ai_score"].abs().sort_values(ascending=False).index
+            )
 
         if ai_key_df.empty:
             st.info("目前沒有符合條件的 AI 重點新聞，請先抓取並啟用 AI 分析。")
