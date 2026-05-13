@@ -43,11 +43,11 @@ def now_tw_str() -> str:
 
 
 # ── 今日 AI 市場總結（呼叫 Groq 一次，產出 100 字內摘要）────────────────────
-def get_daily_ai_summary(ai_news_df: pd.DataFrame) -> str:
+def get_daily_ai_summary(ai_news_df: pd.DataFrame) -> tuple[str, str]:
     """
     把今日 AI 分析新聞的標題 + AI摘要餵給 Groq，
     請它產出一段 100 字內的台灣股市今日總結。
-    結果 cache 在 session_state，避免重複呼叫。
+    回傳 (summary_text, error_msg)，成功時 error_msg 為空字串。
     """
     import os, requests, json as _json
 
@@ -60,7 +60,7 @@ def get_daily_ai_summary(ai_news_df: pd.DataFrame) -> str:
     if not groq_key:
         groq_key = os.environ.get("GROQ_API_KEY", "")
     if not groq_key:
-        return ""
+        return "", "找不到 GROQ_API_KEY，請確認 Secrets 設定"
 
     # 整理新聞素材（最多取 15 則，避免 prompt 過長）
     rows = ai_news_df.head(15)
@@ -71,6 +71,9 @@ def get_daily_ai_summary(ai_news_df: pd.DataFrame) -> str:
         summary = r.get("ai_summary") or r.get("title", "")
         lines.append(f"[{sent_label}] {summary}")
     news_text = "\n".join(lines)
+
+    if not news_text.strip():
+        return "", "沒有可用的 AI 分析新聞素材"
 
     prompt = f"""以下是今日台灣財經新聞的 AI 分析摘要列表：
 
@@ -98,9 +101,17 @@ def get_daily_ai_summary(ai_news_df: pd.DataFrame) -> str:
             timeout=15,
         )
         resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"].strip()
+        text = resp.json()["choices"][0]["message"]["content"].strip()
+        return text, ""
+    except requests.exceptions.Timeout:
+        return "", "Groq API 逾時（15秒），請稍後重試"
+    except requests.exceptions.HTTPError as e:
+        status = e.response.status_code if e.response else "?"
+        if status == 429:
+            return "", "Groq 速率限制（429），請等 1 分鐘後點『重新生成』"
+        return "", f"Groq HTTP 錯誤 {status}，請稍後重試"
     except Exception as e:
-        return ""
+        return "", f"生成失敗：{e}"
 
 
 # ── 頁面設定 ──────────────────────────────────────────────────────────────────
@@ -394,12 +405,14 @@ with tab_dash:
                     "importance_score" if "importance_score" in ai_24h_df.columns
                     else "ai_score", ascending=False
                 )
-                summary_text = get_daily_ai_summary(ai_for_summary)
-            st.session_state["_daily_summary"] = summary_text
+                summary_text, summary_err = get_daily_ai_summary(ai_for_summary)
+            st.session_state["_daily_summary"]     = summary_text
+            st.session_state["_daily_summary_err"] = summary_err
             st.session_state["_summary_cache_key"] = cache_key
-            st.session_state["_summary_time"] = datetime.now(TZ_TW).strftime("%H:%M")
+            st.session_state["_summary_time"]      = datetime.now(TZ_TW).strftime("%H:%M")
         else:
             summary_text = st.session_state.get("_daily_summary", "")
+            summary_err  = st.session_state.get("_daily_summary_err", "")
 
         if summary_text:
             gen_time = st.session_state.get("_summary_time", "")
@@ -416,7 +429,16 @@ with tab_dash:
                 st.session_state.pop("_summary_cache_key", None)
                 st.rerun()
         else:
-            st.caption("AI 總結生成失敗，請稍後再試")
+            err_msg = summary_err or "未知錯誤"
+            st.markdown(
+                f'<div style="background:#FEF0F0;border-radius:10px;padding:14px 18px;'
+                f'color:#922;font-size:13px;border-left:4px solid #e55">'
+                f'⚠ AI 總結生成失敗：{err_msg}</div>',
+                unsafe_allow_html=True,
+            )
+            if st.button("🔄 重試", key="regen_summary"):
+                st.session_state.pop("_summary_cache_key", None)
+                st.rerun()
 
     # ── 今日 AI 重點新聞 ──────────────────────────────────────────────────────
     st.divider()
