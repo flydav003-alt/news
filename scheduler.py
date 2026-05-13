@@ -17,7 +17,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from analyzer import Analyzer
 from crawler import run_crawl
 from database import SessionLocal, save_article, log_crawl
-from groq_analyzer import should_use_ai, groq_analyze, _clear_ai_fields
+from groq_analyzer import should_use_ai, groq_analyze, _clear_ai_fields, _is_rate_limited
 
 logger    = logging.getLogger(__name__)
 _sched    = None
@@ -92,10 +92,11 @@ def crawl_and_save(enabled_names=None,
                 "is_geo":          r.is_geo,
             })
 
-            # ── Step 2：AI 分析（條件觸發 + 每批上限）─────────
+            # ── Step 2：AI 分析（條件觸發 + 每批上限 + 熔斷檢查）──
             has_tickers = bool(r.tickers)
             can_use_ai  = (
                 groq_key
+                and not _is_rate_limited()             # 熔斷中直接跳過整批
                 and ai_count < max_ai_per_run          # 每批上限
                 and should_use_ai(
                     r.sentiment_score, item["title"], r.is_geo, has_tickers
