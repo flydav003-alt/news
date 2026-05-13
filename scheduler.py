@@ -4,15 +4,15 @@ scheduler.py — 背景排程模組
 - 整合 Groq AI 選擇性分析（符合觸發條件才送）
 - 所有時間顯示台灣時間
 - [修改] should_use_ai 呼叫新增 has_tickers 參數
+- [修改] _get_groq_key 加環境變數備援，排程器固定帶 use_ai=True
 """
 
 import logging
+import os
 from datetime import datetime, timezone, timedelta
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
-
-import streamlit as st
 
 from analyzer import Analyzer
 from crawler import run_crawl
@@ -26,10 +26,23 @@ TZ_TW     = timezone(timedelta(hours=8))
 
 
 def _get_groq_key() -> str:
+    """
+    取得 Groq API Key。
+    優先從 st.secrets 讀（Streamlit Cloud 正常情況）；
+    若 Streamlit context 不存在（排程背景執行時），
+    退而從環境變數讀（Streamlit Cloud 會把 secrets 注入成環境變數）。
+    """
+    # 第一優先：st.secrets
     try:
-        return st.secrets.get("GROQ_API_KEY", "")
+        import streamlit as st
+        key = st.secrets.get("GROQ_API_KEY", "")
+        if key:
+            return key
     except Exception:
-        return ""
+        pass
+
+    # 備援：環境變數（排程器背景執行、或 Streamlit reboot 後 session 遺失時）
+    return os.environ.get("GROQ_API_KEY", "")
 
 
 def crawl_and_save(enabled_names=None,
@@ -49,6 +62,12 @@ def crawl_and_save(enabled_names=None,
 
     saved = skipped = ai_count = 0
     groq_key = _get_groq_key() if use_ai else ""
+
+    if use_ai:
+        if groq_key:
+            logger.info("Groq key 取得成功，AI 分析已啟用")
+        else:
+            logger.warning("use_ai=True 但 Groq key 為空，AI 分析將跳過")
 
     db = SessionLocal()
     try:
@@ -70,7 +89,6 @@ def crawl_and_save(enabled_names=None,
             })
 
             # ── Step 2：AI 分析（條件觸發）────────────────────
-            # [修改] 新增 has_tickers 參數，有個股代碼也觸發 AI
             has_tickers = bool(r.tickers)
             if groq_key and should_use_ai(
                 r.sentiment_score, item["title"], r.is_geo, has_tickers
@@ -135,13 +153,14 @@ def start_scheduler(interval_minutes: int = 30) -> None:
     _sched = BackgroundScheduler(timezone="Asia/Taipei")
     _sched.add_job(
         crawl_and_save,
-        trigger          = IntervalTrigger(minutes=interval_minutes),
-        id               = "news_crawl",
-        replace_existing = True,
+        trigger            = IntervalTrigger(minutes=interval_minutes),
+        id                 = "news_crawl",
+        replace_existing   = True,
         misfire_grace_time = 120,
+        kwargs             = {"use_ai": True},   # 排程永遠帶 AI，不依賴 session_state
     )
     _sched.start()
-    logger.info(f"排程啟動，每 {interval_minutes} 分鐘抓取一次")
+    logger.info(f"排程啟動，每 {interval_minutes} 分鐘抓取一次（AI 分析已強制開啟）")
 
 
 def update_interval(minutes: int) -> None:
@@ -149,7 +168,8 @@ def update_interval(minutes: int) -> None:
     if _sched and _sched.running:
         _sched.reschedule_job(
             "news_crawl",
-            trigger=IntervalTrigger(minutes=minutes),
+            trigger = IntervalTrigger(minutes=minutes),
+            kwargs  = {"use_ai": True},   # reschedule 也保留 AI 參數
         )
 
 
