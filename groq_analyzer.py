@@ -8,17 +8,32 @@ groq_analyzer.py — Groq AI 深度分析模組
 import json
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Optional
 
 import requests
-import streamlit as st
 
 logger = logging.getLogger(__name__)
 
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 MODEL        = "llama-3.3-70b-versatile"
-MAX_TOKENS   = 400   # 夠用且省 quota
-TEMPERATURE  = 0.1   # 盡量穩定輸出
+MAX_TOKENS   = 400
+TEMPERATURE  = 0.1
+
+# ── 全域熔斷器：429 後封鎖整批，冷卻 90 秒後才恢復 ──────────────────────────
+# Groq 免費版 RPM=30（每 2 秒一次），一旦觸發 429 需等完整冷卻週期
+_rate_limit_until: float = 0.0   # timestamp；在這時間之前不送任何請求
+COOLDOWN_SECONDS = 90            # 冷卻時間（秒），比 60 秒再多一點保險
+
+
+def _is_rate_limited() -> bool:
+    return time.time() < _rate_limit_until
+
+
+def _set_rate_limited() -> None:
+    global _rate_limit_until
+    _rate_limit_until = time.time() + COOLDOWN_SECONDS
+    logger.warning(f"Groq 429：啟動熔斷，冷卻 {COOLDOWN_SECONDS} 秒後恢復")
 
 
 # ── 觸發條件判斷 ──────────────────────────────────────────────────────────────
@@ -94,14 +109,23 @@ def groq_analyze(
 ) -> Optional[dict]:
     """
     呼叫 Groq API 分析單則新聞。
-    成功回傳 dict，失敗回傳 None。
+    成功回傳 dict；429 熔斷中或失敗回傳 None。
     """
+    # ── 熔斷器檢查：429 冷卻中直接跳過 ───────────────────────
+    if _is_rate_limited():
+        remaining = int(_rate_limit_until - time.time())
+        logger.info(f"Groq 熔斷中，跳過（剩餘冷卻 {remaining}s）")
+        return None
+
     if not api_key:
         try:
+            import streamlit as st
             api_key = st.secrets.get("GROQ_API_KEY", "")
         except Exception:
             pass
-
+    if not api_key:
+        import os
+        api_key = os.environ.get("GROQ_API_KEY", "")
     if not api_key:
         logger.warning("Groq API Key 未設定，跳過 AI 分析")
         return None
@@ -136,31 +160,34 @@ def groq_analyze(
 
         result = json.loads(raw_text)
 
-        # 驗證必要欄位
         required = {"sentiment", "score", "summary", "affected_tickers",
                     "reason", "confidence"}
         if not required.issubset(result.keys()):
             logger.warning(f"Groq 回傳欄位不完整：{result}")
             return None
 
-        # 正規化
         result["sentiment"] = result["sentiment"].lower()
         if result["sentiment"] not in ("bullish", "bearish", "neutral"):
             result["sentiment"] = "neutral"
-        result["score"] = max(-10, min(10, float(result["score"])))
+        result["score"]      = max(-10, min(10, float(result["score"])))
         result["confidence"] = result["confidence"].lower()
 
-        logger.info(f"Groq 分析完成：{title[:30]}… → {result['sentiment']} ({result['score']:+.1f})")
+        logger.info(
+            f"Groq 分析完成：{title[:30]}… → {result['sentiment']} ({result['score']:+.1f})"
+        )
+
+        # ── 成功後依 RPM=30 限制，每次請求間隔至少 2 秒 ──────
+        time.sleep(2)
         return result
 
     except requests.exceptions.Timeout:
         logger.error("Groq API 超時")
     except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 429:
-            logger.warning("Groq 達到速率限制，等待後重試")
-            time.sleep(5)
+        status = e.response.status_code if e.response else 0
+        if status == 429:
+            _set_rate_limited()   # 啟動熔斷，這批剩餘新聞全部跳過
         else:
-            logger.error(f"Groq HTTP 錯誤：{e}")
+            logger.error(f"Groq HTTP 錯誤 {status}：{e}")
     except json.JSONDecodeError as e:
         logger.error(f"Groq 回傳 JSON 解析失敗：{e}")
     except Exception as e:
