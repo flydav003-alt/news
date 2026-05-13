@@ -42,6 +42,67 @@ def now_tw_str() -> str:
     return datetime.now(TZ_TW).strftime("%H:%M:%S")
 
 
+# ── 今日 AI 市場總結（呼叫 Groq 一次，產出 100 字內摘要）────────────────────
+def get_daily_ai_summary(ai_news_df: pd.DataFrame) -> str:
+    """
+    把今日 AI 分析新聞的標題 + AI摘要餵給 Groq，
+    請它產出一段 100 字內的台灣股市今日總結。
+    結果 cache 在 session_state，避免重複呼叫。
+    """
+    import os, requests, json as _json
+
+    # 拿 key
+    groq_key = ""
+    try:
+        groq_key = st.secrets.get("GROQ_API_KEY", "")
+    except Exception:
+        pass
+    if not groq_key:
+        groq_key = os.environ.get("GROQ_API_KEY", "")
+    if not groq_key:
+        return ""
+
+    # 整理新聞素材（最多取 15 則，避免 prompt 過長）
+    rows = ai_news_df.head(15)
+    lines = []
+    for _, r in rows.iterrows():
+        sent_label = {"bullish": "利多", "bearish": "利空"}.get(
+            r.get("ai_sentiment", ""), "中性")
+        summary = r.get("ai_summary") or r.get("title", "")
+        lines.append(f"[{sent_label}] {summary}")
+    news_text = "\n".join(lines)
+
+    prompt = f"""以下是今日台灣財經新聞的 AI 分析摘要列表：
+
+{news_text}
+
+請根據以上資訊，用繁體中文寫一段「今日台灣股市 AI 總結」，格式要求：
+- 100字以內
+- 先說整體偏多或偏空，再點出最關鍵的 1~2 個主題
+- 語氣客觀簡潔，像財經播報員
+- 不要列點，直接一段話"""
+
+    try:
+        resp = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {groq_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "llama-3.3-70b-versatile",
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 200,
+                "temperature": 0.3,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        return ""
+
+
 # ── 頁面設定 ──────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="FinNews AI — 財經新聞分析",
@@ -65,7 +126,43 @@ st.markdown("""
       color: #1B7A34 !important;
   }
   .stProgress > div > div > div > div { background-color: #C0392B; }
-  /* 今日重點卡片 */
+  /* AI 今日總結橫幅 */
+  .ai-daily-summary {
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 60%, #0f3460 100%);
+      border-radius: 12px;
+      padding: 18px 24px;
+      margin-bottom: 4px;
+      color: #fff;
+      position: relative;
+      overflow: hidden;
+  }
+  .ai-daily-summary::before {
+      content: "✦";
+      position: absolute;
+      right: 20px; top: 14px;
+      font-size: 28px;
+      opacity: 0.15;
+  }
+  .ai-daily-summary-label {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 1.5px;
+      color: #7eb8f7;
+      margin-bottom: 8px;
+      text-transform: uppercase;
+  }
+  .ai-daily-summary-text {
+      font-size: 15px;
+      line-height: 1.8;
+      color: #f0f4ff;
+      font-weight: 400;
+  }
+  .ai-daily-summary-footer {
+      font-size: 11px;
+      color: #8899bb;
+      margin-top: 10px;
+  }
+  /* 今日重點卡片（升級版） */
   .key-news-card {
       background: #fff;
       border-radius: 10px;
@@ -246,75 +343,138 @@ with tab_dash:
               delta_color="inverse")
     c4.metric("🏭 涵蓋類股", len(secs) if not secs.empty else 0)
 
-    # ── [新增] 今日重點區塊 ────────────────────────────────────────────────────
+    # ── 今日 AI 市場總結 ──────────────────────────────────────────────────────
     st.divider()
-    st.markdown("### 🔑 今日重點")
-    st.caption("高影響力利多／利空新聞，依重要性排序（中性與低分雜訊已過濾）")
+    st.markdown("### ✦ 今日 AI 市場總結")
 
     if df.empty:
         st.info("請先點選「立即抓取新聞」")
     else:
-        # 撈出非中性 + importance_score >= 2.0，最多顯示 12 則
-        if "importance_score" in df.columns:
-            key_df = (
-                df[
-                    (df["sentiment"] != "neutral") &
-                    (df["importance_score"] >= 2.0)
-                ]
-                .sort_values("importance_score", ascending=False)
-                .head(12)
-            )
-        else:
-            # 相容舊資料（沒有 importance_score 欄位時，用 |sentiment_score| 代替）
-            key_df = (
-                df[df["sentiment"] != "neutral"]
-                .assign(_abs=df["sentiment_score"].abs())
-                .sort_values("_abs", ascending=False)
-                .head(12)
-            )
+        # 取有 AI 摘要的新聞做為素材
+        ai_for_summary = df[
+            df["ai_summary"].notna() & (df["ai_summary"] != "")
+        ].sort_values("importance_score" if "importance_score" in df.columns
+                      else "sentiment_score", ascending=False)
 
-        if key_df.empty:
-            st.info("目前沒有高影響力新聞，或資料還不夠多——可嘗試調低重要性門檻或先抓取新聞。")
+        if not st.session_state["groq_ok"]:
+            st.markdown(
+                '<div style="background:#FEF9E7;border-radius:10px;padding:14px 18px;'
+                'color:#7D6608;font-size:13px">'
+                '⚠ 需要設定 Groq API Key 才能顯示 AI 市場總結</div>',
+                unsafe_allow_html=True,
+            )
+        elif ai_for_summary.empty:
+            st.markdown(
+                '<div style="background:#F7F7F7;border-radius:10px;padding:14px 18px;'
+                'color:#888;font-size:13px">'
+                '尚無 AI 分析資料，請先抓取新聞並啟用 AI 深度分析</div>',
+                unsafe_allow_html=True,
+            )
         else:
-            # 分左右兩欄顯示
+            # cache key：用最新一則 AI 新聞的時間，避免每次 rerun 重複呼叫
+            latest_ts = str(ai_for_summary.iloc[0].get("published_at", ""))
+            cache_key = f"daily_summary_{latest_ts}"
+
+            if st.session_state.get("_summary_cache_key") != cache_key:
+                # 第一次或資料有更新才重新呼叫 Groq
+                with st.spinner("AI 正在生成今日市場總結…"):
+                    summary_text = get_daily_ai_summary(ai_for_summary)
+                st.session_state["_daily_summary"] = summary_text
+                st.session_state["_summary_cache_key"] = cache_key
+                st.session_state["_summary_time"] = datetime.now(TZ_TW).strftime("%H:%M")
+            else:
+                summary_text = st.session_state.get("_daily_summary", "")
+
+            if summary_text:
+                gen_time = st.session_state.get("_summary_time", "")
+                ai_count_for_summary = len(ai_for_summary)
+                st.markdown(
+                    f'<div class="ai-daily-summary">'
+                    f'<div class="ai-daily-summary-label">✦ Groq AI · 今日市場總結</div>'
+                    f'<div class="ai-daily-summary-text">{summary_text}</div>'
+                    f'<div class="ai-daily-summary-footer">'
+                    f'根據 {ai_count_for_summary} 則 AI 分析新聞生成　·　{gen_time} 台灣時間</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+                # 手動重新整理按鈕
+                if st.button("🔄 重新生成總結", key="regen_summary"):
+                    st.session_state.pop("_summary_cache_key", None)
+                    st.rerun()
+            else:
+                st.caption("AI 總結生成失敗，請稍後再試")
+
+    # ── 今日 AI 重點新聞 ──────────────────────────────────────────────────────
+    st.divider()
+    st.markdown("### 🔑 今日 AI 重點新聞")
+    st.caption("僅顯示有 AI 分析的高影響力新聞，依重要性排序")
+
+    if df.empty:
+        st.info("請先點選「立即抓取新聞」")
+    else:
+        # 只取有 AI 摘要 + 非中性 + importance >= 2.0
+        has_imp = "importance_score" in df.columns
+        ai_key_df = df[
+            df["ai_summary"].notna() & (df["ai_summary"] != "") &
+            (df["ai_sentiment"].isin(["bullish", "bearish"]))
+        ]
+        if has_imp:
+            ai_key_df = ai_key_df[ai_key_df["importance_score"] >= 2.0]
+            ai_key_df = ai_key_df.sort_values("importance_score", ascending=False)
+        else:
+            ai_key_df = ai_key_df.sort_values("ai_score", key=abs, ascending=False)
+        ai_key_df = ai_key_df.head(12)
+
+        if ai_key_df.empty:
+            st.info("目前沒有符合條件的 AI 重點新聞，請先抓取並啟用 AI 分析。")
+        else:
             left_col, right_col = st.columns(2)
-            for i, (_, row) in enumerate(key_df.iterrows()):
-                is_bull    = row["sentiment"] == "bullish"
+            for i, (_, row) in enumerate(ai_key_df.iterrows()):
+                # 用 AI 情緒決定顏色（比關鍵字更準）
+                ai_sent    = row.get("ai_sentiment", "neutral")
+                is_bull    = ai_sent == "bullish"
                 color_cls  = "bullish" if is_bull else "bearish"
                 icon       = "🔴" if is_bull else "🟢"
-                label      = row.get("sentiment_label", "利多" if is_bull else "利空")
+                ai_score   = row.get("ai_score", 0)
+                conf       = row.get("ai_confidence", "")
+                conf_label = {"high": "高信心", "medium": "中信心", "low": "低信心"}.get(conf, "")
                 imp        = row.get("importance_score", 0)
-                # 優先顯示 AI 摘要，否則顯示原始摘要前 80 字
-                summary    = (row.get("ai_summary") or
-                              row.get("summary", "")[:80])
-                ticker_str = row.get("tickers", "") or row.get("ai_affected_tickers", "")
-                tickers    = [t.strip() for t in ticker_str.split(",") if t.strip()]
-                ticker_tag = (
-                    " ".join(
-                        f'<span style="background:#F0F0F0;border-radius:4px;'
-                        f'padding:1px 6px;font-size:11px;color:#333">{t}</span>'
-                        for t in tickers[:3]
-                    )
-                    if tickers else ""
-                )
-                # 重要性顏色點
                 imp_color  = "#C0392B" if imp >= 4 else "#E67E22" if imp >= 3 else "#3498DB"
-                pub_str    = ""
+
+                # AI 摘要（主體）
+                ai_summary = row.get("ai_summary", "")
+                ai_reason  = row.get("ai_reason", "")
+
+                # 受影響個股：優先 AI 判斷，補關鍵字
+                ticker_str = row.get("ai_affected_tickers", "") or row.get("tickers", "")
+                tickers    = [t.strip() for t in ticker_str.split(",") if t.strip()]
+                ticker_tag = " ".join(
+                    f'<span style="background:#F0F0F0;border-radius:4px;'
+                    f'padding:1px 6px;font-size:11px;color:#333;font-weight:600">{t}</span>'
+                    for t in tickers[:4]
+                ) if tickers else ""
+
+                pub_str = ""
                 if row.get("published_at") is not None:
                     try:
                         pub_str = row["published_at"].strftime("%m/%d %H:%M")
                     except Exception:
                         pass
 
+                score_color = "#C0392B" if ai_score > 0 else "#1D9E75"
+                score_str   = f"+{ai_score:.1f}" if ai_score > 0 else f"{ai_score:.1f}"
+
                 card_html = f"""
                 <div class="key-news-card {color_cls}">
-                  <div class="key-news-card-title">
-                    {icon} {row['title']}
-                  </div>
-                  <div class="key-news-card-summary">{summary}</div>
+                  <div class="key-news-card-title">{icon} {row['title']}</div>
+                  <div class="key-news-card-summary">{ai_summary}</div>
+                  {'<div class="key-news-card-summary" style="color:#888;font-size:11px;margin-top:3px">📌 ' + ai_reason + '</div>' if ai_reason else ''}
                   <div class="key-news-card-meta">
                     <span class="importance-dot" style="background:{imp_color}"></span>
-                    重要性 {imp:.1f}　{label}　{row.get('source','')}
+                    重要性 {imp:.1f}
+                    　<span style="color:{score_color};font-weight:600">AI {score_str}</span>
+                    {'　<span style="background:#EEE;border-radius:3px;padding:1px 5px;font-size:10px">' + conf_label + '</span>' if conf_label else ''}
+                    　{row.get('source','')}
                     {'　' + ticker_tag if ticker_tag else ''}
                     {'　' + pub_str if pub_str else ''}
                   </div>
