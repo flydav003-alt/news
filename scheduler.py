@@ -48,9 +48,13 @@ def _get_groq_key() -> str:
 def crawl_and_save(enabled_names=None,
                    custom_bull=None,
                    custom_bear=None,
-                   use_ai: bool = True) -> dict:
+                   use_ai: bool = True,
+                   max_ai_per_run: int = 20) -> dict:
     """
     完整流程：抓取 → 關鍵字分析 → AI 分析（選擇性）→ 存庫
+
+    max_ai_per_run：每次執行最多送幾則給 Groq（避免單次跑太久）
+    預設 20 則，每則約 1~2 秒，整體約 20~40 秒完成。
     """
     analyzer = Analyzer(
         extra_bullish=custom_bull,
@@ -88,11 +92,16 @@ def crawl_and_save(enabled_names=None,
                 "is_geo":          r.is_geo,
             })
 
-            # ── Step 2：AI 分析（條件觸發）────────────────────
+            # ── Step 2：AI 分析（條件觸發 + 每批上限）─────────
             has_tickers = bool(r.tickers)
-            if groq_key and should_use_ai(
-                r.sentiment_score, item["title"], r.is_geo, has_tickers
-            ):
+            can_use_ai  = (
+                groq_key
+                and ai_count < max_ai_per_run          # 每批上限
+                and should_use_ai(
+                    r.sentiment_score, item["title"], r.is_geo, has_tickers
+                )
+            )
+            if can_use_ai:
                 ai = groq_analyze(
                     title    = item["title"],
                     summary  = item.get("summary", ""),
@@ -108,12 +117,13 @@ def crawl_and_save(enabled_names=None,
                     item["ai_reason"]           = ai["reason"]
                     item["ai_confidence"]       = ai["confidence"]
                     ai_count += 1
+                    # 429 速率限制時 groq_analyze 內部已 sleep(5)，這裡不再額外等待
                 else:
                     _clear_ai_fields(item)
             else:
                 _clear_ai_fields(item)
 
-            # ── Step 3：存庫（importance_score 在 save_article 內自動計算）──
+            # ── Step 3：存庫 ───────────────────────────────────
             if save_article(db, item):
                 saved += 1
             else:
@@ -126,6 +136,10 @@ def crawl_and_save(enabled_names=None,
                       count     = lg["count"],
                       new_saved = saved,
                       skipped   = skipped)
+
+        logger.info(
+            f"完成：抓取 {len(articles)} 則，新增 {saved}，跳過 {skipped}，AI 分析 {ai_count} 則"
+        )
 
     except Exception as e:
         logger.error(f"存庫失敗：{e}")
