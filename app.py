@@ -42,11 +42,11 @@ def now_tw_str() -> str:
     return datetime.now(TZ_TW).strftime("%H:%M:%S")
 
 
-# ── 今日 AI 市場總結（呼叫 Groq 一次，產出 100 字內摘要）────────────────────
+# ── 今日 AI 市場總結（呼叫 Groq 一次，產出 300 字內摘要）────────────────────
 def get_daily_ai_summary(ai_news_df: pd.DataFrame) -> tuple[str, str]:
     """
     把今日 AI 分析新聞的標題 + AI摘要餵給 Groq，
-    請它產出一段 100 字內的台灣股市今日總結。
+    請它產出一段 300 字內的台灣股市今日總結。
     回傳 (summary_text, error_msg)，成功時 error_msg 為空字串。
     """
     import os, requests, json as _json
@@ -80,8 +80,10 @@ def get_daily_ai_summary(ai_news_df: pd.DataFrame) -> tuple[str, str]:
 {news_text}
 
 請根據以上資訊，用繁體中文寫一段「今日台灣股市 AI 總結」，格式要求：
-- 100字以內
-- 先說整體偏多或偏空，再點出最關鍵的 1~2 個主題
+- 300字以內
+- 第一句先說整體偏多或偏空及原因
+- 點出今日最關鍵的 2~3 個主題或事件，各說明其影響方向
+- 若有值得關注的個股或類股，簡要點名
 - 語氣客觀簡潔，像財經播報員
 - 不要列點，直接一段話"""
 
@@ -95,7 +97,7 @@ def get_daily_ai_summary(ai_news_df: pd.DataFrame) -> tuple[str, str]:
             json={
                 "model": "llama-3.3-70b-versatile",
                 "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 200,
+                "max_tokens": 600,
                 "temperature": 0.3,
             },
             timeout=15,
