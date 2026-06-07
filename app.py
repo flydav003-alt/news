@@ -130,16 +130,12 @@ html, body, [class*="css"], .stApp {
   color: #1A1A2E !important;
 }
 
-/* ── 壓縮 Streamlit 原生 header ── */
+/* ── 完全移除 Streamlit 原生 header 佔用空間 ── */
 header[data-testid="stHeader"] {
-  height: 0px !important;
-  min-height: 0px !important;
-  padding: 0 !important;
-  overflow: hidden !important;
-  visibility: hidden !important;
+  display: none !important;
 }
 
-/* 隱藏 sidebar toggle */
+/* ── 隱藏 sidebar 及所有 toggle ── */
 section[data-testid="stSidebar"],
 section[data-testid="stSidebar"] > div,
 button[data-testid="collapsedControl"],
@@ -148,11 +144,21 @@ button[aria-label="Open sidebar"] {
   display: none !important;
 }
 
-/* ── 減少頂部空白 ── */
+/* ── 壓到最頂，消除 header 留下的空白 ── */
 .main .block-container {
-  padding-top: 8px !important;
+  padding-top: 6px !important;
   padding-bottom: 20px !important;
   max-width: 1400px !important;
+}
+
+/* Streamlit 有時在 appview-container 也加 padding */
+[data-testid="stAppViewContainer"] > section {
+  padding-top: 0 !important;
+}
+
+/* 早期版本的 main wrapper */
+.appview-container .main .block-container {
+  padding-top: 6px !important;
 }
 
 /* ── 緊湊 topbar ── */
