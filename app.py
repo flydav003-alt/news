@@ -103,7 +103,7 @@ st.set_page_config(
     page_title="FinNews AI — 財經新聞分析",
     page_icon="📈",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 CSS = """
@@ -117,37 +117,73 @@ html, body, [class*="css"], .stApp {
   color: #1A1A2E !important;
 }
 
-/* ── Streamlit header/toolbar 統一白色 ── */
+/* ── 完全隱藏 Sidebar 與 Toggle ── */
+section[data-testid="stSidebar"],
+section[data-testid="stSidebar"] > div,
+button[data-testid="collapsedControl"],
+button[aria-label="Close sidebar"],
+button[aria-label="Open sidebar"] {
+  display: none !important;
+}
+
+/* ── Streamlit header 白色 ── */
 header[data-testid="stHeader"] {
   background: #FFFFFF !important;
   border-bottom: 1px solid #E2E8F0 !important;
 }
 header[data-testid="stHeader"] * { color: #374151 !important; }
-button[data-testid="baseButton-headerNoPadding"],
-button[kind="header"] {
-  color: #374151 !important;
-  background: transparent !important;
-}
-.stDeployButton { color: #374151 !important; }
 
-/* ── Sidebar toggle 按鈕 ── */
-button[data-testid="collapsedControl"],
-button[aria-label="Close sidebar"],
-button[aria-label="Open sidebar"] {
-  background: #FFFFFF !important;
-  border: 1px solid #E2E8F0 !important;
-  border-radius: 8px !important;
-  color: #374151 !important;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.08) !important;
+/* ── 頂部控制列 ── */
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #FFFFFF;
+  border: 1px solid #E2E8F0;
+  border-radius: 12px;
+  padding: 10px 18px;
+  margin-bottom: 16px;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.06);
 }
-
-/* ── Sidebar ── */
-section[data-testid="stSidebar"] {
-  background: #FFFFFF !important;
-  border-right: 1px solid #E2E8F0 !important;
+.topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 14px;
 }
-section[data-testid="stSidebar"] > div {
-  background: #FFFFFF !important;
+.topbar-logo {
+  font-size: 16px;
+  font-weight: 700;
+  color: #1A1A2E;
+  white-space: nowrap;
+}
+.topbar-status-ok {
+  font-size: 11px;
+  font-weight: 600;
+  color: #16A34A;
+  background: #F0FDF4;
+  border: 1px solid #BBF7D0;
+  border-radius: 20px;
+  padding: 2px 10px;
+}
+.topbar-status-warn {
+  font-size: 11px;
+  font-weight: 600;
+  color: #D97706;
+  background: #FFFBEB;
+  border: 1px solid #FDE68A;
+  border-radius: 20px;
+  padding: 2px 10px;
+}
+.topbar-time {
+  font-size: 11px;
+  color: #94A3B8;
+  font-family: 'JetBrains Mono', monospace;
+  white-space: nowrap;
+}
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 /* ── Main content ── */
@@ -681,27 +717,38 @@ def render_news(df, max_items=120):
 
 
 # ─────────────────────────────────────────────
-# Sidebar
+# 頂部控制列（取代 Sidebar）
 # ─────────────────────────────────────────────
-with st.sidebar:
-    st.markdown('<div class="sb-title">📈 FinNews AI</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sb-sub">台灣財經新聞智慧分析</div>', unsafe_allow_html=True)
+_groq_ok = st.session_state["groq_ok"]
+_status_html = (
+    '<span class="topbar-status-ok">&#9679; Groq AI 已啟用</span>'
+    if _groq_ok else
+    '<span class="topbar-status-warn">&#9888; 純關鍵字模式</span>'
+)
+_next_run = next_run_time()
+_last_upd = st.session_state["last_update"]
 
-    if st.session_state["groq_ok"]:
-        st.markdown('<div class="sb-pill-ok">&#9679; Groq AI 已啟用</div>', unsafe_allow_html=True)
-    else:
-        st.markdown('<div class="sb-pill-warn">&#9888; 純關鍵字模式</div>', unsafe_allow_html=True)
+st.markdown(f"""
+<div class="topbar">
+  <div class="topbar-left">
+    <span class="topbar-logo">📈 FinNews AI</span>
+    {_status_html}
+    <span class="topbar-time">下次更新 {_next_run} ｜ 最後 {_last_upd}</span>
+  </div>
+</div>
+""", unsafe_allow_html=True)
 
-    st.caption(f"下次更新：{next_run_time()} ｜ 最後：{st.session_state['last_update']}")
-    st.divider()
-
+# 控制元件：checkbox + 按鈕放同一列
+_ctrl_col1, _ctrl_col2, _ctrl_col3 = st.columns([2, 1, 4])
+with _ctrl_col1:
     st.session_state["use_ai"] = st.checkbox(
         "啟用 AI 深度分析",
         value=st.session_state["use_ai"],
-        disabled=not st.session_state["groq_ok"],
+        disabled=not _groq_ok,
+        key="use_ai_cb",
     )
-
-    if st.button("🔄 立即抓取新聞", use_container_width=True, type="primary"):
+with _ctrl_col2:
+    if st.button("🔄 立即抓取新聞", type="primary", use_container_width=True):
         with st.spinner("抓取＋分析中，約 30～60 秒…"):
             result = crawl_and_save(
                 enabled_names=st.session_state["enabled_srcs"],
@@ -714,34 +761,8 @@ with st.sidebar:
         ai_info = f"｜AI {result.get('ai_count', 0)} 則" if st.session_state["use_ai"] else ""
         st.success(f"✅ 新增 **{result['saved']}** 則｜去重 {result['skipped']} 則{ai_info}｜{result['elapsed']}s")
         st.rerun()
-
-    st.divider()
-
-    _db = SessionLocal()
-    _c  = get_sentiment_counts(_db)
-    _db.close()
-    _tot  = sum(_c.values()) or 1
-    _bull = _c.get("bullish", 0)
-    _bear = _c.get("bearish", 0)
-    _pct  = int(_bull / _tot * 100)
-
-    st.markdown(f"""
-    <div class="sb-stat">
-      <span class="sb-stat-num">{_tot}</span>
-      <span class="sb-stat-label">資料庫新聞總數</span>
-      <div class="sb-bar-bg"><div class="sb-bar-bull" style="width:{_pct}%"></div></div>
-      <span class="sb-legend">
-        <span class="sb-legend-bull">&#9650; 利多 {_bull}</span>
-        &nbsp;/&nbsp;
-        <span class="sb-legend-bear">&#9660; 利空 {_bear}</span>
-      </span>
-    </div>
-    """, unsafe_allow_html=True)
-
-    st.divider()
-    st.caption("📡 鉅亨網 · MoneyDJ · Yahoo奇摩")
-    st.caption("　　經濟日報 · 工商時報 · 科技新報")
-    st.caption("✦ AI：Groq Llama 3.3 70B")
+with _ctrl_col3:
+    pass  # 空白讓按鈕靠左
 
 
 # ─────────────────────────────────────────────
