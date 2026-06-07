@@ -130,36 +130,31 @@ html, body, [class*="css"], .stApp {
   color: #1A1A2E !important;
 }
 
-/* ── 完全移除 Streamlit 原生 header 佔用空間 ── */
-header[data-testid="stHeader"] {
-  display: none !important;
-}
+/* ── 完全移除 header ── */
+header[data-testid="stHeader"] { display: none !important; }
 
-/* ── 隱藏 sidebar 及所有 toggle ── */
+/* ── 隱藏 sidebar ── */
 section[data-testid="stSidebar"],
 section[data-testid="stSidebar"] > div,
 button[data-testid="collapsedControl"],
 button[aria-label="Close sidebar"],
-button[aria-label="Open sidebar"] {
-  display: none !important;
-}
+button[aria-label="Open sidebar"] { display: none !important; }
 
-/* ── 壓到最頂，消除 header 留下的空白 ── */
-.main .block-container {
+/* ── 消除所有上層容器的 padding — 多層保險 ── */
+html, body { margin: 0 !important; padding: 0 !important; }
+[data-testid="stAppViewContainer"] { padding-top: 0 !important; margin-top: 0 !important; }
+[data-testid="stAppViewContainer"] > section.main { padding-top: 0 !important; }
+[data-testid="stMain"] { padding-top: 0 !important; }
+.main .block-container,
+[data-testid="stMain"] .block-container,
+section.main .block-container {
   padding-top: 6px !important;
   padding-bottom: 20px !important;
   max-width: 1400px !important;
+  margin-top: 0 !important;
 }
-
-/* Streamlit 有時在 appview-container 也加 padding */
-[data-testid="stAppViewContainer"] > section {
-  padding-top: 0 !important;
-}
-
-/* 早期版本的 main wrapper */
-.appview-container .main .block-container {
-  padding-top: 6px !important;
-}
+.appview-container { padding-top: 0 !important; }
+.appview-container .main { padding-top: 0 !important; }
 
 /* ── 緊湊 topbar ── */
 .topbar {
@@ -250,8 +245,9 @@ button[aria-label="Open sidebar"] {
   border-radius: 7px; font-weight: 600; font-size: 13px;
   border: 1px solid #E2E8F0; background: #FFFFFF; color: #374151;
   transition: all 0.15s; box-shadow: 0 1px 2px rgba(0,0,0,0.05);
-  height: 36px !important; padding: 0 14px !important;
+  height: 36px !important; padding: 0 24px !important;
   white-space: nowrap !important;
+  min-width: 120px !important;
 }
 .stButton > button:hover { background: #F1F5F9; border-color: #CBD5E1; }
 .stButton > button[kind="primary"] {
