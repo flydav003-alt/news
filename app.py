@@ -31,6 +31,36 @@ def now_tw_str():
     return datetime.now(TZ_TW).strftime("%H:%M:%S")
 
 
+def relative_time(dt) -> str:
+    """將 datetime 轉成「3分鐘前」、「2小時前」等相對時間字串（台灣時區）"""
+    if dt is None:
+        return ""
+    try:
+        now = datetime.now(TZ_TW)
+        if hasattr(dt, "tzinfo") and dt.tzinfo is not None:
+            diff = now - dt.astimezone(TZ_TW)
+        else:
+            diff = now - dt
+        secs = diff.total_seconds()
+        if secs < 0:
+            secs = 0
+        if secs < 60:
+            return "剛剛"
+        elif secs < 3600:
+            return f"{int(secs // 60)}分鐘前"
+        elif secs < 86400:
+            return f"{int(secs // 3600)}小時前"
+        elif secs < 86400 * 2:
+            return "昨天"
+        else:
+            try:
+                return dt.astimezone(TZ_TW).strftime("%m/%d %H:%M")
+            except Exception:
+                return dt.strftime("%m/%d %H:%M")
+    except Exception:
+        return ""
+
+
 def filter_12h(df):
     """只保留 12 小時內新聞"""
     if df is None or df.empty:
@@ -445,7 +475,192 @@ hr { border-color: #E2E8F0 !important; margin: 10px 0 !important; }
 
 /* ── 篩選列整體縮小間距 ── */
 .filter-row .stSelectbox, .filter-row .stTextInput { margin-bottom: 0 !important; }
+
+/* ══════════════════════════════════════
+   ② 置頂高分新聞橫幅
+══════════════════════════════════════ */
+.nw-pinned-bull {
+  background: linear-gradient(135deg, #FEF2F2 0%, #fff5f5 100%);
+  border: 1.5px solid #FECACA;
+  border-left: 5px solid #DC2626;
+  border-radius: 10px;
+  padding: 12px 16px;
+  margin-bottom: 8px;
+  box-shadow: 0 2px 8px rgba(220,38,38,0.1);
+}
+.nw-pinned-bear {
+  background: linear-gradient(135deg, #F0FDF4 0%, #f5fff8 100%);
+  border: 1.5px solid #BBF7D0;
+  border-left: 5px solid #16A34A;
+  border-radius: 10px;
+  padding: 12px 16px;
+  margin-bottom: 8px;
+  box-shadow: 0 2px 8px rgba(22,163,74,0.1);
+}
+.nw-pinned-label {
+  font-size: 9px; font-weight: 700; letter-spacing: 1px;
+  text-transform: uppercase; margin-bottom: 6px; display: inline-block;
+}
+.nw-pinned-bull .nw-pinned-label { color: #DC2626; background: #FEE2E2; padding: 2px 8px; border-radius: 4px; }
+.nw-pinned-bear .nw-pinned-label { color: #16A34A; background: #DCFCE7; padding: 2px 8px; border-radius: 4px; }
+.nw-pinned-title {
+  font-size: 15px; font-weight: 700; line-height: 1.5; margin-bottom: 6px;
+}
+.nw-pinned-bull .nw-pinned-title a { color: #991B1B; text-decoration: none; }
+.nw-pinned-bear .nw-pinned-title a { color: #166534; text-decoration: none; }
+.nw-pinned-bull .nw-pinned-title a:hover { text-decoration: underline; }
+.nw-pinned-bear .nw-pinned-title a:hover { text-decoration: underline; }
+.nw-pinned-score-bull {
+  font-size: 12px; font-weight: 800; color: #DC2626;
+  font-family: 'JetBrains Mono', monospace;
+}
+.nw-pinned-score-bear {
+  font-size: 12px; font-weight: 800; color: #16A34A;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+/* ══════════════════════════════════════
+   ⑥ 已讀灰化
+══════════════════════════════════════ */
+.nw-title a.nw-read {
+  color: #CBD5E1 !important;
+  text-decoration: line-through;
+}
+.nw.nw-read-card {
+  opacity: 0.55;
+}
+
+/* ══════════════════════════════════════
+   A 篩選快捷 Chip
+══════════════════════════════════════ */
+.chip-bar {
+  display: flex; gap: 6px; flex-wrap: wrap;
+  margin-bottom: 10px; align-items: center;
+}
+.chip {
+  font-size: 12px; font-weight: 600;
+  padding: 4px 13px; border-radius: 20px;
+  border: 1px solid #E2E8F0;
+  background: #FFFFFF; color: #64748B;
+  cursor: pointer; transition: all 0.15s;
+  user-select: none; white-space: nowrap;
+}
+.chip:hover { background: #F1F5F9; border-color: #CBD5E1; }
+.chip.chip-bull.active { background: #FEF2F2; border-color: #FECACA; color: #DC2626; }
+.chip.chip-bear.active { background: #F0FDF4; border-color: #BBF7D0; color: #16A34A; }
+.chip.chip-ai.active   { background: #FFFBEB; border-color: #FDE68A; color: #D97706; }
+.chip.chip-geo.active  { background: #FFF7ED; border-color: #FED7AA; color: #EA580C; }
+.chip.chip-all.active  { background: #1A1A2E; border-color: #1A1A2E; color: #FFFFFF; }
+
+/* ══════════════════════════════════════
+   ⑤ Heat Bar 新聞密度
+══════════════════════════════════════ */
+.heat-bar-wrap {
+  display: flex; gap: 2px; align-items: flex-end;
+  height: 28px; margin-bottom: 10px;
+  padding: 0 2px;
+}
+.heat-cell {
+  flex: 1; border-radius: 2px;
+  min-width: 6px; cursor: default;
+  transition: opacity 0.15s;
+  position: relative;
+}
+.heat-cell:hover { opacity: 0.75; }
+.heat-bar-labels {
+  display: flex; gap: 2px; font-size: 9px;
+  color: #CBD5E1; font-family: 'JetBrains Mono', monospace;
+  margin-bottom: 4px; padding: 0 2px;
+}
+.heat-bar-labels span { flex: 1; text-align: center; }
+
+/* ══════════════════════════════════════
+   B AI摘要展開/收合
+══════════════════════════════════════ */
+.nw-ai-toggle {
+  font-size: 10px; color: #D97706; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 3px;
+  padding: 1px 6px; border: 1px solid #FDE68A;
+  background: #FFFBEB; border-radius: 3px;
+  font-weight: 600; user-select: none;
+  vertical-align: middle; margin-left: 4px;
+}
+.nw-ai-toggle:hover { background: #FEF3C7; }
+.nw-ai-box { display: none; }
+.nw-ai-box.open { display: block; }
 </style>
+
+<script>
+/* ── 已讀標記：頁面載入時套用 ── */
+(function(){
+  function applyRead(){
+    try {
+      var read = JSON.parse(localStorage.getItem('fn_read') || '{}');
+      document.querySelectorAll('.nw-title a').forEach(function(a){
+        var key = a.href.split('?')[0];
+        if(read[key]){
+          a.classList.add('nw-read');
+          var card = a.closest('.nw');
+          if(card) card.classList.add('nw-read-card');
+        }
+      });
+    } catch(e){}
+  }
+  applyRead();
+  var obs = new MutationObserver(applyRead);
+  obs.observe(document.body, {childList:true, subtree:true});
+})();
+
+/* ── 點擊新聞連結時標記已讀 ── */
+document.addEventListener('click', function(e){
+  var a = e.target.closest('.nw-title a');
+  if(!a) return;
+  try {
+    var read = JSON.parse(localStorage.getItem('fn_read') || '{}');
+    var key = a.href.split('?')[0];
+    read[key] = Date.now();
+    /* 只保留最近 500 筆 */
+    var keys = Object.keys(read);
+    if(keys.length > 500){
+      keys.sort(function(x,y){ return read[x]-read[y]; });
+      keys.slice(0, keys.length-500).forEach(function(k){ delete read[k]; });
+    }
+    localStorage.setItem('fn_read', JSON.stringify(read));
+    a.classList.add('nw-read');
+    var card = a.closest('.nw');
+    if(card) card.classList.add('nw-read-card');
+  } catch(e){}
+});
+
+/* ── AI 摘要展開/收合 ── */
+document.addEventListener('click', function(e){
+  var btn = e.target.closest('.nw-ai-toggle');
+  if(!btn) return;
+  var box = btn.parentElement.querySelector('.nw-ai-box');
+  if(!box) return;
+  var open = box.classList.toggle('open');
+  btn.innerHTML = open ? '&#9652; 收合' : '&#10022; AI 摘要';
+});
+
+/* ── Chip 篩選 ── */
+function chipFilter(el, filter){
+  document.querySelectorAll('.chip').forEach(function(c){ c.classList.remove('active'); });
+  el.classList.add('active');
+  var cards = document.querySelectorAll('.nw, .nw-pinned-bull, .nw-pinned-bear');
+  cards.forEach(function(card){
+    if(filter === 'all'){ card.style.display=''; return; }
+    if(filter === 'bull'){
+      card.style.display = card.classList.contains('bull') ? '' : 'none';
+    } else if(filter === 'bear'){
+      card.style.display = card.classList.contains('bear') ? '' : 'none';
+    } else if(filter === 'ai'){
+      card.style.display = card.querySelector('.nw-badge-ai') ? '' : 'none';
+    } else if(filter === 'geo'){
+      card.style.display = card.classList.contains('geo') ? '' : 'none';
+    }
+  });
+}
+</script>
 """
 st.markdown(CSS, unsafe_allow_html=True)
 
@@ -484,6 +699,37 @@ def render_news(df, max_items=120):
         </div>""", unsafe_allow_html=True)
         return
 
+    # ② 置頂高分新聞（AI分數 ≥7 或 ≤-7）
+    pinned_chunks = []
+    if "ai_score" in df.columns:
+        pinned_df = df[df["ai_score"].abs() >= 7].head(3)
+        for _, row in pinned_df.iterrows():
+            sc = float(row.get("ai_score", 0) or 0)
+            title = str(row.get("title", ""))
+            url   = str(row.get("url", "") or "")
+            ai_sum = str(row.get("ai_summary", "") or "")
+            sent   = row.get("ai_sentiment", "") or row.get("sentiment", "neutral")
+            t_html = f'<a href="{url}" target="_blank">{title}</a>' if url else title
+            cls    = "nw-pinned-bull" if sc > 0 else "nw-pinned-bear"
+            lbl    = "🔥 強烈利多訊號" if sc > 0 else "⚠️ 強烈利空訊號"
+            sc_cls = "nw-pinned-score-bull" if sc > 0 else "nw-pinned-score-bear"
+            src    = str(row.get("source", "") or "")
+            rtime  = relative_time(row.get("published_at"))
+            ai_blk = f'<div style="font-size:12px;color:#374151;margin-top:6px;line-height:1.7">{ai_sum}</div>' if ai_sum else ""
+            pinned_chunks.append(f"""
+<div class="{cls}">
+  <span class="nw-pinned-label">{lbl}</span>
+  <div class="nw-pinned-title">{t_html}</div>
+  <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+    <span class="{sc_cls}">{sc:+.1f}</span>
+    <span style="font-size:10px;color:#94A3B8">{src}</span>
+    <span style="font-size:10px;color:#CBD5E1;font-family:'JetBrains Mono',monospace">{rtime}</span>
+  </div>
+  {ai_blk}
+</div>""")
+    if pinned_chunks:
+        st.markdown("\n".join(pinned_chunks), unsafe_allow_html=True)
+
     chunks = []
     for _, row in df.head(max_items).iterrows():
         sent     = row.get("sentiment", "neutral")
@@ -499,15 +745,10 @@ def render_news(df, max_items=120):
         traw     = str(row.get("ai_affected_tickers", "") or row.get("tickers", "") or "")
         tickers  = [t.strip() for t in traw.split(",") if t.strip()]
 
-        pub_str = ""
+        # ① 相對時間顯示
+        rtime = ""
         if row.get("published_at") is not None:
-            try:
-                pub_str = row["published_at"].astimezone(TZ_TW).strftime("%m/%d %H:%M")
-            except Exception:
-                try:
-                    pub_str = row["published_at"].strftime("%m/%d %H:%M")
-                except Exception:
-                    pass
+            rtime = relative_time(row["published_at"])
 
         eff = ai_sent if ai_sent in ("bullish", "bearish") else sent
         if is_geo:
@@ -530,26 +771,29 @@ def render_news(df, max_items=120):
         t_html = f'<a href="{url}" target="_blank">{title}</a>' if url else title
 
         badges = []
-        if ai_sum:
-            badges.append('<span class="nw-badge-ai">&#10022; AI</span>')
         if is_geo:
             badges.append('<span class="nw-badge-geo">&#9873; 地緣</span>')
         for t in tickers[:4]:
             badges.append(f'<span class="nw-tick">{t}</span>')
         bdg = " ".join(badges)
 
+        # B AI摘要收合（預設隱藏，點按鈕展開）
         ai_block = ""
         if ai_sum:
             rsn_part = f'<div class="nw-ai-reason">&#128204; {ai_rsn}</div>' if ai_rsn else ""
-            ai_block = f'<div class="nw-ai-box">{ai_sum}{rsn_part}</div>'
+            ai_toggle = '<span class="nw-ai-toggle">&#10022; AI 摘要</span>'
+            ai_block = f'<div style="margin-top:5px">{ai_toggle}<div class="nw-ai-box">{ai_sum}{rsn_part}</div></div>'
+
+        # AI badge 移到標題旁
+        ai_badge = '<span class="nw-badge-ai">&#10022; AI</span> ' if ai_sum else ""
 
         chunks.append(f"""
 <div class="{cls}">
-  <div class="nw-title">{t_html}</div>
+  <div class="nw-title">{ai_badge}{t_html}</div>
   <div class="nw-meta">
     {score_h} {bdg}
     <span class="nw-src">{source}</span>
-    <span class="nw-time">{pub_str}</span>
+    <span class="nw-time" title="{rtime}">{rtime}</span>
   </div>
   {ai_block}
 </div>""")
@@ -663,6 +907,43 @@ with tab_dash:
         c3.metric("📉 利空", 0)
     c4.metric("✦ AI 分析", len(ai_12h))
     c5.metric("⚑ 地緣政治", len(geo_df))
+
+    # ── ③ 情緒走勢折線（過去12小時每小時利多/利空比）──
+    if not df_12h.empty and "published_at" in df_12h.columns:
+        try:
+            _mood = df_12h.copy()
+            _mood["_hour"] = _mood["published_at"].apply(
+                lambda x: x.astimezone(TZ_TW).replace(minute=0, second=0, microsecond=0)
+                if hasattr(x, "tzinfo") and x.tzinfo else x.replace(minute=0, second=0, microsecond=0)
+            )
+            _grp = _mood.groupby("_hour")["sentiment"].value_counts().unstack(fill_value=0)
+            _grp["bull_r"] = _grp.get("bullish", 0) / (_grp.get("bullish", 0) + _grp.get("bearish", 0) + 0.001) * 100
+            _grp = _grp.sort_index()
+            if len(_grp) >= 2:
+                _x = [t.strftime("%H:%M") for t in _grp.index]
+                _y = _grp["bull_r"].tolist()
+                _colors = ["#DC2626" if v >= 50 else "#16A34A" for v in _y]
+                fig_mood = go.Figure()
+                fig_mood.add_trace(go.Scatter(
+                    x=_x, y=_y, mode="lines+markers",
+                    line=dict(color="#1A1A2E", width=2),
+                    marker=dict(color=_colors, size=7, line=dict(color="#FFFFFF", width=1.5)),
+                    fill="tozeroy",
+                    fillcolor="rgba(26,26,46,0.05)",
+                    hovertemplate="%{x}<br>利多占比: %{y:.1f}%<extra></extra>",
+                ))
+                fig_mood.add_hline(y=50, line_dash="dot", line_color="#CBD5E1", line_width=1)
+                fig_mood.update_layout(
+                    margin=dict(t=4, b=4, l=4, r=4), height=80,
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    xaxis=dict(showgrid=False, tickfont=dict(size=9, color="#94A3B8"), tickangle=0),
+                    yaxis=dict(showgrid=False, visible=False, range=[0, 100]),
+                    showlegend=False,
+                )
+                st.markdown('<div class="sec-hd" style="margin-top:8px">📈 過去12h情緒走勢（利多占比%）</div>', unsafe_allow_html=True)
+                st.plotly_chart(fig_mood, use_container_width=True, config={"displayModeBar": False})
+        except Exception:
+            pass
 
     # ── AI 市場總結 ──
     st.markdown('<div class="sec-hd">✦ AI 市場總結</div>', unsafe_allow_html=True)
@@ -829,6 +1110,47 @@ with tab_dash:
 
     # ── 最新新聞（12h 快速篩選）──
     st.markdown('<div class="sec-hd">📋 最新新聞（12h）</div>', unsafe_allow_html=True)
+
+    # ⑤ Heat Bar：每小時新聞密度
+    if not df_12h.empty and "published_at" in df_12h.columns:
+        try:
+            _hb = df_12h.copy()
+            _hb["_h"] = _hb["published_at"].apply(
+                lambda x: x.astimezone(TZ_TW).hour if hasattr(x, "tzinfo") and x.tzinfo else x.hour
+            )
+            _hb_cnt = _hb.groupby("_h").size()
+            _max_cnt = max(_hb_cnt.max(), 1)
+            _now_h = datetime.now(TZ_TW).hour
+            _cells = []
+            _labels = []
+            for h in range(max(0, _now_h - 11), _now_h + 1):
+                _h = h % 24
+                cnt = _hb_cnt.get(_h, 0)
+                alpha = max(0.08, cnt / _max_cnt)
+                color = f"rgba(26,26,46,{alpha:.2f})"
+                height_pct = max(20, int(cnt / _max_cnt * 100))
+                tooltip = f"{_h:02d}:00  {cnt}則"
+                _cells.append(f'<div class="heat-cell" style="height:{height_pct}%;background:{color}" title="{tooltip}"></div>')
+                _labels.append(f'<span>{_h:02d}</span>')
+            heat_html = f"""
+<div style="margin-bottom:2px">
+  <span style="font-size:9px;color:#94A3B8;font-weight:600;letter-spacing:.5px">每小時新聞量</span>
+</div>
+<div class="heat-bar-wrap">{"".join(_cells)}</div>
+<div class="heat-bar-labels">{"".join(_labels)}</div>"""
+            st.markdown(heat_html, unsafe_allow_html=True)
+        except Exception:
+            pass
+
+    # A Chip 快捷篩選列
+    st.markdown("""
+<div class="chip-bar">
+  <span class="chip chip-all active" onclick="chipFilter(this,'all')">全部</span>
+  <span class="chip chip-bull" onclick="chipFilter(this,'bull')">📈 利多</span>
+  <span class="chip chip-bear" onclick="chipFilter(this,'bear')">📉 利空</span>
+  <span class="chip chip-ai"  onclick="chipFilter(this,'ai')">✦ AI高分</span>
+  <span class="chip chip-geo" onclick="chipFilter(this,'geo')">⚑ 地緣政治</span>
+</div>""", unsafe_allow_html=True)
 
     f1, f2, f3, f4 = st.columns([1, 1, 2, 1])
     with f1:
