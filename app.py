@@ -553,28 +553,6 @@ hr { border-color: #E2E8F0 !important; margin: 10px 0 !important; }
 .chip.chip-all.active  { background: #1A1A2E; border-color: #1A1A2E; color: #FFFFFF; }
 
 /* ══════════════════════════════════════
-   ⑤ Heat Bar 新聞密度
-══════════════════════════════════════ */
-.heat-bar-wrap {
-  display: flex; gap: 2px; align-items: flex-end;
-  height: 28px; margin-bottom: 10px;
-  padding: 0 2px;
-}
-.heat-cell {
-  flex: 1; border-radius: 2px;
-  min-width: 6px; cursor: default;
-  transition: opacity 0.15s;
-  position: relative;
-}
-.heat-cell:hover { opacity: 0.75; }
-.heat-bar-labels {
-  display: flex; gap: 2px; font-size: 9px;
-  color: #CBD5E1; font-family: 'JetBrains Mono', monospace;
-  margin-bottom: 4px; padding: 0 2px;
-}
-.heat-bar-labels span { flex: 1; text-align: center; }
-
-/* ══════════════════════════════════════
    B AI摘要展開/收合
 ══════════════════════════════════════ */
 .nw-ai-toggle {
@@ -908,43 +886,6 @@ with tab_dash:
     c4.metric("✦ AI 分析", len(ai_12h))
     c5.metric("⚑ 地緣政治", len(geo_df))
 
-    # ── ③ 情緒走勢折線（過去12小時每小時利多/利空比）──
-    if not df_12h.empty and "published_at" in df_12h.columns:
-        try:
-            _mood = df_12h.copy()
-            _mood["_hour"] = _mood["published_at"].apply(
-                lambda x: x.astimezone(TZ_TW).replace(minute=0, second=0, microsecond=0)
-                if hasattr(x, "tzinfo") and x.tzinfo else x.replace(minute=0, second=0, microsecond=0)
-            )
-            _grp = _mood.groupby("_hour")["sentiment"].value_counts().unstack(fill_value=0)
-            _grp["bull_r"] = _grp.get("bullish", 0) / (_grp.get("bullish", 0) + _grp.get("bearish", 0) + 0.001) * 100
-            _grp = _grp.sort_index()
-            if len(_grp) >= 2:
-                _x = [t.strftime("%H:%M") for t in _grp.index]
-                _y = _grp["bull_r"].tolist()
-                _colors = ["#DC2626" if v >= 50 else "#16A34A" for v in _y]
-                fig_mood = go.Figure()
-                fig_mood.add_trace(go.Scatter(
-                    x=_x, y=_y, mode="lines+markers",
-                    line=dict(color="#1A1A2E", width=2),
-                    marker=dict(color=_colors, size=7, line=dict(color="#FFFFFF", width=1.5)),
-                    fill="tozeroy",
-                    fillcolor="rgba(26,26,46,0.05)",
-                    hovertemplate="%{x}<br>利多占比: %{y:.1f}%<extra></extra>",
-                ))
-                fig_mood.add_hline(y=50, line_dash="dot", line_color="#CBD5E1", line_width=1)
-                fig_mood.update_layout(
-                    margin=dict(t=4, b=4, l=4, r=4), height=80,
-                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                    xaxis=dict(showgrid=False, tickfont=dict(size=9, color="#94A3B8"), tickangle=0),
-                    yaxis=dict(showgrid=False, visible=False, range=[0, 100]),
-                    showlegend=False,
-                )
-                st.markdown('<div class="sec-hd" style="margin-top:8px">📈 過去12h情緒走勢（利多占比%）</div>', unsafe_allow_html=True)
-                st.plotly_chart(fig_mood, use_container_width=True, config={"displayModeBar": False})
-        except Exception:
-            pass
-
     # ── AI 市場總結 ──
     st.markdown('<div class="sec-hd">✦ AI 市場總結</div>', unsafe_allow_html=True)
 
@@ -1110,37 +1051,6 @@ with tab_dash:
 
     # ── 最新新聞（12h 快速篩選）──
     st.markdown('<div class="sec-hd">📋 最新新聞（12h）</div>', unsafe_allow_html=True)
-
-    # ⑤ Heat Bar：每小時新聞密度
-    if not df_12h.empty and "published_at" in df_12h.columns:
-        try:
-            _hb = df_12h.copy()
-            _hb["_h"] = _hb["published_at"].apply(
-                lambda x: x.astimezone(TZ_TW).hour if hasattr(x, "tzinfo") and x.tzinfo else x.hour
-            )
-            _hb_cnt = _hb.groupby("_h").size()
-            _max_cnt = max(_hb_cnt.max(), 1)
-            _now_h = datetime.now(TZ_TW).hour
-            _cells = []
-            _labels = []
-            for h in range(max(0, _now_h - 11), _now_h + 1):
-                _h = h % 24
-                cnt = _hb_cnt.get(_h, 0)
-                alpha = max(0.08, cnt / _max_cnt)
-                color = f"rgba(26,26,46,{alpha:.2f})"
-                height_pct = max(20, int(cnt / _max_cnt * 100))
-                tooltip = f"{_h:02d}:00  {cnt}則"
-                _cells.append(f'<div class="heat-cell" style="height:{height_pct}%;background:{color}" title="{tooltip}"></div>')
-                _labels.append(f'<span>{_h:02d}</span>')
-            heat_html = f"""
-<div style="margin-bottom:2px">
-  <span style="font-size:9px;color:#94A3B8;font-weight:600;letter-spacing:.5px">每小時新聞量</span>
-</div>
-<div class="heat-bar-wrap">{"".join(_cells)}</div>
-<div class="heat-bar-labels">{"".join(_labels)}</div>"""
-            st.markdown(heat_html, unsafe_allow_html=True)
-        except Exception:
-            pass
 
     # A Chip 快捷篩選列
     st.markdown("""
