@@ -245,9 +245,8 @@ section.main .block-container {
   border-radius: 7px; font-weight: 600; font-size: 13px;
   border: 1px solid #E2E8F0; background: #FFFFFF; color: #374151;
   transition: all 0.15s; box-shadow: 0 1px 2px rgba(0,0,0,0.05);
-  height: 36px !important; padding: 0 24px !important;
+  height: 36px !important; padding: 0 28px !important;
   white-space: nowrap !important;
-  min-width: 120px !important;
 }
 .stButton > button:hover { background: #F1F5F9; border-color: #CBD5E1; }
 .stButton > button[kind="primary"] {
@@ -592,7 +591,7 @@ with _c1:
         key="use_ai_cb",
     )
 with _c2:
-    if st.button("🔄 立即抓取新聞", type="primary", use_container_width=True):
+    if st.button("🔄 立即抓取新聞", type="primary"):
         with st.spinner("抓取＋分析中，約 30～60 秒…"):
             result = crawl_and_save(
                 enabled_names=st.session_state["enabled_srcs"],
