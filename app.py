@@ -582,7 +582,7 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # ② 控制列：AI checkbox + 立即抓取，固定在同一行，按鈕有邊框不撐高
-_c1, _c2, _c3 = st.columns([2, 1, 5])
+_c1, _c2, _c3 = st.columns([2, 2, 3])
 with _c1:
     st.session_state["use_ai"] = st.checkbox(
         "啟用 AI 深度分析",
@@ -591,7 +591,7 @@ with _c1:
         key="use_ai_cb",
     )
 with _c2:
-    if st.button("🔄 立即抓取新聞", type="primary"):
+    if st.button("🔄 立即抓取新聞", type="primary", use_container_width=True):
         with st.spinner("抓取＋分析中，約 30～60 秒…"):
             result = crawl_and_save(
                 enabled_names=st.session_state["enabled_srcs"],
