@@ -89,21 +89,21 @@ SOURCES = [
     },
     {
         "name":     "中央社財經",
-        "url":      "https://www.cna.com.tw/rssfeed/cna_finance.aspx",
+        "url":      "https://feeds.feedburner.com/rsscna/finance",   # 產經證券頻道
         "language": "zh",
         "category": "財經",
         "enabled":  True,
     },
     {
-        "name":     "中央社產業",
-        "url":      "https://www.cna.com.tw/rssfeed/cna_industry.aspx",
+        "name":     "中央社科技",
+        "url":      "https://feeds.feedburner.com/rsscna/technology", # 科技頻道
         "language": "zh",
-        "category": "產業",
+        "category": "科技",
         "enabled":  True,
     },
     {
-        "name":     "風傳媒財經",
-        "url":      "https://www.storm.mg/feeds/category/finance",
+        "name":     "風傳媒",
+        "url":      "https://www.storm.mg/feed",                      # 全站 RSS（含財經）
         "language": "zh",
         "category": "財經",
         "enabled":  True,
