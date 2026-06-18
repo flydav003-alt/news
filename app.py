@@ -221,13 +221,13 @@ section.main .block-container {
 .appview-container { padding-top: 0 !important; }
 .appview-container .main { padding-top: 0 !important; }
 
-/* ── 改版後 Topbar：分隔線取代邊框，按鈕合併 ── */
+/* ── 改版後 Topbar：分隔線取代邊框，透明背景 ── */
 .topbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   background: transparent;
-  border-bottom: 0.5px solid var(--color-border-primary);
+  border-bottom: 0.5px solid var(--color-border-tertiary);
   padding: 10px 0;
   margin-bottom: 12px;
   box-shadow: none;
@@ -273,13 +273,13 @@ section.main .block-container {
   margin-bottom: 8px;
 }
 
-/* ── 改版後 Tabs：下底線風格 ── */
+/* ── 改版後 Tabs：下底線風格，現代設計 ── */
 .stTabs [data-baseweb="tab-list"] {
   background: transparent;
   border-radius: 0;
   padding: 0;
   gap: 0;
-  border-bottom: 0.5px solid var(--color-border-primary);
+  border-bottom: 0.5px solid var(--color-border-tertiary);
   box-shadow: none;
   margin-bottom: 12px !important;
 }
@@ -300,10 +300,10 @@ section.main .block-container {
   padding-top: 8px !important;
 }
 
-/* ── 改版後 Metrics：去框，改背景色 ── */
+/* ── 改版後 Metrics：去框，改背景色填充 ── */
 [data-testid="metric-container"] {
   background: var(--color-background-secondary);
-  border: none;
+  border: none !important;
   border-radius: var(--border-radius-md);
   padding: 12px 14px;
   box-shadow: none;
@@ -361,15 +361,17 @@ hr { border-color: var(--color-border-primary) !important; margin: 10px 0 !impor
   margin: 14px 0 8px;
   display: flex; align-items: center; gap: 8px;
 }
-.sec-hd::after { content: ''; flex: 1; height: 0.5px; background: var(--color-border-primary); }
+.sec-hd::after { content: ''; flex: 1; height: 0.5px; background: var(--color-border-tertiary); }
 
 /* ══════════════════════════════════════
-   AI 總結卡片（改版：左側 accent 線）
+   AI 總結卡片（改版：左側 accent 線，簡潔設計）
 ══════════════════════════════════════ */
 .ai-card {
-  background: var(--color-background-primary); border: 0.5px solid var(--color-border-primary);
-  border-radius: var(--border-radius-lg); padding: 12px 14px; margin-bottom: 8px;
-  box-shadow: none; border-left: 3px solid var(--color-accent); border-top: none;
+  background: var(--color-background-primary); border: 0.5px solid var(--color-border-tertiary);
+  border-left: 3px solid var(--color-accent);
+  border-radius: 0 var(--border-radius-lg) var(--border-radius-lg) 0;
+  padding: 12px 14px; margin-bottom: 8px;
+  box-shadow: none;
 }
 .ai-badge {
   font-size: var(--font-xs); font-weight: 600; letter-spacing: 0.5px;
@@ -403,11 +405,12 @@ hr { border-color: var(--color-border-primary) !important; margin: 10px 0 !impor
 .ai-footer { font-size: var(--font-xs); color: var(--color-text-tertiary); margin-top: 6px; }
 
 /* ══════════════════════════════════════
-   GEO 警示（改版）
+   GEO 警示（改版：左側 accent 線）
 ══════════════════════════════════════ */
 .geo-card {
-  background: var(--color-background-primary); border: 0.5px solid var(--color-border-primary);
-  border-left: 3px solid var(--color-warning); border-radius: var(--border-radius-lg);
+  background: var(--color-background-primary); border: 0.5px solid var(--color-border-tertiary);
+  border-left: 3px solid var(--color-warning);
+  border-radius: 0 var(--border-radius-lg) var(--border-radius-lg) 0;
   padding: 10px 12px; margin-bottom: 8px;
   display: flex; gap: 8px; align-items: flex-start;
 }
@@ -419,17 +422,17 @@ hr { border-color: var(--color-border-primary) !important; margin: 10px 0 !impor
 .geo-body { font-size: var(--font-xs); color: var(--color-text-secondary); line-height: 1.5; }
 
 /* ══════════════════════════════════════
-   新聞卡片（改版：分隔線取代框線）
+   新聞卡片（改版：分隔線取代框線，無框設計）
 ══════════════════════════════════════ */
 .nw {
   background: transparent; border: none;
-  border-bottom: 0.5px solid var(--color-border-primary);
+  border-bottom: 0.5px solid var(--color-border-tertiary);
   padding: 10px 0; margin-bottom: 0;
   box-shadow: none;
   transition: none;
 }
 .nw:last-child { border-bottom: none; }
-.nw:hover { box-shadow: none; }
+.nw:hover { box-shadow: none; background: transparent; }
 .nw.bull  { border-left: none; }
 .nw.bear  { border-left: none; }
 .nw.geo   { border-left: none; }
@@ -438,19 +441,19 @@ hr { border-color: var(--color-border-primary) !important; margin: 10px 0 !impor
   line-height: 1.4; margin-bottom: 6px;
 }
 .nw-title a { color: var(--color-text-primary); text-decoration: none; }
-.nw-title a:hover { color: var(--color-accent); }
+.nw-title a:hover { color: var(--color-accent); text-decoration: underline; }
 .nw-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .nw-score-bull {
   font-size: var(--font-xs); font-weight: 500; color: var(--color-bull-text); background: var(--color-bull-bg);
-  border-radius: var(--border-radius-md); padding: 2px 6px; font-family: 'JetBrains Mono', monospace;
+  border-radius: var(--border-radius-md); padding: 3px 8px; font-family: 'JetBrains Mono', monospace;
 }
 .nw-score-bear {
   font-size: var(--font-xs); font-weight: 500; color: var(--color-bear-text); background: var(--color-bear-bg);
-  border-radius: var(--border-radius-md); padding: 2px 6px; font-family: 'JetBrains Mono', monospace;
+  border-radius: var(--border-radius-md); padding: 3px 8px; font-family: 'JetBrains Mono', monospace;
 }
 .nw-score-neu {
   font-size: var(--font-xs); font-weight: 500; color: var(--color-text-tertiary); background: var(--color-background-tertiary);
-  border-radius: var(--border-radius-md); padding: 2px 6px; font-family: 'JetBrains Mono', monospace;
+  border-radius: var(--border-radius-md); padding: 3px 8px; font-family: 'JetBrains Mono', monospace;
 }
 .nw-badge-ai {
   font-size: var(--font-xs); font-weight: 600; letter-spacing: 0.5px;
@@ -479,7 +482,7 @@ hr { border-color: var(--color-border-primary) !important; margin: 10px 0 !impor
    熱門股票卡片
 ══════════════════════════════════════ */
 .tk-card {
-  background: var(--color-background-secondary); border: 0.5px solid var(--color-border-primary); border-radius: var(--border-radius-lg);
+  background: var(--color-background-secondary); border: 0.5px solid var(--color-border-tertiary); border-radius: var(--border-radius-lg);
   padding: 12px; margin-bottom: 8px; text-align: center;
   box-shadow: none; transition: none;
 }
@@ -503,15 +506,15 @@ hr { border-color: var(--color-border-primary) !important; margin: 10px 0 !impor
 ══════════════════════════════════════ */
 .log-table {
   width: 100%; border-collapse: collapse; font-size: var(--font-sm);
-  background: var(--color-background-primary); border: 0.5px solid var(--color-border-primary);
+  background: var(--color-background-primary); border: 0.5px solid var(--color-border-tertiary);
   border-radius: var(--border-radius-lg); overflow: hidden;
 }
 .log-table th {
   padding: 8px 12px; text-align: left; font-size: var(--font-xs); font-weight: 600;
   color: var(--color-text-secondary); letter-spacing: 0.5px; background: var(--color-background-secondary);
-  border-bottom: 0.5px solid var(--color-border-primary);
+  border-bottom: 0.5px solid var(--color-border-tertiary);
 }
-.log-table td { padding: 7px 12px; color: var(--color-text-primary); border-bottom: 0.5px solid var(--color-border-primary); }
+.log-table td { padding: 7px 12px; color: var(--color-text-primary); border-bottom: 0.5px solid var(--color-border-tertiary); }
 .log-ok   { background: var(--color-bear-bg); color: var(--color-bear-text); font-size: var(--font-xs); font-weight: 600; padding: 2px 8px; border-radius: var(--border-radius-md); }
 .log-err  { background: var(--color-bull-bg); color: var(--color-bull-text); font-size: var(--font-xs); font-weight: 600; padding: 2px 8px; border-radius: var(--border-radius-md); }
 .log-warn { background: transparent; color: var(--color-warning); font-size: var(--font-xs); font-weight: 600; padding: 0; border-radius: 0; }
@@ -520,22 +523,22 @@ hr { border-color: var(--color-border-primary) !important; margin: 10px 0 !impor
 .filter-row .stSelectbox, .filter-row .stTextInput { margin-bottom: 0 !important; }
 
 /* ══════════════════════════════════════
-   置頂高分新聞橫幅（改版）
+   置頂高分新聞橫幅（改版：左側 accent 線）
 ══════════════════════════════════════ */
 .nw-pinned-bull {
   background: var(--color-bull-bg);
-  border: 0.5px solid var(--color-border-primary);
+  border: 0.5px solid var(--color-border-tertiary);
   border-left: 3px solid var(--color-bull-text);
-  border-radius: var(--border-radius-lg);
+  border-radius: 0 var(--border-radius-lg) var(--border-radius-lg) 0;
   padding: 12px 14px;
   margin-bottom: 8px;
   box-shadow: none;
 }
 .nw-pinned-bear {
   background: var(--color-bear-bg);
-  border: 0.5px solid var(--color-border-primary);
+  border: 0.5px solid var(--color-border-tertiary);
   border-left: 3px solid var(--color-bear-text);
-  border-radius: var(--border-radius-lg);
+  border-radius: 0 var(--border-radius-lg) var(--border-radius-lg) 0;
   padding: 12px 14px;
   margin-bottom: 8px;
   box-shadow: none;
@@ -583,14 +586,14 @@ hr { border-color: var(--color-border-primary) !important; margin: 10px 0 !impor
 .chip {
   font-size: 12px; font-weight: 600;
   padding: 4px 13px; border-radius: 20px;
-  border: 1px solid #E2E8F0;
+  border: 1px solid var(--color-border-tertiary);
   background: #FFFFFF; color: #64748B;
   cursor: pointer; transition: all 0.15s;
   user-select: none; white-space: nowrap;
 }
-.chip:hover { background: #F1F5F9; border-color: #CBD5E1; }
-.chip.chip-bull.active { background: #FEF2F2; border-color: #FECACA; color: #DC2626; }
-.chip.chip-bear.active { background: #F0FDF4; border-color: #BBF7D0; color: #16A34A; }
+.chip:hover { background: var(--color-background-tertiary); border-color: var(--color-border-secondary); }
+.chip.chip-bull.active { background: var(--color-bull-bg); border-color: var(--color-bull-text); color: var(--color-bull-text); }
+.chip.chip-bear.active { background: var(--color-bear-bg); border-color: var(--color-bear-text); color: var(--color-bear-text); }
 .chip.chip-ai.active   { background: #FFFBEB; border-color: #FDE68A; color: #D97706; }
 .chip.chip-geo.active  { background: #FFF7ED; border-color: #FED7AA; color: #EA580C; }
 .chip.chip-all.active  { background: #1A1A2E; border-color: #1A1A2E; color: #FFFFFF; }
@@ -606,7 +609,7 @@ hr { border-color: var(--color-border-primary) !important; margin: 10px 0 !impor
   font-weight: 600; user-select: none;
   vertical-align: middle; margin-left: 4px;
 }
-.nw-ai-toggle:hover { background: #FEF3C7; }
+.nw-ai-toggle:hover { background: var(--color-background-secondary); }
 .nw-ai-box { display: none; }
 .nw-ai-box.open { display: block; }
 </style>
@@ -1351,15 +1354,15 @@ with tab_deep:
         )
         if not ticker_q:
             st.markdown("""
-<div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;
-            padding:14px 18px;font-size:13px;color:#64748B;line-height:2.2">
-  <strong style="color:#374151">支援格式</strong><br>
-  台股代碼：<code style="background:#F1F5F9;padding:1px 6px;border-radius:4px;color:#1A1A2E">2330</code>
-  <code style="background:#F1F5F9;padding:1px 6px;border-radius:4px;color:#1A1A2E">2454</code><br>
-  台股名稱：<code style="background:#F1F5F9;padding:1px 6px;border-radius:4px;color:#1A1A2E">台積電</code>
-  <code style="background:#F1F5F9;padding:1px 6px;border-radius:4px;color:#1A1A2E">廣達</code><br>
-  美股代碼：<code style="background:#F1F5F9;padding:1px 6px;border-radius:4px;color:#1A1A2E">NVDA</code>
-  <code style="background:#F1F5F9;padding:1px 6px;border-radius:4px;color:#1A1A2E">TSLA</code>
+<div style="background:var(--color-background-secondary);border:1px solid var(--color-border-tertiary);border-radius:8px;
+            padding:14px 18px;font-size:13px;color:var(--color-text-secondary);line-height:2.2">
+  <strong style="color:var(--color-text-primary)">支援格式</strong><br>
+  台股代碼：<code style="background:var(--color-background-tertiary);padding:1px 6px;border-radius:4px;color:var(--color-text-primary)">2330</code>
+  <code style="background:var(--color-background-tertiary);padding:1px 6px;border-radius:4px;color:var(--color-text-primary)">2454</code><br>
+  台股名稱：<code style="background:var(--color-background-tertiary);padding:1px 6px;border-radius:4px;color:var(--color-text-primary)">台積電</code>
+  <code style="background:var(--color-background-tertiary);padding:1px 6px;border-radius:4px;color:var(--color-text-primary)">廣達</code><br>
+  美股代碼：<code style="background:var(--color-background-tertiary);padding:1px 6px;border-radius:4px;color:var(--color-text-primary)">NVDA</code>
+  <code style="background:var(--color-background-tertiary);padding:1px 6px;border-radius:4px;color:var(--color-text-primary)">TSLA</code>
 </div>""", unsafe_allow_html=True)
         else:
             q = ticker_q.strip()
@@ -1501,10 +1504,10 @@ with tab_cfg:
         }
         if all_cw:
             chips = " ".join(
-                f'<span style="background:{"#FEF2F2" if lb=="利多" else "#F0FDF4"};'
+                f'<span style="background:{("var(--color-bull-bg)" if lb=="利多" else "var(--color-bear-bg)")};'
                 f'padding:3px 10px;border-radius:10px;font-size:11px;'
-                f'border:1px solid {"#FECACA" if lb=="利多" else "#BBF7D0"};'
-                f'color:{"#DC2626" if lb=="利多" else "#16A34A"}">'
+                f'border:1px solid {("var(--color-bull-text)" if lb=="利多" else "var(--color-bear-text)")};'
+                f'color:{("var(--color-bull-text)" if lb=="利多" else "var(--color-bear-text)")}">'
                 f'{wd} {lb}</span>'
                 for wd, lb in all_cw.items()
             )
@@ -1530,10 +1533,10 @@ with tab_cfg:
 <tr>
   <td>{lr["來源"]}</td>
   <td>{sbadge}</td>
-  <td style="color:#64748B">{lr["抓取"]}</td>
-  <td style="color:#16A34A;font-weight:700">{lr["新增"]}</td>
-  <td style="color:#94A3B8">{lr["跳過"]}</td>
-  <td style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#94A3B8">{lr["時間(台灣)"]}</td>
+  <td style="color:var(--color-text-secondary)">{lr["抓取"]}</td>
+  <td style="color:var(--color-bear-text);font-weight:700">{lr["新增"]}</td>
+  <td style="color:var(--color-text-tertiary)">{lr["跳過"]}</td>
+  <td style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--color-text-tertiary)">{lr["時間(台灣)"]}</td>
 </tr>""")
             st.markdown(f"""
 <div style="overflow-x:auto">
@@ -1541,7 +1544,7 @@ with tab_cfg:
   <thead>
     <tr>
       <th>來源</th><th>狀態</th><th>抓取</th>
-      <th style="color:#16A34A">新增</th><th style="color:#94A3B8">跳過</th><th>時間(台灣)</th>
+      <th style="color:var(--color-bear-text)">新增</th><th style="color:var(--color-text-tertiary)">跳過</th><th>時間(台灣)</th>
     </tr>
   </thead>
   <tbody>{"".join(log_rows_html)}</tbody>
