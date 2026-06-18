@@ -1,6 +1,6 @@
 """
-app.py - FinNews AI v2.3 (平衡改版)
-輕量化卡片、保留區塊感、整合 Topbar、顏色變數化
+app.py - FinNews AI v2.2 (UI 現代化改版)
+精簡頂部 · 12小時新聞過濾 · 無邊框清單 · 完整保留原邏輯
 """
 
 import json
@@ -72,7 +72,7 @@ def filter_12h(df):
         )
     )
     filtered = df[mask]
-    return filtered if not filtered.empty else df
+    return filtered if not filtered.empty else df  # fallback 防空
 
 
 # ─────────────────────────────────────────────
@@ -150,39 +150,27 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# ============ 全新 CSS（平衡改版） ============
 CSS = """
 <style>
-/* ---------- 全局變數 ---------- */
-:root {
-  --color-text-primary: #1A1A2E;
-  --color-text-secondary: #64748B;
-  --color-text-tertiary: #94A3B8;
-  --color-background-body: #F8FAFC;
-  --color-background-primary: #FFFFFF;
-  --color-background-secondary: #F1F5F9;
-  --color-border-light: #F1F5F9;
-  --color-border-medium: #E2E8F0;
-  --color-accent-blue: #2563EB;
-  --color-bull: #DC2626;      /* 台股慣例：紅漲 */
-  --color-bear: #059669;      /* 台股慣例：綠跌 */
-  --color-bg-bull: #FEF2F2;
-  --color-bg-bear: #ECFDF5;
-  --font-size-xs: 11px;
-  --font-size-sm: 13px;
-  --font-size-md: 15px;
-  --font-size-lg: 20px;
-}
-
 @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap');
+
+:root {
+  --color-background-primary: var(--background-color, #FFFFFF);
+  --color-background-secondary: var(--secondary-background-color, #F1F5F9);
+  --color-text-primary: var(--text-color, #1A1A2E);
+  --color-text-secondary: #64748B;
+  --color-border-tertiary: rgba(128, 128, 128, 0.2);
+  --border-radius-md: 6px;
+  --border-radius-lg: 10px;
+}
 
 html, body, [class*="css"], .stApp {
   font-family: 'Noto Sans TC', sans-serif !important;
-  background-color: var(--color-background-body) !important;
+  background-color: var(--color-background-primary) !important;
   color: var(--color-text-primary) !important;
 }
 
-/* ── 完全移除 header & sidebar ── */
+/* ── 完全移除 header 與 sidebar ── */
 header[data-testid="stHeader"] { display: none !important; }
 section[data-testid="stSidebar"],
 section[data-testid="stSidebar"] > div,
@@ -190,402 +178,280 @@ button[data-testid="collapsedControl"],
 button[aria-label="Close sidebar"],
 button[aria-label="Open sidebar"] { display: none !important; }
 
-/* ── 消除上層 padding ── */
+/* ── 消除 padding ── */
 html, body { margin: 0 !important; padding: 0 !important; }
-[data-testid="stAppViewContainer"] { padding-top: 0 !important; }
-[data-testid="stAppViewContainer"] > section.main { padding-top: 0 !important; }
-.main .block-container,
-[data-testid="stMain"] .block-container {
+[data-testid="stAppViewContainer"] { padding-top: 0 !important; margin-top: 0 !important; }
+.main .block-container {
   padding-top: 6px !important;
   padding-bottom: 20px !important;
   max-width: 1400px !important;
+  margin-top: 0 !important;
 }
 
-/* ══════════════════════════════════════
-   ① Topbar：白底卡片、內嵌按鈕
-══════════════════════════════════════ */
+/* ── Topbar (改版：無框，底線) ── */
 .topbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+  display: flex; align-items: center; justify-content: space-between;
   background: var(--color-background-primary);
-  border: 1px solid var(--color-border-medium);
-  border-radius: 10px;
-  padding: 6px 14px;
-  margin-bottom: 10px;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.03);
-  flex-wrap: wrap;
-  gap: 6px;
+  border-bottom: 0.5px solid var(--color-border-tertiary);
+  padding: 10px 14px; margin-bottom: 8px;
 }
-.topbar-left {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-.topbar-logo {
-  font-size: var(--font-size-sm);
-  font-weight: 700;
-  color: var(--color-text-primary);
-  white-space: nowrap;
-}
-.topbar-status-ok {
-  font-size: var(--font-size-xs);
-  font-weight: 600;
-  color: var(--color-bear);
-  background: var(--color-bg-bear);
-  border: 1px solid #A7F0D0;
-  border-radius: 20px;
-  padding: 2px 10px;
-}
-.topbar-status-warn {
-  font-size: var(--font-size-xs);
-  font-weight: 600;
-  color: #975A16;
-  background: #FFFBEB;
-  border: 1px solid #FDE68A;
-  border-radius: 20px;
-  padding: 2px 10px;
-}
-.topbar-time {
-  font-size: var(--font-size-xs);
-  color: var(--color-text-tertiary);
-  font-family: 'JetBrains Mono', monospace;
-}
-.topbar-right {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-.topbar-right .stCheckbox { margin-bottom: 0 !important; }
-.topbar-right .stCheckbox label { font-size: var(--font-size-xs) !important; }
+.topbar-left { display: flex; align-items: center; gap: 10px; }
+.topbar-logo { font-size: 14px; font-weight: 600; color: var(--color-text-primary); }
+.topbar-dot { width: 8px; height: 8px; border-radius: 50%; background: #3B6D11; }
+.topbar-status { font-size: 11px; color: var(--color-text-secondary); }
+.topbar-time { font-size: 11px; color: var(--color-text-secondary); font-family: 'JetBrains Mono', monospace; }
 
-/* ── 按鈕（配合 Topbar 高度） ── */
-.stButton > button {
-  border-radius: 7px;
-  font-weight: 600;
-  font-size: var(--font-size-xs);
-  border: 1px solid var(--color-border-medium);
-  background: var(--color-background-primary);
-  color: var(--color-text-secondary);
-  transition: all 0.15s;
-  box-shadow: 0 1px 2px rgba(0,0,0,0.02);
-  height: 32px !important;
-  padding: 0 20px !important;
-  white-space: nowrap !important;
-}
-.stButton > button:hover { background: var(--color-background-secondary); }
-.stButton > button[kind="primary"] {
-  background: linear-gradient(135deg, var(--color-bull) 0%, #B91C1C 100%);
-  border-color: var(--color-bull);
-  color: #FFFFFF;
-  box-shadow: 0 2px 6px rgba(220,38,38,0.2);
-}
-.stButton > button[kind="primary"]:hover { opacity: 0.9; }
-
-/* ══════════════════════════════════════
-   ② Tabs：下底線風格（輕量）
-══════════════════════════════════════ */
+/* ── Tabs (改版：下底線) ── */
 .stTabs [data-baseweb="tab-list"] {
-  background: transparent;
-  border: none;
-  border-bottom: 1px solid var(--color-border-medium);
-  padding: 0;
-  gap: 4px;
-  margin-bottom: 12px;
+  background: transparent; padding: 0; gap: 16px; border: none;
+  border-bottom: 0.5px solid var(--color-border-tertiary);
+  margin-bottom: 12px !important; box-shadow: none;
 }
 .stTabs [data-baseweb="tab"] {
-  font-size: var(--font-size-sm);
-  font-weight: 500;
-  padding: 8px 16px;
-  border-radius: 0;
-  color: var(--color-text-secondary);
-  border-bottom: 2px solid transparent;
-  background: transparent;
+  font-size: 13px; font-weight: 500; padding: 8px 14px; border-radius: 0;
+  color: var(--color-text-secondary); border-bottom: 2px solid transparent;
 }
 .stTabs [aria-selected="true"] {
-  background: transparent !important;
-  color: var(--color-text-primary) !important;
-  border-bottom-color: var(--color-text-primary) !important;
-  font-weight: 600;
+  background: transparent !important; color: #378ADD !important; border-bottom-color: #378ADD;
 }
 
-/* ══════════════════════════════════════
-   ③ Metric：輕量卡片
-══════════════════════════════════════ */
+/* ── Metrics (改版：無邊框填色) ── */
 [data-testid="metric-container"] {
-  background: var(--color-background-primary);
-  border: 1px solid var(--color-border-light);
-  border-radius: 10px;
-  padding: 12px 14px;
-  box-shadow: 0 1px 2px rgba(0,0,0,0.02);
+  background: var(--color-background-secondary); border: none;
+  border-radius: var(--border-radius-md); padding: 12px 14px; box-shadow: none;
 }
-[data-testid="stMetricLabel"] {
-  color: var(--color-text-secondary) !important;
-  font-size: var(--font-size-xs) !important;
-  font-weight: 500 !important;
+[data-testid="stMetricLabel"] { color: var(--color-text-secondary) !important; font-size: 11px !important; font-weight: 500 !important; }
+[data-testid="stMetricValue"] { color: var(--color-text-primary) !important; font-size: 20px !important; font-weight: 600 !important; }
+[data-testid="stMetricDelta"] { font-size: 11px !important; }
+
+/* ── 按鈕與輸入框 ── */
+.stButton > button {
+  border-radius: 6px; font-weight: 500; font-size: 12px;
+  border: 0.5px solid var(--color-border-tertiary); background: var(--color-background-secondary);
+  color: var(--color-text-primary); height: 32px !important; padding: 0 16px !important;
 }
-[data-testid="stMetricValue"] {
-  color: var(--color-text-primary) !important;
-  font-size: var(--font-size-lg) !important;
-  font-weight: 600 !important;
+.stButton > button[kind="primary"] {
+  background: #378ADD; border-color: #378ADD; color: #FFFFFF;
 }
+.stCheckbox { margin-bottom: 0 !important; }
+.stCheckbox label { color: var(--color-text-primary) !important; font-size: 13px !important; }
+.stSelectbox > div > div, .stTextInput > div > div > input {
+  background: var(--color-background-primary) !important; border: 1px solid var(--color-border-tertiary) !important;
+  color: var(--color-text-primary) !important; font-size: 13px !important; border-radius: 6px !important;
+}
+.stSelectbox label, .stTextInput label { color: var(--color-text-secondary) !important; font-size: 11px !important; }
+
+/* ── Divider & Section Header ── */
+hr { border-color: var(--color-border-tertiary) !important; margin: 16px 0 !important; }
+.sec-hd {
+  font-size: 13px; font-weight: 500; color: var(--color-text-secondary);
+  text-transform: uppercase; letter-spacing: 1px; margin: 16px 0 10px;
+  display: flex; align-items: center; gap: 8px;
+}
+.sec-hd::after { content: ''; flex: 1; height: 1px; background: var(--color-border-tertiary); }
 
 /* ══════════════════════════════════════
-   ④ 新聞卡片：保留區塊感，輕量化
+   AI 總結卡片（改版：左側藍色 Accent，去除外框）
 ══════════════════════════════════════ */
-.nw {
-  background: var(--color-background-primary);
-  border: 1px solid var(--color-border-light);
-  border-left: 4px solid var(--color-border-medium);
-  border-radius: 8px;
-  padding: 12px 14px;
-  margin-bottom: 6px;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.02);
-  transition: box-shadow 0.15s, transform 0.1s;
+.ai-card {
+  background: var(--color-background-primary); border: 0.5px solid var(--color-border-tertiary);
+  border-left: 3px solid #378ADD; border-radius: 0 var(--border-radius-lg) var(--border-radius-lg) 0;
+  padding: 14px 18px; margin-bottom: 8px;
 }
-.nw:hover {
-  box-shadow: 0 4px 12px rgba(0,0,0,0.06);
-  transform: translateY(-1px);
-}
-.nw.bull  { border-left-color: var(--color-bull); }
-.nw.bear  { border-left-color: var(--color-bear); }
-.nw.geo   { border-left-color: #F59E0B; }
+.ai-dir-wrap { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.ai-dir-pill-bull { background: rgba(163, 45, 45, 0.1); color: #A32D2D; font-size: 12px; padding: 3px 10px; border-radius: var(--border-radius-md); font-weight: 600; }
+.ai-dir-pill-bear { background: rgba(15, 110, 86, 0.1); color: #0F6E56; font-size: 12px; padding: 3px 10px; border-radius: var(--border-radius-md); font-weight: 600; }
+.ai-dir-pill-neu  { background: rgba(100, 116, 139, 0.1); color: #64748B; font-size: 12px; padding: 3px 10px; border-radius: var(--border-radius-md); font-weight: 600; }
+.ai-dir-reason { font-size: 14px; color: var(--color-text-primary); font-weight: 600; }
+.ai-themes { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+.ai-tag-bull { background: rgba(163, 45, 45, 0.1); color: #A32D2D; padding: 2px 10px; font-size: 11px; border-radius: var(--border-radius-md); }
+.ai-tag-bear { background: rgba(15, 110, 86, 0.1); color: #0F6E56; padding: 2px 10px; font-size: 11px; border-radius: var(--border-radius-md); }
+.ai-tickers { display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 10px; }
+.ai-tick-chip { background: var(--color-background-secondary); padding: 2px 8px; font-size: 11px; color: var(--color-text-primary); border-radius: 4px; font-family: 'JetBrains Mono', monospace; font-weight: 500; }
+.ai-body { font-size: 13px; color: var(--color-text-secondary); line-height: 1.6; border-top: 0.5px solid var(--color-border-tertiary); padding-top: 10px; }
+.ai-footer { font-size: 10px; color: var(--color-text-secondary); margin-top: 8px; opacity: 0.7; }
 
-.nw-title {
-  font-size: var(--font-size-sm);
-  font-weight: 600;
-  color: var(--color-text-primary);
-  line-height: 1.5;
-  margin-bottom: 4px;
+/* ══════════════════════════════════════
+   GEO 警示（輕量化）
+══════════════════════════════════════ */
+.geo-card {
+  background: rgba(234, 88, 12, 0.05); border: 0.5px solid rgba(234, 88, 12, 0.2);
+  border-left: 3px solid #EA580C; border-radius: 0 8px 8px 0;
+  padding: 10px 14px; margin-bottom: 6px; display: flex; gap: 10px; align-items: flex-start;
 }
-.nw-title a { color: var(--color-text-primary); text-decoration: none; }
-.nw-title a:hover { color: var(--color-bull); }
-.nw-meta {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-.nw-score-bull {
-  font-size: var(--font-size-xs);
-  font-weight: 700;
-  color: var(--color-bull);
-  background: var(--color-bg-bull);
-  border-radius: 4px;
-  padding: 1px 8px;
-  font-family: 'JetBrains Mono', monospace;
-}
-.nw-score-bear {
-  font-size: var(--font-size-xs);
-  font-weight: 700;
-  color: var(--color-bear);
-  background: var(--color-bg-bear);
-  border-radius: 4px;
-  padding: 1px 8px;
-  font-family: 'JetBrains Mono', monospace;
-}
-.nw-score-neu {
-  font-size: var(--font-size-xs);
-  font-weight: 600;
-  color: var(--color-text-tertiary);
-  background: var(--color-background-secondary);
-  border-radius: 4px;
-  padding: 1px 8px;
-  font-family: 'JetBrains Mono', monospace;
-}
-.nw-badge-ai {
-  font-size: var(--font-size-xs);
-  font-weight: 700;
-  color: #975A16;
-  background: #FFFBEB;
-  border: 1px solid #FDE68A;
-  border-radius: 4px;
-  padding: 1px 6px;
-}
-.nw-badge-geo {
-  font-size: var(--font-size-xs);
-  font-weight: 700;
-  color: #92400E;
-  background: #FFFBEB;
-  border: 1px solid #FDE68A;
-  border-radius: 4px;
-  padding: 1px 6px;
-}
-.nw-tick {
-  font-size: var(--font-size-xs);
-  font-weight: 600;
-  color: #185FA5;
-  background: #E6F1FB;
-  border-radius: 4px;
-  padding: 1px 6px;
-  font-family: 'JetBrains Mono', monospace;
-}
-.nw-src { font-size: var(--font-size-xs); color: var(--color-text-tertiary); }
-.nw-time { font-size: var(--font-size-xs); color: var(--color-text-tertiary); font-family: 'JetBrains Mono', monospace; }
+.geo-icon { font-size: 14px; margin-top: 2px; }
+.geo-title { font-size: 13px; font-weight: 600; color: var(--color-text-primary); margin-bottom: 4px; }
+.geo-title a { color: var(--color-text-primary); text-decoration: none; }
+.geo-title a:hover { color: #EA580C; text-decoration: underline; }
+.geo-meta { font-size: 11px; color: #EA580C; font-weight: 500; margin-bottom: 4px; }
+.geo-body { font-size: 12px; color: var(--color-text-secondary); line-height: 1.5; }
 
-/* ── 置頂高分新聞（強調卡片） ── */
+/* ══════════════════════════════════════
+   置頂高分新聞 (改版：保留視覺強度但去重邊框)
+══════════════════════════════════════ */
 .nw-pinned-bull {
-  background: var(--color-bg-bull);
-  border: 1px solid #FECACA;
-  border-left: 5px solid var(--color-bull);
-  border-radius: 10px;
-  padding: 14px 18px;
-  margin-bottom: 8px;
-  box-shadow: 0 2px 8px rgba(220,38,38,0.06);
+  background: rgba(163, 45, 45, 0.03); border: 0.5px solid rgba(163, 45, 45, 0.2);
+  border-left: 4px solid #A32D2D; border-radius: 0 8px 8px 0; padding: 12px 16px; margin-bottom: 8px;
 }
 .nw-pinned-bear {
-  background: var(--color-bg-bear);
-  border: 1px solid #A7F0D0;
-  border-left: 5px solid var(--color-bear);
-  border-radius: 10px;
-  padding: 14px 18px;
-  margin-bottom: 8px;
-  box-shadow: 0 2px 8px rgba(5,150,105,0.06);
+  background: rgba(15, 110, 86, 0.03); border: 0.5px solid rgba(15, 110, 86, 0.2);
+  border-left: 4px solid #0F6E56; border-radius: 0 8px 8px 0; padding: 12px 16px; margin-bottom: 8px;
 }
 .nw-pinned-label {
-  font-size: var(--font-size-xs);
-  font-weight: 700;
-  letter-spacing: 0.5px;
-  text-transform: uppercase;
-  display: inline-block;
-  padding: 2px 10px;
-  border-radius: 4px;
-  margin-bottom: 6px;
+  font-size: 10px; font-weight: 600; text-transform: uppercase; margin-bottom: 6px; display: inline-block;
 }
-.nw-pinned-bull .nw-pinned-label { background: var(--color-bg-bull); color: var(--color-bull); }
-.nw-pinned-bear .nw-pinned-label { background: var(--color-bg-bear); color: var(--color-bear); }
-.nw-pinned-title {
-  font-size: var(--font-size-md);
-  font-weight: 700;
-  line-height: 1.5;
-  margin-bottom: 6px;
-}
-.nw-pinned-bull .nw-pinned-title a { color: #991B1B; text-decoration: none; }
-.nw-pinned-bear .nw-pinned-title a { color: #065F46; text-decoration: none; }
-.nw-pinned-score-bull { font-size: var(--font-size-sm); font-weight: 800; color: var(--color-bull); font-family: monospace; }
-.nw-pinned-score-bear { font-size: var(--font-size-sm); font-weight: 800; color: var(--color-bear); font-family: monospace; }
+.nw-pinned-bull .nw-pinned-label { color: #A32D2D; background: rgba(163, 45, 45, 0.1); padding: 2px 8px; border-radius: 4px; }
+.nw-pinned-bear .nw-pinned-label { color: #0F6E56; background: rgba(15, 110, 86, 0.1); padding: 2px 8px; border-radius: 4px; }
+.nw-pinned-title { font-size: 15px; font-weight: 600; line-height: 1.5; margin-bottom: 6px; }
+.nw-pinned-bull .nw-pinned-title a, .nw-pinned-bear .nw-pinned-title a { color: var(--color-text-primary); text-decoration: none; }
+.nw-pinned-bull .nw-pinned-title a:hover { color: #A32D2D; }
+.nw-pinned-bear .nw-pinned-title a:hover { color: #0F6E56; }
+.nw-pinned-score-bull { font-size: 12px; font-weight: 700; color: #A32D2D; font-family: 'JetBrains Mono', monospace; }
+.nw-pinned-score-bear { font-size: 12px; font-weight: 700; color: #0F6E56; font-family: 'JetBrains Mono', monospace; }
 
-/* ── AI 摘要展開 ── */
+/* ══════════════════════════════════════
+   新聞卡片（改版：無邊框、分隔線、懸停反饋）
+══════════════════════════════════════ */
+.nw {
+  background: transparent; border: none;
+  border-bottom: 0.5px solid var(--color-border-tertiary);
+  padding: 12px 14px; margin-bottom: 0; border-radius: 0;
+  transition: background-color 0.15s ease;
+}
+.nw:hover { background-color: var(--color-background-secondary); }
+.nw:last-child { border-bottom: none; }
+.nw-line1 { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
+.nw-bull { font-size: 10px; font-weight: 600; color: #A32D2D; background: rgba(163, 45, 45, 0.1); border-radius: 4px; padding: 2px 6px; flex-shrink: 0; }
+.nw-bear { font-size: 10px; font-weight: 600; color: #0F6E56; background: rgba(15, 110, 86, 0.1); border-radius: 4px; padding: 2px 6px; flex-shrink: 0; }
+.nw-neu  { font-size: 10px; font-weight: 600; color: #64748B; background: rgba(100, 116, 139, 0.1); border-radius: 4px; padding: 2px 6px; flex-shrink: 0; }
+.nw-title { font-size: 14px; font-weight: 500; color: var(--color-text-primary); line-height: 1.4; }
+.nw-title a { color: var(--color-text-primary); text-decoration: none; }
+.nw-title a:hover { color: #378ADD; }
+.nw-line2 { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 4px; }
+.nw-src, .nw-time { font-size: 11px; color: var(--color-text-secondary); }
+.nw-tick { font-size: 11px; color: #185FA5; background: rgba(24, 95, 165, 0.1); border-radius: 3px; padding: 1px 5px; font-family: 'JetBrains Mono', monospace; }
+.nw-ai-badge { font-size: 10px; font-weight: 600; color: #D97706; background: rgba(217, 119, 6, 0.1); padding: 1px 5px; border-radius: 3px; margin-right: 4px; }
 .nw-ai-box {
-  margin-top: 8px;
-  padding: 8px 12px;
-  background: var(--color-background-secondary);
-  border-radius: 6px;
-  border-left: 3px solid var(--color-accent-blue);
-  font-size: var(--font-size-xs);
-  line-height: 1.7;
+  margin-top: 8px; padding: 8px 12px; background: var(--color-background-secondary);
+  border-radius: 6px; border-left: 2px solid #378ADD;
+  font-size: 12px; color: var(--color-text-secondary); line-height: 1.6; display: none;
 }
-.nw-ai-toggle {
-  font-size: var(--font-size-xs);
-  color: #975A16;
-  cursor: pointer;
-  padding: 1px 8px;
-  border: 1px solid #FDE68A;
-  background: #FFFBEB;
-  border-radius: 4px;
-  font-weight: 600;
-}
-.nw-ai-box { display: none; }
 .nw-ai-box.open { display: block; }
+.nw-ai-toggle { font-size: 11px; font-weight: 500; color: #378ADD; cursor: pointer; display: inline-flex; align-items: center; user-select: none; }
+.nw-ai-toggle:hover { text-decoration: underline; }
 
-/* ── AI 總結卡（左側藍色 accent） ── */
-.ai-card {
-  background: var(--color-background-primary);
-  border: 1px solid var(--color-border-light);
-  border-left: 4px solid var(--color-accent-blue);
-  border-radius: 0 10px 10px 0;
-  padding: 16px 20px;
-  margin-bottom: 6px;
-  box-shadow: 0 1px 4px rgba(0,0,0,0.02);
-}
-.ai-dir-bull { font-size: var(--font-size-md); font-weight: 700; color: var(--color-bull); }
-.ai-dir-bear { font-size: var(--font-size-md); font-weight: 700; color: var(--color-bear); }
-.ai-dir-neu  { font-size: var(--font-size-md); font-weight: 700; color: var(--color-text-secondary); }
-.ai-tag-bull {
-  background: var(--color-bg-bull);
-  border: 1px solid #FECACA;
-  border-radius: 5px;
-  padding: 2px 12px;
-  font-size: var(--font-size-xs);
-  color: var(--color-bull);
-  font-weight: 600;
-}
-.ai-tag-bear {
-  background: var(--color-bg-bear);
-  border: 1px solid #A7F0D0;
-  border-radius: 5px;
-  padding: 2px 12px;
-  font-size: var(--font-size-xs);
-  color: var(--color-bear);
-  font-weight: 600;
-}
-.ai-tick-chip {
-  background: var(--color-background-secondary);
-  border: 1px solid var(--color-border-medium);
-  border-radius: 4px;
-  padding: 2px 8px;
-  font-size: var(--font-size-xs);
-  font-family: 'JetBrains Mono', monospace;
-  font-weight: 600;
-}
-.ai-body {
-  font-size: var(--font-size-sm);
-  line-height: 1.8;
-  border-top: 1px solid var(--color-border-light);
-  padding-top: 10px;
-}
-
-/* ── 其他元件（Geo、熱門股、空狀態） ── */
-.geo-card {
-  background: #FFFBEB;
-  border: 1px solid #FDE68A;
-  border-left: 4px solid #F59E0B;
-  border-radius: 8px;
-  padding: 10px 14px;
-  margin-bottom: 6px;
-}
+/* ══════════════════════════════════════
+   熱門股票卡片 (輕量化)
+══════════════════════════════════════ */
 .tk-card {
-  background: var(--color-background-primary);
-  border: 1px solid var(--color-border-light);
-  border-radius: 10px;
-  padding: 12px;
-  text-align: center;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.02);
-  transition: box-shadow 0.15s;
+  background: var(--color-background-secondary); border-radius: 8px;
+  padding: 12px; margin-bottom: 6px; text-align: center; border: none;
 }
-.tk-card:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.06); }
-.tk-code { font-size: var(--font-size-sm); font-weight: 700; font-family: monospace; }
-.tk-bull { color: var(--color-bull); font-weight: 700; }
-.tk-bear { color: var(--color-bear); font-weight: 700; }
-.tk-neu  { color: var(--color-text-tertiary); font-weight: 600; }
+.tk-code { font-size: 15px; font-weight: 600; color: var(--color-text-primary); font-family: 'JetBrains Mono', monospace; }
+.tk-name { font-size: 11px; color: var(--color-text-secondary); margin: 2px 0 6px; }
+.tk-bull { color: #A32D2D; font-size: 12px; font-weight: 600; }
+.tk-bear { color: #0F6E56; font-size: 12px; font-weight: 600; }
+.tk-neu  { color: #64748B; font-size: 12px; font-weight: 500; }
+.tk-cnt  { font-size: 11px; color: var(--color-text-secondary); }
 
-.empty-box { text-align: center; padding: 40px 20px; color: var(--color-text-tertiary); }
-
-/* ── Chip 篩選 ── */
-.chip-bar { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+/* ══════════════════════════════════════
+   A 篩選快捷 Chip
+══════════════════════════════════════ */
+.chip-bar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; align-items: center; }
 .chip {
-  font-size: var(--font-size-xs);
-  font-weight: 600;
-  padding: 4px 14px;
-  border-radius: 20px;
-  border: 1px solid var(--color-border-medium);
-  background: var(--color-background-primary);
-  color: var(--color-text-secondary);
-  cursor: pointer;
+  font-size: 12px; font-weight: 500; padding: 4px 14px; border-radius: 20px;
+  border: 0.5px solid var(--color-border-tertiary); background: var(--color-background-secondary);
+  color: var(--color-text-secondary); cursor: pointer; transition: all 0.15s; user-select: none;
 }
-.chip.chip-bull.active { background: var(--color-bg-bull); border-color: #FECACA; color: var(--color-bull); }
-.chip.chip-bear.active { background: var(--color-bg-bear); border-color: #A7F0D0; color: var(--color-bear); }
-.chip.chip-all.active  { background: var(--color-text-primary); border-color: var(--color-text-primary); color: #FFFFFF; }
+.chip:hover { border-color: #378ADD; color: #378ADD; }
+.chip.active { background: #378ADD; color: #FFFFFF; border-color: #378ADD; }
 
-/* ── 日誌表格 ── */
-.log-table { width: 100%; border-collapse: collapse; font-size: var(--font-size-xs); background: #FFF; border: 1px solid var(--color-border-light); border-radius: 8px; }
-.log-table th { padding: 8px 12px; background: var(--color-background-secondary); border-bottom: 1px solid var(--color-border-medium); }
-.log-table td { padding: 6px 12px; border-bottom: 1px solid var(--color-border-light); }
-.log-ok   { background: var(--color-bg-bear); color: var(--color-bear); padding: 1px 8px; border-radius: 4px; font-weight: 700; }
-.log-err  { background: var(--color-bg-bull); color: var(--color-bull); padding: 1px 8px; border-radius: 4px; font-weight: 700; }
+/* ══════════════════════════════════════
+   空狀態 & 日誌表格
+══════════════════════════════════════ */
+.empty-box { text-align: center; padding: 36px 24px; color: var(--color-text-secondary); }
+.empty-box-icon { font-size: 30px; margin-bottom: 8px; }
+.empty-box-txt { font-size: 13px; }
+
+.log-table { width: 100%; border-collapse: collapse; font-size: 12px; background: transparent; border-radius: 8px; overflow: hidden; }
+.log-table th { padding: 8px 12px; text-align: left; font-size: 11px; font-weight: 600; color: var(--color-text-secondary); border-bottom: 1px solid var(--color-border-tertiary); }
+.log-table td { padding: 8px 12px; color: var(--color-text-primary); border-bottom: 0.5px solid var(--color-border-tertiary); }
+.log-ok   { background: rgba(15, 110, 86, 0.1); color: #0F6E56; font-size: 10px; font-weight: 600; padding: 2px 8px; border-radius: 4px; }
+.log-err  { background: rgba(163, 45, 45, 0.1); color: #A32D2D; font-size: 10px; font-weight: 600; padding: 2px 8px; border-radius: 4px; }
+.log-warn { background: rgba(217, 119, 6, 0.1); color: #D97706; font-size: 10px; font-weight: 600; padding: 2px 8px; border-radius: 4px; }
+
+/* ── 已讀灰化 ── */
+.nw-title a.nw-read { color: var(--color-text-secondary) !important; text-decoration: line-through; }
+.nw.nw-read-card { opacity: 0.6; }
 </style>
+
+<script>
+(function(){
+  function applyRead(){
+    try {
+      var read = JSON.parse(localStorage.getItem('fn_read') || '{}');
+      document.querySelectorAll('.nw-title a').forEach(function(a){
+        var key = a.href.split('?')[0];
+        if(read[key]){
+          a.classList.add('nw-read');
+          var card = a.closest('.nw');
+          if(card) card.classList.add('nw-read-card');
+        }
+      });
+    } catch(e){}
+  }
+  applyRead();
+  var obs = new MutationObserver(applyRead);
+  obs.observe(document.body, {childList:true, subtree:true});
+})();
+
+document.addEventListener('click', function(e){
+  var a = e.target.closest('.nw-title a');
+  if(a) {
+    try {
+      var read = JSON.parse(localStorage.getItem('fn_read') || '{}');
+      var key = a.href.split('?')[0];
+      read[key] = Date.now();
+      var keys = Object.keys(read);
+      if(keys.length > 500){
+        keys.sort(function(x,y){ return read[x]-read[y]; });
+        keys.slice(0, keys.length-500).forEach(function(k){ delete read[k]; });
+      }
+      localStorage.setItem('fn_read', JSON.stringify(read));
+      a.classList.add('nw-read');
+      var card = a.closest('.nw');
+      if(card) card.classList.add('nw-read-card');
+    } catch(e){}
+  }
+
+  var btn = e.target.closest('.nw-ai-toggle');
+  if(btn) {
+    var box = btn.parentElement.querySelector('.nw-ai-box');
+    if(box) {
+      var open = box.classList.toggle('open');
+      btn.innerHTML = open ? '&#9652; 收合摘要' : '&#10022; 顯示 AI 摘要';
+    }
+  }
+});
+
+function chipFilter(el, filter){
+  document.querySelectorAll('.chip').forEach(function(c){ c.classList.remove('active'); });
+  el.classList.add('active');
+  var cards = document.querySelectorAll('.nw, .nw-pinned-bull, .nw-pinned-bear');
+  cards.forEach(function(card){
+    if(filter === 'all'){ card.style.display=''; return; }
+    if(filter === 'bull'){
+      card.style.display = (card.querySelector('.nw-bull') || card.classList.contains('nw-pinned-bull')) ? '' : 'none';
+    } else if(filter === 'bear'){
+      card.style.display = (card.querySelector('.nw-bear') || card.classList.contains('nw-pinned-bear')) ? '' : 'none';
+    } else if(filter === 'ai'){
+      card.style.display = card.querySelector('.nw-ai-badge') ? '' : 'none';
+    } else if(filter === 'geo'){
+      card.style.display = card.querySelector('.nw-geo') ? '' : 'none';
+    }
+  });
+}
+</script>
 """
 st.markdown(CSS, unsafe_allow_html=True)
 
@@ -613,7 +479,7 @@ if "initialized" not in st.session_state:
 
 
 # ─────────────────────────────────────────────
-# 共用：渲染新聞清單
+# 共用：渲染新聞清單 (完全保留您的 max_items 與 pinned_chunks 邏輯)
 # ─────────────────────────────────────────────
 def render_news(df, max_items=120):
     if df is None or df.empty:
@@ -624,7 +490,7 @@ def render_news(df, max_items=120):
         </div>""", unsafe_allow_html=True)
         return
 
-    # 置頂高分新聞（AI分數 ≥7 或 ≤-7）
+    # ② 置頂高分新聞（AI分數 ≥7 或 ≤-7）
     pinned_chunks = []
     if "ai_score" in df.columns:
         pinned_df = df[df["ai_score"].abs() >= 7].head(3)
@@ -639,15 +505,15 @@ def render_news(df, max_items=120):
             sc_cls = "nw-pinned-score-bull" if sc > 0 else "nw-pinned-score-bear"
             src    = str(row.get("source", "") or "")
             rtime  = relative_time(row.get("published_at"))
-            ai_blk = f'<div style="font-size:var(--font-size-xs);color:var(--color-text-primary);margin-top:6px;line-height:1.7">{ai_sum}</div>' if ai_sum else ""
+            ai_blk = f'<div style="font-size:12px;color:var(--color-text-secondary);margin-top:6px;line-height:1.6">{ai_sum}</div>' if ai_sum else ""
             pinned_chunks.append(f"""
 <div class="{cls}">
   <span class="nw-pinned-label">{lbl}</span>
   <div class="nw-pinned-title">{t_html}</div>
   <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
     <span class="{sc_cls}">{sc:+.1f}</span>
-    <span style="font-size:var(--font-size-xs);color:var(--color-text-tertiary)">{src}</span>
-    <span style="font-size:var(--font-size-xs);color:var(--color-text-tertiary);font-family:monospace">{rtime}</span>
+    <span style="font-size:11px;color:var(--color-text-secondary)">{src}</span>
+    <span style="font-size:11px;color:var(--color-text-secondary);font-family:'JetBrains Mono',monospace">{rtime}</span>
   </div>
   {ai_blk}
 </div>""")
@@ -669,50 +535,49 @@ def render_news(df, max_items=120):
         traw     = str(row.get("ai_affected_tickers", "") or row.get("tickers", "") or "")
         tickers  = [t.strip() for t in traw.split(",") if t.strip()]
 
+        # ① 相對時間顯示
         rtime = ""
         if row.get("published_at") is not None:
             rtime = relative_time(row["published_at"])
 
         eff = ai_sent if ai_sent in ("bullish", "bearish") else sent
-        if is_geo:
-            cls = "nw geo"
-        elif eff == "bullish":
-            cls = "nw bull"
-        elif eff == "bearish":
-            cls = "nw bear"
-        else:
-            cls = "nw"
-
         sv = ai_score if ai_score != 0 else kw_score * 10
-        if sv > 0:
-            score_h = f'<span class="nw-score-bull">+{sv:.1f}</span>'
-        elif sv < 0:
-            score_h = f'<span class="nw-score-bear">{sv:.1f}</span>'
+        
+        # Pill Tag 處理
+        if is_geo:
+            pill = '<span class="nw-geo">地緣政治</span>'
+        elif eff == "bullish":
+            pill = f'<span class="nw-bull">利多 {sv:+.1f}</span>'
+        elif eff == "bearish":
+            pill = f'<span class="nw-bear">利空 {sv:.1f}</span>'
         else:
-            score_h = '<span class="nw-score-neu">—</span>'
+            pill = '<span class="nw-neu">中性 —</span>'
 
         t_html = f'<a href="{url}" target="_blank">{title}</a>' if url else title
 
+        # Tickers 徽章
         badges = []
-        if is_geo:
-            badges.append('<span class="nw-badge-geo">&#9873; 地緣</span>')
         for t in tickers[:4]:
             badges.append(f'<span class="nw-tick">{t}</span>')
         bdg = " ".join(badges)
 
+        # AI 摘要區塊
         ai_block = ""
+        ai_badge = ""
         if ai_sum:
-            rsn_part = f'<div class="nw-ai-reason">&#128204; {ai_rsn}</div>' if ai_rsn else ""
-            ai_toggle = '<span class="nw-ai-toggle">&#10022; AI 摘要</span>'
-            ai_block = f'<div style="margin-top:5px">{ai_toggle}<div class="nw-ai-box">{ai_sum}{rsn_part}</div></div>'
-
-        ai_badge = '<span class="nw-badge-ai">&#10022; AI</span> ' if ai_sum else ""
+            ai_badge = '<span class="nw-ai-badge">✦ AI</span> '
+            rsn_part = f'<div style="margin-top:4px;font-size:11px;opacity:0.8">&#128204; {ai_rsn}</div>' if ai_rsn else ""
+            ai_toggle = '<span class="nw-ai-toggle">&#10022; 顯示 AI 摘要</span>'
+            ai_block = f'<div style="width:100%;margin-top:6px">{ai_toggle}<div class="nw-ai-box">{ai_sum}{rsn_part}</div></div>'
 
         chunks.append(f"""
-<div class="{cls}">
-  <div class="nw-title">{ai_badge}{t_html}</div>
-  <div class="nw-meta">
-    {score_h} {bdg}
+<div class="nw">
+  <div class="nw-line1">
+    {pill}
+    <div class="nw-title">{ai_badge}{t_html}</div>
+  </div>
+  <div class="nw-line2">
+    {bdg}
     <span class="nw-src">{source}</span>
     <span class="nw-time" title="{rtime}">{rtime}</span>
   </div>
@@ -725,41 +590,35 @@ def render_news(df, max_items=120):
 
 
 # ─────────────────────────────────────────────
-# ① Topbar + 控制（整合在一行）
+# ① Topbar & 抓取控制列 (UI改版合併)
 # ─────────────────────────────────────────────
 _groq_ok = st.session_state["groq_ok"]
-_status_html = (
-    '<span class="topbar-status-ok">● Groq AI</span>'
-    if _groq_ok else
-    '<span class="topbar-status-warn">⚠ 關鍵字模式</span>'
-)
+_status_html = "Groq AI 啟用" if _groq_ok else "關鍵字模式"
+_dot_color = "#3B6D11" if _groq_ok else "#D97706"
 _next_run = next_run_time()
 _last_upd = st.session_state["last_update"]
 
-# 使用兩欄：左側顯示 logo/狀態/時間，右側顯示 checkbox + 按鈕
-col_left, col_right = st.columns([2, 1.5])
-with col_left:
-    st.markdown(f"""
-    <div class="topbar" style="border:none;box-shadow:none;padding:0;margin:0;background:transparent;">
-      <div class="topbar-left">
-        <span class="topbar-logo">📈 FinNews AI</span>
-        {_status_html}
-        <span class="topbar-time">下次 {_next_run} · 最後 {_last_upd}</span>
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
-with col_right:
-    # 將 checkbox 和按鈕放在同一行 flex 容器
-    st.markdown('<div style="display:flex;align-items:center;gap:12px;justify-content:flex-end;flex-wrap:wrap;">', unsafe_allow_html=True)
-    use_ai = st.checkbox(
-        "啟用 AI",
+st.markdown(f"""
+<div class="topbar">
+  <div class="topbar-left">
+    <span class="topbar-logo">FinNews AI</span>
+    <div class="topbar-dot" style="background:{_dot_color}"></div>
+    <span class="topbar-status">{_status_html}</span>
+  </div>
+  <span class="topbar-time">下次更新 {_next_run} · 最後 {_last_upd}</span>
+</div>
+""", unsafe_allow_html=True)
+
+_c1, _c2, _c3 = st.columns([2, 2, 3])
+with _c1:
+    st.session_state["use_ai"] = st.checkbox(
+        "啟用 AI 深度分析",
         value=st.session_state["use_ai"],
         disabled=not _groq_ok,
         key="use_ai_cb",
     )
-    st.session_state["use_ai"] = use_ai
-
-    if st.button("🔄 立即抓取", type="primary", key="fetch_btn"):
+with _c2:
+    if st.button("🔄 立即抓取新聞", type="primary", use_container_width=True):
         with st.spinner("抓取＋分析中，約 30～60 秒…"):
             result = crawl_and_save(
                 enabled_names=st.session_state["enabled_srcs"],
@@ -772,14 +631,13 @@ with col_right:
         ai_info = f"｜AI {result.get('ai_count', 0)} 則" if st.session_state["use_ai"] else ""
         st.success(f"✅ 新增 **{result['saved']}** 則｜去重 {result['skipped']} 則{ai_info}｜{result['elapsed']}s")
         st.rerun()
-    st.markdown('</div>', unsafe_allow_html=True)
 
 
 # ─────────────────────────────────────────────
 # 主體 Tabs
 # ─────────────────────────────────────────────
 tab_dash, tab_deep, tab_cfg = st.tabs([
-    "今日速覽", "深度篩選", "設定"
+    "今日速覽", "深度篩選", "系統設定"
 ])
 
 
@@ -813,6 +671,7 @@ with tab_dash:
     df, counts, secs, hot_tickers, geo_df = load_dash()
     ai_12h = load_ai_12h()
 
+    # 12h 篩選後的 df 用於最新新聞區
     df_12h = filter_12h(df)
 
     total  = sum(counts.values())
@@ -820,8 +679,8 @@ with tab_dash:
     bear_n = counts.get("bearish", 0)
     mid_n  = counts.get("neutral", 0)
 
-    # 頂部指標（4欄，地緣資訊移至別處，保持清爽）
-    c1, c2, c3, c4 = st.columns(4)
+    # ── 頂部指標（保留您的 5 欄配置，套用無邊框樣式）──
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("新聞總數", total)
     if total:
         c2.metric("利多", bull_n, delta=f"{bull_n/total*100:.1f}%")
@@ -830,6 +689,7 @@ with tab_dash:
         c2.metric("利多", 0)
         c3.metric("利空", 0)
     c4.metric("AI 分析", len(ai_12h))
+    c5.metric("地緣政治", len(geo_df))
 
     # ── AI 市場總結 ──
     st.markdown('<div class="sec-hd">✦ AI 市場總結</div>', unsafe_allow_html=True)
@@ -840,7 +700,7 @@ with tab_dash:
         st.info("尚無 AI 分析資料，請先抓取新聞並啟用 AI 深度分析")
     else:
         ts_key = str(ai_12h.iloc[0].get("published_at", ""))
-        cache_key = f"ds_v23_{ts_key}"
+        cache_key = f"ds_v22_{ts_key}"
 
         if st.session_state.get("_sum_key") != cache_key:
             with st.spinner("AI 正在生成今日市場總結…"):
@@ -863,23 +723,23 @@ with tab_dash:
             sumtxt    = sdata.get("summary", "")
             gen_t     = st.session_state.get("_stime", "")
 
-            dir_cls  = "ai-dir-bull" if direction == "偏多" else ("ai-dir-bear" if direction == "偏空" else "ai-dir-neu")
-            dir_icon = "↗" if direction == "偏多" else ("↘" if direction == "偏空" else "→")
+            dir_cls = "ai-dir-pill-bull" if direction == "偏多" else ("ai-dir-pill-bear" if direction == "偏空" else "ai-dir-pill-neu")
 
-            bull_tags = "".join(f'<span class="ai-tag-bull">📈 {t}</span>' for t in bulls)
-            bear_tags = "".join(f'<span class="ai-tag-bear">📉 {t}</span>' for t in bears)
+            bull_tags = "".join(f'<span class="ai-tag-bull">{t}</span>' for t in bulls)
+            bear_tags = "".join(f'<span class="ai-tag-bear">{t}</span>' for t in bears)
             tick_tags = "".join(f'<span class="ai-tick-chip">{t}</span>' for t in keys)
-            tick_html = f'<div style="font-size:var(--font-size-xs);color:var(--color-text-tertiary);margin-bottom:3px">關注個股</div><div class="ai-tickers">{tick_tags}</div>' if tick_tags else ""
+            tick_html = f'<div style="font-size:11px;color:var(--color-text-secondary);margin-bottom:3px">關注個股</div><div class="ai-tickers">{tick_tags}</div>' if tick_tags else ""
 
             st.markdown(f"""
 <div class="ai-card">
-  <span class="ai-badge">Groq AI · 今日總結</span>
-  <div class="{dir_cls}">{dir_icon} 整體{direction}</div>
-  <div class="ai-dir-reason">{dir_r}</div>
+  <div class="ai-dir-wrap">
+    <span class="{dir_cls}">{direction}</span>
+    <span class="ai-dir-reason">{dir_r}</span>
+  </div>
   <div class="ai-themes">{bull_tags}{bear_tags}</div>
   {tick_html}
   <div class="ai-body">{sumtxt}</div>
-  <div class="ai-footer">根據 {len(ai_12h)} 則 AI 分析新聞生成 · {gen_t} 台灣時間</div>
+  <div class="ai-footer">根據 {len(ai_12h)} 則 AI 分析生成 · {gen_t} 台灣時間</div>
 </div>""", unsafe_allow_html=True)
 
             if st.button("🔄 重新生成總結", key="regen"):
@@ -908,7 +768,7 @@ with tab_dash:
                 body_h = f'<div class="geo-body">{sum_g}</div>' if sum_g else ""
                 geo_chunks.append(f"""
 <div class="geo-card">
-  <div class="geo-icon">&#9873;</div>
+  <div class="geo-icon">⚑</div>
   <div>
     <div class="geo-title">{link_h}</div>
     <div class="geo-meta">{impact}</div>
@@ -917,7 +777,7 @@ with tab_dash:
 </div>""")
             st.markdown("\n".join(geo_chunks), unsafe_allow_html=True)
 
-    # ── 今日重點新聞 + 圖表 ──
+    # ── 今日重點新聞 + 圖表（兩欄）──
     st.markdown('<div class="sec-hd">🔑 今日重點新聞（12h）</div>', unsafe_allow_html=True)
     col_news, col_chart = st.columns([3, 2])
 
@@ -935,15 +795,16 @@ with tab_dash:
             render_news(key_df, max_items=25)
 
     with col_chart:
+        # 情緒圓餅
         if total > 0:
             fig_pie = go.Figure(go.Pie(
                 labels=["利多", "利空", "中性"],
                 values=[bull_n, bear_n, mid_n],
                 hole=0.60,
-                marker=dict(colors=["#DC2626", "#059669", "#E2E8F0"],
-                            line=dict(color="#FFFFFF", width=2)),
+                marker=dict(colors=["#A32D2D", "#0F6E56", "#64748B"],
+                            line=dict(color="rgba(0,0,0,0)", width=0)),
                 textinfo="percent+label",
-                textfont=dict(size=11, color="#374151"),
+                textfont=dict(size=12, color="var(--color-text-primary)"),
                 showlegend=False,
             ))
             fig_pie.update_layout(
@@ -952,22 +813,24 @@ with tab_dash:
             )
             st.plotly_chart(fig_pie, use_container_width=True)
 
+        # 類股橫條
         if not secs.empty:
             top_s = secs.head(7)
             fig_sec = go.Figure(go.Bar(
                 x=top_s["count"], y=top_s["sector"], orientation="h",
-                marker=dict(color="#1A1A2E"),
+                marker=dict(color="#378ADD"),
                 text=top_s["count"], textposition="outside",
-                textfont=dict(size=10, color="#64748B"),
+                textfont=dict(size=11, color="var(--color-text-secondary)"),
             ))
             fig_sec.update_layout(
-                yaxis=dict(autorange="reversed", tickfont=dict(color="#374151", size=10)),
+                yaxis=dict(autorange="reversed", tickfont=dict(color="var(--color-text-primary)", size=11)),
                 xaxis=dict(showgrid=False, visible=False),
                 margin=dict(t=4, b=4, l=4, r=35), height=200,
                 paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
             )
             st.plotly_chart(fig_sec, use_container_width=True)
 
+        # 熱門股 Top5
         if not hot_tickers.empty:
             st.markdown('<div class="sec-hd" style="margin-top:4px">🔥 熱門個股</div>', unsafe_allow_html=True)
             tk_chunks = []
@@ -996,11 +859,11 @@ with tab_dash:
 
     st.markdown("""
 <div class="chip-bar">
-  <span class="chip chip-all active" onclick="chipFilter(this,'all')">全部</span>
-  <span class="chip chip-bull" onclick="chipFilter(this,'bull')">📈 利多</span>
-  <span class="chip chip-bear" onclick="chipFilter(this,'bear')">📉 利空</span>
-  <span class="chip chip-ai"  onclick="chipFilter(this,'ai')">✦ AI高分</span>
-  <span class="chip chip-geo" onclick="chipFilter(this,'geo')">⚑ 地緣政治</span>
+  <span class="chip active" onclick="chipFilter(this,'all')">全部</span>
+  <span class="chip" onclick="chipFilter(this,'bull')">📈 利多</span>
+  <span class="chip" onclick="chipFilter(this,'bear')">📉 利空</span>
+  <span class="chip"  onclick="chipFilter(this,'ai')">✦ AI高分</span>
+  <span class="chip" onclick="chipFilter(this,'geo')">⚑ 地緣政治</span>
 </div>""", unsafe_allow_html=True)
 
     f1, f2, f3, f4 = st.columns([1, 1, 2, 1])
@@ -1035,7 +898,7 @@ with tab_dash:
 
 
 # ═══════════════════════════════════════════════
-# TAB 2：深度篩選
+# TAB 2：深度篩選 (完全保留您的邏輯)
 # ═══════════════════════════════════════════════
 with tab_deep:
 
@@ -1048,7 +911,7 @@ with tab_deep:
     # ── AI 深度分析 ──
     if mode == "✦ AI 深度分析":
         if not st.session_state["groq_ok"]:
-            st.warning("請先設定 Groq API Key（Streamlit Cloud → App Settings → Secrets → GROQ_API_KEY）")
+            st.warning("請先設定 Groq API Key")
         else:
             @st.cache_data(ttl=60, show_spinner=False)
             def load_ai_all():
@@ -1064,10 +927,10 @@ with tab_deep:
             else:
                 ai_df["_agree"] = ai_df.apply(lambda r: r["ai_sentiment"] == r["sentiment"], axis=1)
                 a1, a2, a3, a4 = st.columns(4)
-                a1.metric("✦ AI 分析總數", len(ai_df))
-                a2.metric("📈 AI 判多", len(ai_df[ai_df["ai_sentiment"] == "bullish"]))
-                a3.metric("📉 AI 判空", len(ai_df[ai_df["ai_sentiment"] == "bearish"]))
-                a4.metric("⚡ 與KW不一致", len(ai_df[~ai_df["_agree"]]), help="最有參考價值")
+                a1.metric("AI 分析總數", len(ai_df))
+                a2.metric("AI 判多", len(ai_df[ai_df["ai_sentiment"] == "bullish"]))
+                a3.metric("AI 判空", len(ai_df[ai_df["ai_sentiment"] == "bearish"]))
+                a4.metric("與KW不一致", len(ai_df[~ai_df["_agree"]]), help="最有參考價值")
 
                 st.divider()
                 af1, af2, af3 = st.columns(3)
@@ -1133,34 +996,34 @@ with tab_deep:
                 fig_cnt = go.Figure(go.Bar(
                     x=hdf.head(15)["出現次數"], y=hdf.head(15)["代碼"], orientation="h",
                     marker=dict(color=hdf.head(15)["出現次數"],
-                                colorscale=[[0, "#E2E8F0"], [1, "#1A1A2E"]], showscale=False),
+                                colorscale=[[0, "rgba(55,138,221,0.2)"], [1, "#378ADD"]], showscale=False),
                     text=hdf.head(15)["出現次數"], textposition="outside",
-                    textfont=dict(size=10, color="#64748B"),
+                    textfont=dict(size=11, color="var(--color-text-secondary)"),
                 ))
                 fig_cnt.update_layout(
-                    title=dict(text="出現次數", font=dict(color="#374151", size=12)),
-                    yaxis=dict(autorange="reversed", tickfont=dict(color="#374151", size=10)),
+                    title=dict(text="出現次數", font=dict(color="var(--color-text-primary)", size=13)),
+                    yaxis=dict(autorange="reversed", tickfont=dict(color="var(--color-text-primary)", size=11)),
                     xaxis=dict(showgrid=False, visible=False),
-                    margin=dict(t=24, b=8, l=8, r=40), height=360,
+                    margin=dict(t=30, b=8, l=8, r=40), height=360,
                     paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                 )
                 st.plotly_chart(fig_cnt, use_container_width=True)
 
             with ch2:
                 cdf15 = hdf.head(15)
-                colors15 = ["#DC2626" if s >= 0.15 else ("#059669" if s <= -0.15 else "#CBD5E1")
+                colors15 = ["#A32D2D" if s >= 0.15 else ("#0F6E56" if s <= -0.15 else "#64748B")
                             for s in cdf15["平均情緒"]]
                 fig_sc = go.Figure(go.Bar(
                     x=cdf15["平均情緒"], y=cdf15["代碼"], orientation="h",
                     marker=dict(color=colors15),
                     text=cdf15["平均情緒"].round(2), textposition="outside",
-                    textfont=dict(size=10, color="#64748B"),
+                    textfont=dict(size=11, color="var(--color-text-secondary)"),
                 ))
                 fig_sc.update_layout(
-                    title=dict(text="平均情緒分數", font=dict(color="#374151", size=12)),
-                    yaxis=dict(autorange="reversed", tickfont=dict(color="#374151", size=10)),
+                    title=dict(text="平均情緒分數", font=dict(color="var(--color-text-primary)", size=13)),
+                    yaxis=dict(autorange="reversed", tickfont=dict(color="var(--color-text-primary)", size=11)),
                     xaxis=dict(showgrid=False, visible=False),
-                    margin=dict(t=24, b=8, l=8, r=40), height=360,
+                    margin=dict(t=30, b=8, l=8, r=40), height=360,
                     paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                 )
                 st.plotly_chart(fig_sc, use_container_width=True)
@@ -1180,9 +1043,9 @@ with tab_deep:
             st.info("目前沒有地緣政治相關新聞")
         else:
             g1, g2, g3 = st.columns(3)
-            g1.metric("⚑ 地緣政治新聞", len(gdf))
-            g2.metric("📉 利空", len(gdf[gdf["sentiment"] == "bearish"]))
-            g3.metric("📈 利多", len(gdf[gdf["sentiment"] == "bullish"]))
+            g1.metric("地緣政治新聞", len(gdf))
+            g2.metric("利空", len(gdf[gdf["sentiment"] == "bearish"]))
+            g3.metric("利多", len(gdf[gdf["sentiment"] == "bullish"]))
             st.divider()
             render_news(gdf)
 
@@ -1213,19 +1076,19 @@ with tab_deep:
                 rows2.append({"類股": sec2, "新聞數": cnt2, "平均情緒": round(avg2, 3), "利多": bull2, "利空": bear2})
             rank_df = pd.DataFrame(rows2)
 
-            clrs_r = ["#DC2626" if s >= 0.05 else ("#059669" if s <= -0.05 else "#CBD5E1")
+            clrs_r = ["#A32D2D" if s >= 0.05 else ("#0F6E56" if s <= -0.05 else "#64748B")
                       for s in rank_df.head(10)["平均情緒"]]
             fig_r = go.Figure(go.Bar(
                 x=rank_df.head(10)["新聞數"], y=rank_df.head(10)["類股"], orientation="h",
                 marker=dict(color=clrs_r),
                 text=rank_df.head(10)["新聞數"], textposition="outside",
-                textfont=dict(size=11, color="#64748B"),
+                textfont=dict(size=11, color="var(--color-text-secondary)"),
             ))
             fig_r.update_layout(
-                title=dict(text="類股新聞數（紅=偏多 綠=偏空）", font=dict(color="#374151", size=12)),
-                yaxis=dict(autorange="reversed", tickfont=dict(color="#374151", size=11)),
+                title=dict(text="類股新聞數（深紅=偏多 深綠=偏空）", font=dict(color="var(--color-text-primary)", size=13)),
+                yaxis=dict(autorange="reversed", tickfont=dict(color="var(--color-text-primary)", size=11)),
                 xaxis=dict(showgrid=False, visible=False),
-                margin=dict(t=24, b=8, l=8, r=40), height=340,
+                margin=dict(t=30, b=8, l=8, r=40), height=340,
                 paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
             )
             st.plotly_chart(fig_r, use_container_width=True)
@@ -1249,15 +1112,15 @@ with tab_deep:
         )
         if not ticker_q:
             st.markdown("""
-<div style="background:var(--color-background-secondary);border:1px solid var(--color-border-medium);border-radius:8px;
-            padding:14px 18px;font-size:var(--font-size-sm);color:var(--color-text-secondary);line-height:2.2">
+<div style="background:var(--color-background-secondary);border-radius:8px;
+            padding:14px 18px;font-size:13px;color:var(--color-text-secondary);line-height:2.2">
   <strong style="color:var(--color-text-primary)">支援格式</strong><br>
-  台股代碼：<code style="background:var(--color-background-primary);padding:1px 6px;border-radius:4px;color:var(--color-text-primary)">2330</code>
-  <code style="background:var(--color-background-primary);padding:1px 6px;border-radius:4px;color:var(--color-text-primary)">2454</code><br>
-  台股名稱：<code style="background:var(--color-background-primary);padding:1px 6px;border-radius:4px;color:var(--color-text-primary)">台積電</code>
-  <code style="background:var(--color-background-primary);padding:1px 6px;border-radius:4px;color:var(--color-text-primary)">廣達</code><br>
-  美股代碼：<code style="background:var(--color-background-primary);padding:1px 6px;border-radius:4px;color:var(--color-text-primary)">NVDA</code>
-  <code style="background:var(--color-background-primary);padding:1px 6px;border-radius:4px;color:var(--color-text-primary)">TSLA</code>
+  台股代碼：<code style="background:var(--color-background-primary);padding:2px 6px;border-radius:4px;color:var(--color-text-primary)">2330</code>
+  <code style="background:var(--color-background-primary);padding:2px 6px;border-radius:4px;color:var(--color-text-primary)">2454</code><br>
+  台股名稱：<code style="background:var(--color-background-primary);padding:2px 6px;border-radius:4px;color:var(--color-text-primary)">台積電</code>
+  <code style="background:var(--color-background-primary);padding:2px 6px;border-radius:4px;color:var(--color-text-primary)">廣達</code><br>
+  美股代碼：<code style="background:var(--color-background-primary);padding:2px 6px;border-radius:4px;color:var(--color-text-primary)">NVDA</code>
+  <code style="background:var(--color-background-primary);padding:2px 6px;border-radius:4px;color:var(--color-text-primary)">TSLA</code>
 </div>""", unsafe_allow_html=True)
         else:
             q = ticker_q.strip()
@@ -1279,9 +1142,9 @@ with tab_deep:
             else:
                 s1, s2, s3, s4 = st.columns(4)
                 s1.metric("總計", len(sdf))
-                s2.metric("📈 利多", len(sdf[sdf["sentiment"] == "bullish"]))
-                s3.metric("📉 利空", len(sdf[sdf["sentiment"] == "bearish"]))
-                s4.metric("✦ AI 分析", len(sdf[sdf.get("ai_summary", pd.Series(dtype=str)).ne("") if "ai_summary" in sdf.columns else pd.Series([False]*len(sdf))]))
+                s2.metric("利多", len(sdf[sdf["sentiment"] == "bullish"]))
+                s3.metric("利空", len(sdf[sdf["sentiment"] == "bearish"]))
+                s4.metric("AI 分析", len(sdf[sdf.get("ai_summary", pd.Series(dtype=str)).ne("") if "ai_summary" in sdf.columns else pd.Series([False]*len(sdf))]))
                 csv_s = sdf[["title","sentiment_label","sentiment_score","ai_sentiment","ai_score","ai_summary","tickers","sectors","source","published_at","url"]].to_csv(index=False, encoding="utf-8-sig")
                 st.download_button("⬇ 匯出 CSV", csv_s, file_name=f"finnews_{code_q}.csv", mime="text/csv", key="stock_csv")
                 st.divider()
@@ -1346,7 +1209,7 @@ with tab_deep:
 
 
 # ═══════════════════════════════════════════════
-# TAB 3：設定
+# TAB 3：設定 (完全保留您的邏輯)
 # ═══════════════════════════════════════════════
 with tab_cfg:
     st.markdown("### ⚙️ 系統設定")
@@ -1366,7 +1229,7 @@ with tab_cfg:
         enabled_srcs = []
         for src in SOURCES:
             chk = st.checkbox(
-                f"**{src['name']}**　`{src['category']}`",
+                f"**{src['name']}** `{src['category']}`",
                 value=(src["name"] in st.session_state["enabled_srcs"]),
                 key=f"src_{src['name']}",
             )
@@ -1399,10 +1262,9 @@ with tab_cfg:
         }
         if all_cw:
             chips = " ".join(
-                f'<span style="background:{"var(--color-bg-bull)" if lb=="利多" else "var(--color-bg-bear)"};'
-                f'padding:3px 10px;border-radius:10px;font-size:var(--font-size-xs);'
-                f'border:1px solid {"#FECACA" if lb=="利多" else "#A7F0D0"};'
-                f'color:{"var(--color-bull)" if lb=="利多" else "var(--color-bear)"}">'
+                f'<span style="background:{"rgba(163, 45, 45, 0.1)" if lb=="利多" else "rgba(15, 110, 86, 0.1)"};'
+                f'padding:4px 12px;border-radius:12px;font-size:12px; font-weight: 500;'
+                f'color:{"#A32D2D" if lb=="利多" else "#0F6E56"}">'
                 f'{wd} {lb}</span>'
                 for wd, lb in all_cw.items()
             )
@@ -1429,9 +1291,9 @@ with tab_cfg:
   <td>{lr["來源"]}</td>
   <td>{sbadge}</td>
   <td style="color:var(--color-text-secondary)">{lr["抓取"]}</td>
-  <td style="color:var(--color-bear);font-weight:700">{lr["新增"]}</td>
-  <td style="color:var(--color-text-tertiary)">{lr["跳過"]}</td>
-  <td style="font-family:monospace;font-size:var(--font-size-xs);color:var(--color-text-tertiary)">{lr["時間(台灣)"]}</td>
+  <td style="color:#0F6E56;font-weight:600">{lr["新增"]}</td>
+  <td style="color:var(--color-text-secondary)">{lr["跳過"]}</td>
+  <td style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--color-text-secondary)">{lr["時間(台灣)"]}</td>
 </tr>""")
             st.markdown(f"""
 <div style="overflow-x:auto">
@@ -1439,7 +1301,7 @@ with tab_cfg:
   <thead>
     <tr>
       <th>來源</th><th>狀態</th><th>抓取</th>
-      <th style="color:var(--color-bear)">新增</th><th style="color:var(--color-text-tertiary)">跳過</th><th>時間(台灣)</th>
+      <th style="color:#0F6E56">新增</th><th>跳過</th><th>時間(台灣)</th>
     </tr>
   </thead>
   <tbody>{"".join(log_rows_html)}</tbody>
