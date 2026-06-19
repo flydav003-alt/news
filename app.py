@@ -969,17 +969,36 @@ with tab_dash:
         mid_n  = counts.get("neutral", 0)
     total = bull_n + bear_n + mid_n
 
-    # ── 頂部指標（5欄，更緊湊）──
+    # ── 頂部指標（5欄，自訂 HTML，台灣紅漲綠跌，百分比同行）──
+    def _metric_html(icon, label, value, pct=None, bull=False):
+        if pct is not None:
+            if bull:
+                delta_html = (f'<span style="color:var(--color-bull-text);font-size:10px;'
+                              f'margin-left:4px;font-weight:400">↑ {pct:.1f}%</span>')
+            else:
+                delta_html = (f'<span style="color:var(--color-bear-text);font-size:10px;'
+                              f'margin-left:4px;font-weight:400">↓ {pct:.1f}%</span>')
+        else:
+            delta_html = ""
+        return (
+            f'<div style="padding:8px 12px">'
+            f'  <div style="font-size:11px;color:var(--color-text-secondary);font-weight:500;margin-bottom:2px">'
+            f'    {icon} {label}</div>'
+            f'  <div style="font-size:18px;font-weight:500;line-height:1;color:var(--color-text-primary)">'
+            f'    {value}{delta_html}</div>'
+            f'</div>'
+        )
+
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("📰 新聞總數", total)
+    c1.markdown(_metric_html("📰", "新聞總數", total), unsafe_allow_html=True)
     if total:
-        c2.metric("📈 利多", bull_n, delta=f"{bull_n/total*100:.1f}%")
-        c3.metric("📉 利空", bear_n, delta=f"-{bear_n/total*100:.1f}%", delta_color="inverse")
+        c2.markdown(_metric_html("📈", "利多", bull_n, pct=bull_n/total*100, bull=True),  unsafe_allow_html=True)
+        c3.markdown(_metric_html("📉", "利空", bear_n, pct=bear_n/total*100, bull=False), unsafe_allow_html=True)
     else:
-        c2.metric("📈 利多", 0)
-        c3.metric("📉 利空", 0)
-    c4.metric("✦ AI 分析", len(ai_12h))
-    c5.metric("⚑ 地緣政治", len(geo_df))
+        c2.markdown(_metric_html("📈", "利多", 0),  unsafe_allow_html=True)
+        c3.markdown(_metric_html("📉", "利空", 0), unsafe_allow_html=True)
+    c4.markdown(_metric_html("✦", "AI 分析", len(ai_12h)),    unsafe_allow_html=True)
+    c5.markdown(_metric_html("⚑", "地緣政治", len(geo_df)),   unsafe_allow_html=True)
 
     # ── AI 市場總結 ──
     st.markdown('<div class="sec-hd">✦ AI 市場總結</div>', unsafe_allow_html=True)
