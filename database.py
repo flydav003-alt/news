@@ -297,11 +297,19 @@ def get_articles_df(db: Session, sentiment=None, ticker=None,
     return pd.DataFrame([_row_to_dict(r) for r in rows])
 
 
-def get_sentiment_counts(db: Session) -> dict:
+def get_sentiment_counts(db: Session, hours: int = None) -> dict:
     result = {"bullish": 0, "bearish": 0, "neutral": 0}
-    for row in db.execute(text(
-        "SELECT sentiment, COUNT(*) FROM news_articles GROUP BY sentiment"
-    )).fetchall():
+    if hours:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        rows = db.execute(text(
+            "SELECT sentiment, COUNT(*) FROM news_articles "
+            "WHERE published_at >= :cutoff GROUP BY sentiment"
+        ), {"cutoff": cutoff}).fetchall()
+    else:
+        rows = db.execute(text(
+            "SELECT sentiment, COUNT(*) FROM news_articles GROUP BY sentiment"
+        )).fetchall()
+    for row in rows:
         if row[0] in result:
             result[row[0]] = row[1]
     return result
