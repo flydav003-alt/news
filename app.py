@@ -722,10 +722,15 @@ st.markdown(CSS, unsafe_allow_html=True)
 if "initialized" not in st.session_state:
     init_db()
     start_scheduler(interval_minutes=30)
+    # 多一層保護：secrets 讀取失敗時退而用環境變數
+    groq_ok = False
     try:
         groq_ok = bool(st.secrets.get("GROQ_API_KEY", ""))
     except Exception:
-        groq_ok = False
+        pass
+    if not groq_ok:
+        import os
+        groq_ok = bool(os.environ.get("GROQ_API_KEY", ""))
     st.session_state.update({
         "initialized":  True,
         "last_update":  "尚未更新",
@@ -734,8 +739,18 @@ if "initialized" not in st.session_state:
         "enabled_srcs": [s["name"] for s in SOURCES if s["enabled"]],
         "interval":     30,
         "groq_ok":      groq_ok,
-        "use_ai":       groq_ok,
+        "use_ai":       groq_ok,   # groq_ok=True 時預設開啟
     })
+# ── 每次 rerun 都重新確認 groq_ok（防 secrets 讀取延遲問題）──
+if not st.session_state.get("groq_ok"):
+    try:
+        _recheck = bool(st.secrets.get("GROQ_API_KEY", ""))
+    except Exception:
+        import os
+        _recheck = bool(os.environ.get("GROQ_API_KEY", ""))
+    if _recheck:
+        st.session_state["groq_ok"] = True
+        st.session_state["use_ai"]  = True
 
 
 # ─────────────────────────────────────────────
@@ -1049,11 +1064,21 @@ with tab_dash:
 
     # ── 今日重點新聞 + 圖表（兩欄）──
     st.markdown('<div class="sec-hd">🔑 今日重點新聞（12h）</div>', unsafe_allow_html=True)
-    col_news, col_chart = st.columns([3, 2])
+    col_news, col_chart = st.columns([4, 1])
 
     with col_news:
         if ai_12h.empty:
-            st.markdown('<div class="empty-box"><div class="empty-box-icon">📭</div><div class="empty-box-txt">請先抓取並啟用 AI 分析</div></div>', unsafe_allow_html=True)
+            _groq_status = "✅ Groq Key 已設定" if st.session_state["groq_ok"] else "❌ Groq Key 未找到"
+            _use_ai_status = "✅ AI 開關已開啟" if st.session_state["use_ai"] else "❌ AI 開關未開啟（頂部 checkbox 未勾）"
+            st.markdown(f"""
+<div class="empty-box">
+  <div class="empty-box-icon">📭</div>
+  <div class="empty-box-txt">12h 內無 AI 分析資料</div>
+  <div style="font-size:12px;color:var(--color-text-tertiary);margin-top:8px;line-height:2">
+    {_groq_status}<br>{_use_ai_status}<br>
+    👉 請手動按「立即抓取」並確認 AI 開關開啟
+  </div>
+</div>""", unsafe_allow_html=True)
         else:
             key_df = ai_12h[ai_12h["ai_sentiment"].isin(["bullish", "bearish"])]
             if key_df.empty:
@@ -1065,7 +1090,7 @@ with tab_dash:
             render_news(key_df, max_items=25)
 
     with col_chart:
-        # 情緒圓餅（更小）
+        # 情緒圓餅
         if total > 0:
             fig_pie = go.Figure(go.Pie(
                 labels=["利多", "利空", "中性"],
@@ -1078,51 +1103,10 @@ with tab_dash:
                 showlegend=False,
             ))
             fig_pie.update_layout(
-                margin=dict(t=4, b=4, l=4, r=4), height=170,
+                margin=dict(t=4, b=4, l=4, r=4), height=200,
                 paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
             )
             st.plotly_chart(fig_pie, use_container_width=True)
-
-        # 類股橫條（更小）
-        if not secs.empty:
-            top_s = secs.head(7)
-            fig_sec = go.Figure(go.Bar(
-                x=top_s["count"], y=top_s["sector"], orientation="h",
-                marker=dict(color="#1A1A2E"),
-                text=top_s["count"], textposition="outside",
-                textfont=dict(size=12, color="#64748B"),
-            ))
-            fig_sec.update_layout(
-                yaxis=dict(autorange="reversed", tickfont=dict(color="#374151", size=12)),
-                xaxis=dict(showgrid=False, visible=False),
-                margin=dict(t=4, b=4, l=4, r=35), height=200,
-                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-            )
-            st.plotly_chart(fig_sec, use_container_width=True)
-
-        # 熱門股 Top5
-        if not hot_tickers.empty:
-            st.markdown('<div class="sec-hd" style="margin-top:4px">🔥 熱門個股</div>', unsafe_allow_html=True)
-            tk_chunks = []
-            for _, row in hot_tickers.head(5).iterrows():
-                sc = row["平均情緒"]
-                if sc >= 0.15:
-                    sc_h = f'<span class="tk-bull">+{sc:.2f}</span>'
-                elif sc <= -0.15:
-                    sc_h = f'<span class="tk-bear">{sc:.2f}</span>'
-                else:
-                    sc_h = f'<span class="tk-neu">{sc:.2f}</span>'
-                market = row.get("市場", "TW")
-                lk = f"https://tw.stock.yahoo.com/quote/{row['代碼']}" if market == "TW" else f"https://finance.yahoo.com/quote/{row['代碼']}"
-                tk_chunks.append(f"""
-<div class="tk-card">
-  <a href="{lk}" target="_blank" style="text-decoration:none">
-    <div class="tk-code">{row['代碼']}</div>
-  </a>
-  <div class="tk-name">{row['名稱']}</div>
-  <div>{sc_h} <span class="tk-cnt">· {row['出現次數']} 則</span></div>
-</div>""")
-            st.markdown("\n".join(tk_chunks), unsafe_allow_html=True)
 
     # ── 最新新聞（12h 快速篩選）──
     st.markdown('<div class="sec-hd">📋 最新新聞（12h）</div>', unsafe_allow_html=True)
