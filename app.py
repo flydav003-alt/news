@@ -62,17 +62,16 @@ def relative_time(dt) -> str:
 
 
 def filter_12h(df):
-    """只保留 12 小時內新聞"""
+    """只保留 12 小時內新聞（無時區資訊視為舊資料排除，不 fallback 舊新聞）"""
     if df is None or df.empty:
         return df
     cutoff = datetime.now(TZ_TW) - timedelta(hours=12)
     mask = df["published_at"].apply(
         lambda x: x is not None and (
-            x.astimezone(TZ_TW) >= cutoff if getattr(x, "tzinfo", None) else True
+            x.astimezone(TZ_TW) >= cutoff if getattr(x, "tzinfo", None) else False
         )
     )
-    filtered = df[mask]
-    return filtered if not filtered.empty else df  # fallback 防空
+    return df[mask]  # 空就回空，不 fallback 舊新聞
 
 
 # ─────────────────────────────────────────────
@@ -942,10 +941,16 @@ with tab_dash:
     # 12h 篩選後的 df 用於最新新聞區
     df_12h = filter_12h(df)
 
-    total  = sum(counts.values())
-    bull_n = counts.get("bullish", 0)
-    bear_n = counts.get("bearish", 0)
-    mid_n  = counts.get("neutral", 0)
+    # 利多/利空指標只算 12h 內（從 df_12h 統計，不用全庫 counts）
+    if df_12h is not None and not df_12h.empty:
+        bull_n = int((df_12h["sentiment"] == "bullish").sum())
+        bear_n = int((df_12h["sentiment"] == "bearish").sum())
+        mid_n  = int((df_12h["sentiment"] == "neutral").sum())
+    else:
+        bull_n = counts.get("bullish", 0)
+        bear_n = counts.get("bearish", 0)
+        mid_n  = counts.get("neutral", 0)
+    total = bull_n + bear_n + mid_n
 
     # ── 頂部指標（5欄，更緊湊）──
     c1, c2, c3, c4, c5 = st.columns(5)
