@@ -318,9 +318,11 @@ div[data-testid="column"]:has(.stButton) { padding-top: 4px !important; }
   padding: 10px 14px;
   box-shadow: none;
 }
-[data-testid="stMetricLabel"] { color: var(--color-text-secondary) !important; font-size: 12px !important; font-weight: 500 !important; }
-[data-testid="stMetricValue"] { color: var(--color-text-primary) !important; font-size: 20px !important; font-weight: 500 !important; }
-[data-testid="stMetricDelta"] { font-size: 12px !important; }
+[data-testid="stMetricLabel"] { color: var(--color-text-secondary) !important; font-size: 11px !important; font-weight: 500 !important; margin-bottom: 2px !important; }
+[data-testid="stMetricValue"] { color: var(--color-text-primary) !important; font-size: 18px !important; font-weight: 500 !important; margin-bottom: 0 !important; line-height: 1 !important; }
+[data-testid="stMetricDelta"] { font-size: 10px !important; color: var(--color-text-secondary) !important; display: inline !important; margin: 0 !important; margin-left: 2px !important; }
+[data-testid="metric-container"] { padding: 10px 12px !important; gap: 2px !important; }
+[data-testid="stMetric"] { gap: 0px !important; padding: 8px 12px !important; }
 
 /* ── Buttons ── */
 .stButton > button {
