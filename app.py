@@ -154,10 +154,60 @@ CSS = """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap');
 
+/* ══════════════════════════════════════
+   CSS 變數系統（支援深色模式）
+══════════════════════════════════════ */
+:root {
+  --color-background-primary: #FFFFFF;
+  --color-background-secondary: #F1F4F8;
+  --color-background-tertiary: #F6F8FA;
+  --color-text-primary: #1A1A2E;
+  --color-text-secondary: #64748B;
+  --color-text-tertiary: #94A3B8;
+  --color-border-primary: #CBD5E1;
+  --color-border-secondary: #E2E8F0;
+  --color-border-tertiary: #E9ECF1;
+  --color-text-info: #185FA5;
+  --color-background-info: #E6F1FB;
+  --color-text-warning: #92400E;
+  --color-background-warning: #FFFBEB;
+  --color-border-warning: #FDE68A;
+  /* 語意色：利多／利空（避免紅=危險的誤讀，深色文字配淺色底） */
+  --color-bull-text: #A32D2D;
+  --color-bull-bg: #FCEBEB;
+  --color-bear-text: #0F6E56;
+  --color-bear-bg: #E1F5EE;
+  --color-accent: #378ADD;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-background-primary: #1A1D26;
+    --color-background-secondary: #232733;
+    --color-background-tertiary: #15171F;
+    --color-text-primary: #EDEFF3;
+    --color-text-secondary: #9AA3B2;
+    --color-text-tertiary: #6B7280;
+    --color-border-primary: #3A3F4B;
+    --color-border-secondary: #2D313D;
+    --color-border-tertiary: #2A2E38;
+    --color-text-info: #6FB3F0;
+    --color-background-info: #1C2A3A;
+    --color-text-warning: #FBBF24;
+    --color-background-warning: #2A2310;
+    --color-border-warning: #4A3B14;
+    --color-bull-text: #E08989;
+    --color-bull-bg: #2E1E1E;
+    --color-bear-text: #6FCBAE;
+    --color-bear-bg: #163029;
+    --color-accent: #5B9FE0;
+  }
+}
+
 html, body, [class*="css"], .stApp {
   font-family: 'Noto Sans TC', sans-serif !important;
-  background-color: #F6F8FA !important;
-  color: #1A1A2E !important;
+  background-color: var(--color-background-tertiary) !important;
+  color: var(--color-text-primary) !important;
 }
 
 /* ── 完全移除 header ── */
@@ -186,17 +236,15 @@ section.main .block-container {
 .appview-container { padding-top: 0 !important; }
 .appview-container .main { padding-top: 0 !important; }
 
-/* ── 緊湊 topbar ── */
+/* ── 緊湊 topbar：去框，改底部分隔線 ── */
 .topbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  background: #FFFFFF;
-  border: 1px solid #E2E8F0;
-  border-radius: 10px;
-  padding: 7px 14px;
-  margin-bottom: 8px;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+  background: transparent;
+  border-bottom: 0.5px solid var(--color-border-tertiary);
+  padding: 10px 2px;
+  margin-bottom: 4px;
 }
 .topbar-left {
   display: flex;
@@ -206,23 +254,23 @@ section.main .block-container {
 }
 .topbar-logo {
   font-size: 14px;
-  font-weight: 700;
-  color: #1A1A2E;
+  font-weight: 500;
+  color: var(--color-text-primary);
   white-space: nowrap;
   flex-shrink: 0;
 }
 .topbar-status-ok {
-  font-size: 10px; font-weight: 600; color: #16A34A;
-  background: #F0FDF4; border: 1px solid #BBF7D0;
-  border-radius: 20px; padding: 2px 8px; white-space: nowrap; flex-shrink: 0;
+  font-size: 12px; font-weight: 500; color: var(--color-bear-text);
+  background: var(--color-bear-bg);
+  border-radius: 20px; padding: 2px 9px; white-space: nowrap; flex-shrink: 0;
 }
 .topbar-status-warn {
-  font-size: 10px; font-weight: 600; color: #D97706;
-  background: #FFFBEB; border: 1px solid #FDE68A;
-  border-radius: 20px; padding: 2px 8px; white-space: nowrap; flex-shrink: 0;
+  font-size: 12px; font-weight: 500; color: var(--color-text-warning);
+  background: var(--color-background-warning);
+  border-radius: 20px; padding: 2px 9px; white-space: nowrap; flex-shrink: 0;
 }
 .topbar-time {
-  font-size: 10px; color: #94A3B8;
+  font-size: 12px; color: var(--color-text-secondary);
   font-family: 'JetBrains Mono', monospace;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
@@ -234,244 +282,252 @@ section.main .block-container {
   gap: 12px;
   margin-bottom: 8px;
 }
+/* topbar 同列的 checkbox/button 垂直對齊 */
+div[data-testid="column"]:has(.stCheckbox) { padding-top: 14px !important; }
+div[data-testid="column"]:has(.stButton) { padding-top: 4px !important; }
 
-/* ── Tabs 更緊湊 ── */
+/* ── Tabs：下底線式，去掉膠囊背景 ── */
 .stTabs [data-baseweb="tab-list"] {
-  background: #FFFFFF;
-  border-radius: 8px;
-  padding: 3px;
-  gap: 2px;
-  border: 1px solid #E2E8F0;
-  box-shadow: 0 1px 2px rgba(0,0,0,0.04);
-  margin-bottom: 8px !important;
+  background: transparent;
+  border-radius: 0;
+  padding: 0;
+  gap: 4px;
+  border-bottom: 0.5px solid var(--color-border-tertiary);
+  margin-bottom: 12px !important;
 }
 .stTabs [data-baseweb="tab"] {
-  font-size: 13px; font-weight: 600;
-  padding: 6px 18px; border-radius: 6px;
-  color: #64748B;
+  font-size: 14px; font-weight: 500;
+  padding: 8px 16px; border-radius: 0;
+  color: var(--color-text-secondary);
+  border-bottom: 2px solid transparent;
 }
 .stTabs [aria-selected="true"] {
-  background: #1A1A2E !important;
-  color: #FFFFFF !important;
+  background: transparent !important;
+  color: var(--color-text-info) !important;
+  border-bottom: 2px solid var(--color-accent) !important;
 }
 .stTabs [data-baseweb="tab-panel"] {
   padding-top: 4px !important;
 }
+.stTabs [data-baseweb="tab-highlight"] { display: none !important; }
 
-/* ── Metrics 更緊湊 ── */
+/* ── Metrics：去框，填色背景 ── */
 [data-testid="metric-container"] {
-  background: #FFFFFF;
-  border: 1px solid #E2E8F0;
+  background: var(--color-background-secondary);
+  border: none;
   border-radius: 10px;
   padding: 10px 14px;
-  box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+  box-shadow: none;
 }
-[data-testid="stMetricLabel"] { color: #64748B !important; font-size: 11px !important; font-weight: 600 !important; }
-[data-testid="stMetricValue"] { color: #1A1A2E !important; font-size: 20px !important; font-weight: 700 !important; }
-[data-testid="stMetricDelta"] { font-size: 11px !important; }
+[data-testid="stMetricLabel"] { color: var(--color-text-secondary) !important; font-size: 12px !important; font-weight: 500 !important; }
+[data-testid="stMetricValue"] { color: var(--color-text-primary) !important; font-size: 20px !important; font-weight: 500 !important; }
+[data-testid="stMetricDelta"] { font-size: 12px !important; }
 
 /* ── Buttons ── */
 .stButton > button {
-  border-radius: 7px; font-weight: 600; font-size: 13px;
-  border: 1px solid #E2E8F0; background: #FFFFFF; color: #374151;
-  transition: all 0.15s; box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+  border-radius: 7px; font-weight: 500; font-size: 14px;
+  border: 0.5px solid var(--color-border-secondary); background: var(--color-background-primary); color: var(--color-text-primary);
+  transition: all 0.15s; box-shadow: none;
   height: 36px !important; padding: 0 28px !important;
   white-space: nowrap !important;
 }
-.stButton > button:hover { background: #F1F5F9; border-color: #CBD5E1; }
+.stButton > button:hover { background: var(--color-background-secondary); border-color: var(--color-border-primary); }
 .stButton > button[kind="primary"] {
-  background: linear-gradient(135deg, #DC2626 0%, #B91C1C 100%);
-  border-color: #DC2626; color: #FFFFFF;
-  box-shadow: 0 2px 4px rgba(220,38,38,0.25);
+  background: var(--color-accent);
+  border-color: var(--color-accent); color: #FFFFFF;
+  box-shadow: none;
 }
-.stButton > button[kind="primary"]:hover { opacity: 0.92; }
+.stButton > button[kind="primary"]:hover { opacity: 0.88; }
 
 /* ── Checkbox 更緊湊 ── */
 .stCheckbox { margin-bottom: 0 !important; }
-.stCheckbox label { color: #374151 !important; font-size: 13px !important; }
+.stCheckbox label { color: var(--color-text-primary) !important; font-size: 14px !important; }
 
 /* ── Selectbox / Input ── */
 .stSelectbox > div > div,
 .stTextInput > div > div > input {
-  background: #FFFFFF !important;
-  border: 1px solid #E2E8F0 !important;
+  background: var(--color-background-primary) !important;
+  border: 0.5px solid var(--color-border-secondary) !important;
   border-radius: 7px !important;
-  color: #1A1A2E !important;
-  font-size: 13px !important;
+  color: var(--color-text-primary) !important;
+  font-size: 14px !important;
 }
-.stSelectbox label, .stTextInput label { color: #64748B !important; font-size: 11px !important; font-weight: 600 !important; }
+.stSelectbox label, .stTextInput label { color: var(--color-text-secondary) !important; font-size: 12px !important; font-weight: 500 !important; }
 
 /* ── 篩選列：縮小 padding ── */
 div[data-testid="column"] { padding-left: 4px !important; padding-right: 4px !important; }
 
 /* ── Radio ── */
-.stRadio label { color: #374151 !important; font-size: 13px !important; font-weight: 500 !important; }
+.stRadio label { color: var(--color-text-primary) !important; font-size: 14px !important; font-weight: 500 !important; }
 .stRadio > div { gap: 6px !important; }
 
 /* ── Divider ── */
-hr { border-color: #E2E8F0 !important; margin: 10px 0 !important; }
-.stCaption { color: #94A3B8 !important; font-size: 11px !important; }
+hr { border-color: var(--color-border-tertiary) !important; margin: 10px 0 !important; }
+.stCaption { color: var(--color-text-tertiary) !important; font-size: 12px !important; }
 
 /* ── Section Header ── */
 .sec-hd {
-  font-size: 10px; font-weight: 700; color: #94A3B8;
-  letter-spacing: 1.2px; text-transform: uppercase;
+  font-size: 12px; font-weight: 500; color: var(--color-text-secondary);
+  letter-spacing: 1px; text-transform: uppercase;
   margin: 14px 0 7px;
   display: flex; align-items: center; gap: 7px;
 }
-.sec-hd::after { content: ''; flex: 1; height: 1px; background: #E2E8F0; }
+.sec-hd::after { content: ''; flex: 1; height: 0.5px; background: var(--color-border-tertiary); }
 
 /* ══════════════════════════════════════
-   AI 總結卡片（更緊湊）
+   AI 總結卡片（左側 accent，更輕量）
 ══════════════════════════════════════ */
 .ai-card {
-  background: #FFFFFF; border: 1px solid #E2E8F0;
-  border-radius: 12px; padding: 16px 20px; margin-bottom: 6px;
-  box-shadow: 0 2px 6px rgba(0,0,0,0.05); border-top: 3px solid #1A1A2E;
+  background: var(--color-background-primary);
+  border: 0.5px solid var(--color-border-tertiary);
+  border-left: 3px solid var(--color-accent);
+  border-radius: 0 10px 10px 0; padding: 14px 18px; margin-bottom: 6px;
+  box-shadow: none;
 }
 .ai-badge {
-  font-size: 9px; font-weight: 700; letter-spacing: 1.2px;
-  color: #D97706; background: #FFFBEB; border: 1px solid #FDE68A;
-  border-radius: 4px; padding: 2px 7px; text-transform: uppercase;
+  font-size: 11px; font-weight: 500; letter-spacing: 0.5px;
+  color: var(--color-text-warning); background: var(--color-background-warning);
+  border-radius: 4px; padding: 2px 8px; text-transform: uppercase;
   display: inline-block; margin-bottom: 8px;
 }
-.ai-dir-bull { font-size: 17px; font-weight: 700; color: #DC2626; }
-.ai-dir-bear { font-size: 17px; font-weight: 700; color: #16A34A; }
-.ai-dir-neu  { font-size: 17px; font-weight: 700; color: #64748B; }
-.ai-dir-reason { font-size: 12px; color: #64748B; margin: 2px 0 10px; }
+.ai-dir-bull { font-size: 14px; font-weight: 500; color: var(--color-bull-text); }
+.ai-dir-bear { font-size: 14px; font-weight: 500; color: var(--color-bear-text); }
+.ai-dir-neu  { font-size: 14px; font-weight: 500; color: var(--color-text-secondary); }
+.ai-dir-reason { font-size: 12px; color: var(--color-text-secondary); margin: 2px 0 10px; }
 .ai-themes { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
 .ai-tag-bull {
-  background: #FEF2F2; border: 1px solid #FECACA; border-radius: 5px;
-  padding: 3px 10px; font-size: 11px; color: #DC2626; font-weight: 600;
+  background: var(--color-bull-bg); border-radius: 5px;
+  padding: 3px 10px; font-size: 12px; color: var(--color-bull-text); font-weight: 500;
 }
 .ai-tag-bear {
-  background: #F0FDF4; border: 1px solid #BBF7D0; border-radius: 5px;
-  padding: 3px 10px; font-size: 11px; color: #16A34A; font-weight: 600;
+  background: var(--color-bear-bg); border-radius: 5px;
+  padding: 3px 10px; font-size: 12px; color: var(--color-bear-text); font-weight: 500;
 }
 .ai-tickers { display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 10px; }
 .ai-tick-chip {
-  background: #F1F5F9; border: 1px solid #CBD5E1; border-radius: 4px;
-  padding: 2px 8px; font-size: 11px; color: #1A1A2E;
-  font-family: 'JetBrains Mono', monospace; font-weight: 600;
+  background: var(--color-background-secondary); border-radius: 4px;
+  padding: 2px 8px; font-size: 12px; color: var(--color-text-primary);
+  font-family: 'JetBrains Mono', monospace; font-weight: 500;
 }
 .ai-body {
-  font-size: 13px; line-height: 1.8; color: #374151;
-  border-top: 1px solid #E2E8F0; padding-top: 10px;
+  font-size: 14px; line-height: 1.8; color: var(--color-text-primary);
+  border-top: 0.5px solid var(--color-border-tertiary); padding-top: 10px;
 }
-.ai-footer { font-size: 10px; color: #CBD5E1; margin-top: 8px; }
+.ai-footer { font-size: 12px; color: var(--color-text-tertiary); margin-top: 8px; }
 
 /* ══════════════════════════════════════
    GEO 警示
 ══════════════════════════════════════ */
 .geo-card {
-  background: #FFFBEB; border: 1px solid #FDE68A;
-  border-left: 4px solid #F59E0B; border-radius: 8px;
+  background: var(--color-background-warning);
+  border: 0.5px solid var(--color-border-warning);
+  border-left: 3px solid var(--color-text-warning); border-radius: 8px;
   padding: 9px 13px; margin-bottom: 6px;
   display: flex; gap: 10px; align-items: flex-start;
 }
 .geo-icon { font-size: 14px; flex-shrink: 0; margin-top: 2px; }
-.geo-title { font-size: 13px; font-weight: 700; color: #92400E; margin-bottom: 2px; }
-.geo-title a { color: #92400E; text-decoration: none; }
+.geo-title { font-size: 14px; font-weight: 500; color: var(--color-text-warning); margin-bottom: 2px; }
+.geo-title a { color: var(--color-text-warning); text-decoration: none; }
 .geo-title a:hover { text-decoration: underline; }
-.geo-meta { font-size: 11px; color: #B45309; font-weight: 600; margin-bottom: 2px; }
-.geo-body { font-size: 11px; color: #78350F; line-height: 1.5; }
+.geo-meta { font-size: 12px; color: var(--color-text-warning); font-weight: 500; margin-bottom: 2px; }
+.geo-body { font-size: 12px; color: var(--color-text-warning); line-height: 1.5; }
 
 /* ══════════════════════════════════════
-   新聞卡片
+   新聞列表（去框，分隔線取代卡片）
 ══════════════════════════════════════ */
 .nw {
-  background: #FFFFFF; border: 1px solid #E2E8F0;
-  border-radius: 8px; padding: 10px 13px; margin-bottom: 5px;
-  border-left: 3px solid #E2E8F0;
-  box-shadow: 0 1px 2px rgba(0,0,0,0.03);
-  transition: box-shadow 0.15s, border-left-color 0.15s;
+  background: transparent;
+  border: none;
+  border-bottom: 0.5px solid var(--color-border-tertiary);
+  border-radius: 0; padding: 10px 2px; margin-bottom: 0;
+  box-shadow: none;
+  transition: background 0.15s;
 }
-.nw:hover { box-shadow: 0 3px 8px rgba(0,0,0,0.07); }
-.nw.bull  { border-left-color: #DC2626; }
-.nw.bear  { border-left-color: #16A34A; }
-.nw.geo   { border-left-color: #F59E0B; }
+.nw:hover { background: var(--color-background-secondary); }
+.nw:last-child { border-bottom: none; }
+.nw.bull, .nw.bear, .nw.geo { border-left: none; }
 .nw-title {
-  font-size: 13.5px; font-weight: 600; color: #1A1A2E;
+  font-size: 14px; font-weight: 500; color: var(--color-text-primary);
   line-height: 1.5; margin-bottom: 5px;
 }
-.nw-title a { color: #1A1A2E; text-decoration: none; }
-.nw-title a:hover { color: #DC2626; }
+.nw-title a { color: var(--color-text-primary); text-decoration: none; }
+.nw-title a:hover { color: var(--color-text-info); }
 .nw-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .nw-score-bull {
-  font-size: 10px; font-weight: 700; color: #DC2626; background: #FEF2F2;
-  border-radius: 3px; padding: 1px 6px; font-family: 'JetBrains Mono', monospace;
+  font-size: 12px; font-weight: 500; color: var(--color-bull-text); background: var(--color-bull-bg);
+  border-radius: 4px; padding: 1px 7px; font-family: 'JetBrains Mono', monospace;
 }
 .nw-score-bear {
-  font-size: 10px; font-weight: 700; color: #16A34A; background: #F0FDF4;
-  border-radius: 3px; padding: 1px 6px; font-family: 'JetBrains Mono', monospace;
+  font-size: 12px; font-weight: 500; color: var(--color-bear-text); background: var(--color-bear-bg);
+  border-radius: 4px; padding: 1px 7px; font-family: 'JetBrains Mono', monospace;
 }
 .nw-score-neu {
-  font-size: 10px; font-weight: 600; color: #94A3B8; background: #F1F5F9;
-  border-radius: 3px; padding: 1px 6px; font-family: 'JetBrains Mono', monospace;
+  font-size: 12px; font-weight: 500; color: var(--color-text-tertiary); background: var(--color-background-secondary);
+  border-radius: 4px; padding: 1px 7px; font-family: 'JetBrains Mono', monospace;
 }
 .nw-badge-ai {
-  font-size: 9px; font-weight: 700; letter-spacing: 0.5px;
-  color: #D97706; background: #FFFBEB; border: 1px solid #FDE68A;
-  border-radius: 3px; padding: 1px 5px;
+  font-size: 12px; font-weight: 500; letter-spacing: 0.3px;
+  color: var(--color-text-warning); background: var(--color-background-warning);
+  border-radius: 4px; padding: 1px 6px;
 }
 .nw-badge-geo {
-  font-size: 9px; font-weight: 700; color: #92400E; background: #FFFBEB;
-  border: 1px solid #FDE68A; border-radius: 3px; padding: 1px 5px;
+  font-size: 12px; font-weight: 500; color: var(--color-text-warning); background: var(--color-background-warning);
+  border-radius: 4px; padding: 1px 6px;
 }
 .nw-tick {
-  font-size: 10px; font-weight: 600; color: #2563EB; background: #EFF6FF;
-  border-radius: 3px; padding: 1px 5px; font-family: 'JetBrains Mono', monospace;
+  font-size: 12px; font-weight: 500; color: var(--color-text-info); background: var(--color-background-info);
+  border-radius: 4px; padding: 1px 6px; font-family: 'JetBrains Mono', monospace;
 }
-.nw-src { font-size: 10px; color: #94A3B8; }
-.nw-time { font-size: 10px; color: #CBD5E1; font-family: 'JetBrains Mono', monospace; }
+.nw-src { font-size: 12px; color: var(--color-text-secondary); }
+.nw-time { font-size: 12px; color: var(--color-text-tertiary); font-family: 'JetBrains Mono', monospace; }
 .nw-ai-box {
   margin-top: 7px; padding: 8px 11px;
-  background: #F8FAFC; border-radius: 6px;
-  border-left: 3px solid #F59E0B;
-  font-size: 12px; color: #374151; line-height: 1.7;
+  background: var(--color-background-secondary); border-radius: 6px;
+  border-left: 3px solid var(--color-text-warning);
+  font-size: 12px; color: var(--color-text-primary); line-height: 1.7;
 }
-.nw-ai-reason { margin-top: 4px; font-size: 10px; color: #94A3B8; }
+.nw-ai-reason { margin-top: 4px; font-size: 12px; color: var(--color-text-tertiary); }
 
 /* ══════════════════════════════════════
    熱門股票卡片
 ══════════════════════════════════════ */
 .tk-card {
-  background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 8px;
+  background: var(--color-background-secondary); border: none; border-radius: 8px;
   padding: 10px; margin-bottom: 6px; text-align: center;
-  box-shadow: 0 1px 2px rgba(0,0,0,0.04); transition: box-shadow 0.15s;
+  box-shadow: none; transition: background 0.15s;
 }
-.tk-card:hover { box-shadow: 0 3px 10px rgba(0,0,0,0.07); }
-.tk-code { font-size: 15px; font-weight: 700; color: #1A1A2E; font-family: 'JetBrains Mono', monospace; }
-.tk-name { font-size: 10px; color: #94A3B8; margin: 1px 0 4px; }
-.tk-bull { color: #DC2626; font-size: 11px; font-weight: 700; }
-.tk-bear { color: #16A34A; font-size: 11px; font-weight: 700; }
-.tk-neu  { color: #94A3B8; font-size: 11px; font-weight: 600; }
-.tk-cnt  { font-size: 10px; color: #CBD5E1; }
+.tk-card:hover { background: var(--color-border-tertiary); }
+.tk-code { font-size: 15px; font-weight: 500; color: var(--color-text-primary); font-family: 'JetBrains Mono', monospace; }
+.tk-name { font-size: 12px; color: var(--color-text-tertiary); margin: 1px 0 4px; }
+.tk-bull { color: var(--color-bull-text); font-size: 12px; font-weight: 500; }
+.tk-bear { color: var(--color-bear-text); font-size: 12px; font-weight: 500; }
+.tk-neu  { color: var(--color-text-tertiary); font-size: 12px; font-weight: 500; }
+.tk-cnt  { font-size: 12px; color: var(--color-text-tertiary); }
 
 /* ══════════════════════════════════════
    空狀態
 ══════════════════════════════════════ */
-.empty-box { text-align: center; padding: 36px 24px; color: #CBD5E1; }
+.empty-box { text-align: center; padding: 36px 24px; color: var(--color-text-tertiary); }
 .empty-box-icon { font-size: 30px; margin-bottom: 8px; }
-.empty-box-txt { font-size: 13px; }
+.empty-box-txt { font-size: 14px; }
 
 /* ══════════════════════════════════════
    日誌表格
 ══════════════════════════════════════ */
 .log-table {
   width: 100%; border-collapse: collapse; font-size: 12px;
-  background: #FFFFFF; border: 1px solid #E2E8F0;
+  background: var(--color-background-primary); border: 0.5px solid var(--color-border-tertiary);
   border-radius: 8px; overflow: hidden;
 }
 .log-table th {
-  padding: 8px 12px; text-align: left; font-size: 10px; font-weight: 700;
-  color: #64748B; letter-spacing: 0.6px; background: #F8FAFC;
-  border-bottom: 1px solid #E2E8F0;
+  padding: 8px 12px; text-align: left; font-size: 12px; font-weight: 500;
+  color: var(--color-text-secondary); letter-spacing: 0.4px; background: var(--color-background-secondary);
+  border-bottom: 0.5px solid var(--color-border-tertiary);
 }
-.log-table td { padding: 7px 12px; color: #374151; border-bottom: 1px solid #F1F5F9; }
-.log-ok   { background: #F0FDF4; color: #16A34A; font-size: 10px; font-weight: 700; padding: 1px 7px; border-radius: 4px; }
-.log-err  { background: #FEF2F2; color: #DC2626; font-size: 10px; font-weight: 700; padding: 1px 7px; border-radius: 4px; }
-.log-warn { background: #FFFBEB; color: #D97706; font-size: 10px; font-weight: 700; padding: 1px 7px; border-radius: 4px; }
+.log-table td { padding: 7px 12px; color: var(--color-text-primary); border-bottom: 0.5px solid var(--color-border-tertiary); }
+.log-ok   { background: var(--color-bear-bg); color: var(--color-bear-text); font-size: 12px; font-weight: 500; padding: 1px 8px; border-radius: 4px; }
+.log-err  { background: var(--color-bull-bg); color: var(--color-bull-text); font-size: 12px; font-weight: 500; padding: 1px 8px; border-radius: 4px; }
+.log-warn { background: var(--color-background-warning); color: var(--color-text-warning); font-size: 12px; font-weight: 500; padding: 1px 8px; border-radius: 4px; }
 
 /* ── 篩選列整體縮小間距 ── */
 .filter-row .stSelectbox, .filter-row .stTextInput { margin-bottom: 0 !important; }
@@ -480,42 +536,42 @@ hr { border-color: #E2E8F0 !important; margin: 10px 0 !important; }
    ② 置頂高分新聞橫幅
 ══════════════════════════════════════ */
 .nw-pinned-bull {
-  background: linear-gradient(135deg, #FEF2F2 0%, #fff5f5 100%);
-  border: 1.5px solid #FECACA;
-  border-left: 5px solid #DC2626;
-  border-radius: 10px;
+  background: var(--color-bull-bg);
+  border: 0.5px solid var(--color-border-tertiary);
+  border-left: 3px solid var(--color-bull-text);
+  border-radius: 8px;
   padding: 12px 16px;
   margin-bottom: 8px;
-  box-shadow: 0 2px 8px rgba(220,38,38,0.1);
+  box-shadow: none;
 }
 .nw-pinned-bear {
-  background: linear-gradient(135deg, #F0FDF4 0%, #f5fff8 100%);
-  border: 1.5px solid #BBF7D0;
-  border-left: 5px solid #16A34A;
-  border-radius: 10px;
+  background: var(--color-bear-bg);
+  border: 0.5px solid var(--color-border-tertiary);
+  border-left: 3px solid var(--color-bear-text);
+  border-radius: 8px;
   padding: 12px 16px;
   margin-bottom: 8px;
-  box-shadow: 0 2px 8px rgba(22,163,74,0.1);
+  box-shadow: none;
 }
 .nw-pinned-label {
-  font-size: 9px; font-weight: 700; letter-spacing: 1px;
-  text-transform: uppercase; margin-bottom: 6px; display: inline-block;
+  font-size: 12px; font-weight: 500; letter-spacing: 0.3px;
+  margin-bottom: 6px; display: inline-block;
 }
-.nw-pinned-bull .nw-pinned-label { color: #DC2626; background: #FEE2E2; padding: 2px 8px; border-radius: 4px; }
-.nw-pinned-bear .nw-pinned-label { color: #16A34A; background: #DCFCE7; padding: 2px 8px; border-radius: 4px; }
+.nw-pinned-bull .nw-pinned-label { color: var(--color-bull-text); background: var(--color-background-primary); padding: 2px 8px; border-radius: 4px; }
+.nw-pinned-bear .nw-pinned-label { color: var(--color-bear-text); background: var(--color-background-primary); padding: 2px 8px; border-radius: 4px; }
 .nw-pinned-title {
-  font-size: 15px; font-weight: 700; line-height: 1.5; margin-bottom: 6px;
+  font-size: 14px; font-weight: 500; line-height: 1.5; margin-bottom: 6px;
 }
-.nw-pinned-bull .nw-pinned-title a { color: #991B1B; text-decoration: none; }
-.nw-pinned-bear .nw-pinned-title a { color: #166534; text-decoration: none; }
+.nw-pinned-bull .nw-pinned-title a { color: var(--color-bull-text); text-decoration: none; }
+.nw-pinned-bear .nw-pinned-title a { color: var(--color-bear-text); text-decoration: none; }
 .nw-pinned-bull .nw-pinned-title a:hover { text-decoration: underline; }
 .nw-pinned-bear .nw-pinned-title a:hover { text-decoration: underline; }
 .nw-pinned-score-bull {
-  font-size: 12px; font-weight: 800; color: #DC2626;
+  font-size: 12px; font-weight: 500; color: var(--color-bull-text);
   font-family: 'JetBrains Mono', monospace;
 }
 .nw-pinned-score-bear {
-  font-size: 12px; font-weight: 800; color: #16A34A;
+  font-size: 12px; font-weight: 500; color: var(--color-bear-text);
   font-family: 'JetBrains Mono', monospace;
 }
 
@@ -523,7 +579,7 @@ hr { border-color: #E2E8F0 !important; margin: 10px 0 !important; }
    ⑥ 已讀灰化
 ══════════════════════════════════════ */
 .nw-title a.nw-read {
-  color: #CBD5E1 !important;
+  color: var(--color-text-tertiary) !important;
   text-decoration: line-through;
 }
 .nw.nw-read-card {
@@ -538,32 +594,32 @@ hr { border-color: #E2E8F0 !important; margin: 10px 0 !important; }
   margin-bottom: 10px; align-items: center;
 }
 .chip {
-  font-size: 12px; font-weight: 600;
+  font-size: 13px; font-weight: 500;
   padding: 4px 13px; border-radius: 20px;
-  border: 1px solid #E2E8F0;
-  background: #FFFFFF; color: #64748B;
+  border: 0.5px solid var(--color-border-secondary);
+  background: var(--color-background-primary); color: var(--color-text-secondary);
   cursor: pointer; transition: all 0.15s;
   user-select: none; white-space: nowrap;
 }
-.chip:hover { background: #F1F5F9; border-color: #CBD5E1; }
-.chip.chip-bull.active { background: #FEF2F2; border-color: #FECACA; color: #DC2626; }
-.chip.chip-bear.active { background: #F0FDF4; border-color: #BBF7D0; color: #16A34A; }
-.chip.chip-ai.active   { background: #FFFBEB; border-color: #FDE68A; color: #D97706; }
-.chip.chip-geo.active  { background: #FFF7ED; border-color: #FED7AA; color: #EA580C; }
-.chip.chip-all.active  { background: #1A1A2E; border-color: #1A1A2E; color: #FFFFFF; }
+.chip:hover { background: var(--color-background-secondary); border-color: var(--color-border-primary); }
+.chip.chip-bull.active { background: var(--color-bull-bg); border-color: var(--color-bull-bg); color: var(--color-bull-text); }
+.chip.chip-bear.active { background: var(--color-bear-bg); border-color: var(--color-bear-bg); color: var(--color-bear-text); }
+.chip.chip-ai.active   { background: var(--color-background-warning); border-color: var(--color-border-warning); color: var(--color-text-warning); }
+.chip.chip-geo.active  { background: var(--color-background-warning); border-color: var(--color-border-warning); color: var(--color-text-warning); }
+.chip.chip-all.active  { background: var(--color-text-primary); border-color: var(--color-text-primary); color: var(--color-background-primary); }
 
 /* ══════════════════════════════════════
    B AI摘要展開/收合
 ══════════════════════════════════════ */
 .nw-ai-toggle {
-  font-size: 10px; color: #D97706; cursor: pointer;
+  font-size: 12px; color: var(--color-text-warning); cursor: pointer;
   display: inline-flex; align-items: center; gap: 3px;
-  padding: 1px 6px; border: 1px solid #FDE68A;
-  background: #FFFBEB; border-radius: 3px;
-  font-weight: 600; user-select: none;
+  padding: 1px 6px; border: 0.5px solid var(--color-border-warning);
+  background: var(--color-background-warning); border-radius: 4px;
+  font-weight: 500; user-select: none;
   vertical-align: middle; margin-left: 4px;
 }
-.nw-ai-toggle:hover { background: #FEF3C7; }
+.nw-ai-toggle:hover { background: var(--color-border-warning); }
 .nw-ai-box { display: none; }
 .nw-ai-box.open { display: block; }
 </style>
@@ -693,15 +749,15 @@ def render_news(df, max_items=120):
             sc_cls = "nw-pinned-score-bull" if sc > 0 else "nw-pinned-score-bear"
             src    = str(row.get("source", "") or "")
             rtime  = relative_time(row.get("published_at"))
-            ai_blk = f'<div style="font-size:12px;color:#374151;margin-top:6px;line-height:1.7">{ai_sum}</div>' if ai_sum else ""
+            ai_blk = f'<div style="font-size:14px;color:var(--color-text-primary);margin-top:6px;line-height:1.7">{ai_sum}</div>' if ai_sum else ""
             pinned_chunks.append(f"""
 <div class="{cls}">
   <span class="nw-pinned-label">{lbl}</span>
   <div class="nw-pinned-title">{t_html}</div>
   <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
     <span class="{sc_cls}">{sc:+.1f}</span>
-    <span style="font-size:10px;color:#94A3B8">{src}</span>
-    <span style="font-size:10px;color:#CBD5E1;font-family:'JetBrains Mono',monospace">{rtime}</span>
+    <span style="font-size:12px;color:var(--color-text-secondary)">{src}</span>
+    <span style="font-size:12px;color:var(--color-text-tertiary);font-family:'JetBrains Mono',monospace">{rtime}</span>
   </div>
   {ai_blk}
 </div>""")
@@ -782,7 +838,7 @@ def render_news(df, max_items=120):
 
 
 # ─────────────────────────────────────────────
-# ① Topbar：單行，Logo + 狀態 + 時間
+# ① Topbar：單行，Logo + 狀態 + 時間 + AI開關 + 立即抓取（同一視覺列）
 # ─────────────────────────────────────────────
 _groq_ok = st.session_state["groq_ok"]
 _status_html = (
@@ -793,7 +849,9 @@ _status_html = (
 _next_run = next_run_time()
 _last_upd = st.session_state["last_update"]
 
-st.markdown(f"""
+_tb1, _tb2, _tb3 = st.columns([4, 2, 2])
+with _tb1:
+    st.markdown(f"""
 <div class="topbar">
   <div class="topbar-left">
     <span class="topbar-logo">📈 FinNews AI</span>
@@ -802,17 +860,14 @@ st.markdown(f"""
   </div>
 </div>
 """, unsafe_allow_html=True)
-
-# ② 控制列：AI checkbox + 立即抓取，固定在同一行，按鈕有邊框不撐高
-_c1, _c2, _c3 = st.columns([2, 2, 3])
-with _c1:
+with _tb2:
     st.session_state["use_ai"] = st.checkbox(
         "啟用 AI 深度分析",
         value=st.session_state["use_ai"],
         disabled=not _groq_ok,
         key="use_ai_cb",
     )
-with _c2:
+with _tb3:
     if st.button("🔄 立即抓取新聞", type="primary", use_container_width=True):
         with st.spinner("抓取＋分析中，約 30～60 秒…"):
             result = crawl_and_save(
@@ -924,7 +979,7 @@ with tab_dash:
             bull_tags = "".join(f'<span class="ai-tag-bull">&#128200; {t}</span>' for t in bulls)
             bear_tags = "".join(f'<span class="ai-tag-bear">&#128201; {t}</span>' for t in bears)
             tick_tags = "".join(f'<span class="ai-tick-chip">{t}</span>' for t in keys)
-            tick_html = f'<div style="font-size:10px;color:#94A3B8;margin-bottom:3px">關注個股</div><div class="ai-tickers">{tick_tags}</div>' if tick_tags else ""
+            tick_html = f'<div style="font-size:12px;color:var(--color-text-tertiary);margin-bottom:3px">關注個股</div><div class="ai-tickers">{tick_tags}</div>' if tick_tags else ""
 
             st.markdown(f"""
 <div class="ai-card">
@@ -996,10 +1051,10 @@ with tab_dash:
                 labels=["利多", "利空", "中性"],
                 values=[bull_n, bear_n, mid_n],
                 hole=0.60,
-                marker=dict(colors=["#DC2626", "#16A34A", "#E2E8F0"],
+                marker=dict(colors=["#A32D2D", "#0F6E56", "#CBD5E1"],
                             line=dict(color="#FFFFFF", width=2)),
                 textinfo="percent+label",
-                textfont=dict(size=11, color="#374151"),
+                textfont=dict(size=12, color="#374151"),
                 showlegend=False,
             ))
             fig_pie.update_layout(
@@ -1015,10 +1070,10 @@ with tab_dash:
                 x=top_s["count"], y=top_s["sector"], orientation="h",
                 marker=dict(color="#1A1A2E"),
                 text=top_s["count"], textposition="outside",
-                textfont=dict(size=10, color="#64748B"),
+                textfont=dict(size=12, color="#64748B"),
             ))
             fig_sec.update_layout(
-                yaxis=dict(autorange="reversed", tickfont=dict(color="#374151", size=10)),
+                yaxis=dict(autorange="reversed", tickfont=dict(color="#374151", size=12)),
                 xaxis=dict(showgrid=False, visible=False),
                 margin=dict(t=4, b=4, l=4, r=35), height=200,
                 paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
@@ -1194,11 +1249,11 @@ with tab_deep:
                     marker=dict(color=hdf.head(15)["出現次數"],
                                 colorscale=[[0, "#E2E8F0"], [1, "#1A1A2E"]], showscale=False),
                     text=hdf.head(15)["出現次數"], textposition="outside",
-                    textfont=dict(size=10, color="#64748B"),
+                    textfont=dict(size=12, color="#64748B"),
                 ))
                 fig_cnt.update_layout(
                     title=dict(text="出現次數", font=dict(color="#374151", size=12)),
-                    yaxis=dict(autorange="reversed", tickfont=dict(color="#374151", size=10)),
+                    yaxis=dict(autorange="reversed", tickfont=dict(color="#374151", size=12)),
                     xaxis=dict(showgrid=False, visible=False),
                     margin=dict(t=24, b=8, l=8, r=40), height=360,
                     paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
@@ -1207,17 +1262,17 @@ with tab_deep:
 
             with ch2:
                 cdf15 = hdf.head(15)
-                colors15 = ["#DC2626" if s >= 0.15 else ("#16A34A" if s <= -0.15 else "#CBD5E1")
+                colors15 = ["#A32D2D" if s >= 0.15 else ("#0F6E56" if s <= -0.15 else "#CBD5E1")
                             for s in cdf15["平均情緒"]]
                 fig_sc = go.Figure(go.Bar(
                     x=cdf15["平均情緒"], y=cdf15["代碼"], orientation="h",
                     marker=dict(color=colors15),
                     text=cdf15["平均情緒"].round(2), textposition="outside",
-                    textfont=dict(size=10, color="#64748B"),
+                    textfont=dict(size=12, color="#64748B"),
                 ))
                 fig_sc.update_layout(
                     title=dict(text="平均情緒分數", font=dict(color="#374151", size=12)),
-                    yaxis=dict(autorange="reversed", tickfont=dict(color="#374151", size=10)),
+                    yaxis=dict(autorange="reversed", tickfont=dict(color="#374151", size=12)),
                     xaxis=dict(showgrid=False, visible=False),
                     margin=dict(t=24, b=8, l=8, r=40), height=360,
                     paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
@@ -1272,17 +1327,17 @@ with tab_deep:
                 rows2.append({"類股": sec2, "新聞數": cnt2, "平均情緒": round(avg2, 3), "利多": bull2, "利空": bear2})
             rank_df = pd.DataFrame(rows2)
 
-            clrs_r = ["#DC2626" if s >= 0.05 else ("#16A34A" if s <= -0.05 else "#CBD5E1")
+            clrs_r = ["#A32D2D" if s >= 0.05 else ("#0F6E56" if s <= -0.05 else "#CBD5E1")
                       for s in rank_df.head(10)["平均情緒"]]
             fig_r = go.Figure(go.Bar(
                 x=rank_df.head(10)["新聞數"], y=rank_df.head(10)["類股"], orientation="h",
                 marker=dict(color=clrs_r),
                 text=rank_df.head(10)["新聞數"], textposition="outside",
-                textfont=dict(size=11, color="#64748B"),
+                textfont=dict(size=12, color="#64748B"),
             ))
             fig_r.update_layout(
                 title=dict(text="類股新聞數（紅=偏多 綠=偏空）", font=dict(color="#374151", size=12)),
-                yaxis=dict(autorange="reversed", tickfont=dict(color="#374151", size=11)),
+                yaxis=dict(autorange="reversed", tickfont=dict(color="#374151", size=12)),
                 xaxis=dict(showgrid=False, visible=False),
                 margin=dict(t=24, b=8, l=8, r=40), height=340,
                 paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
@@ -1308,15 +1363,15 @@ with tab_deep:
         )
         if not ticker_q:
             st.markdown("""
-<div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;
-            padding:14px 18px;font-size:13px;color:#64748B;line-height:2.2">
-  <strong style="color:#374151">支援格式</strong><br>
-  台股代碼：<code style="background:#F1F5F9;padding:1px 6px;border-radius:4px;color:#1A1A2E">2330</code>
-  <code style="background:#F1F5F9;padding:1px 6px;border-radius:4px;color:#1A1A2E">2454</code><br>
-  台股名稱：<code style="background:#F1F5F9;padding:1px 6px;border-radius:4px;color:#1A1A2E">台積電</code>
-  <code style="background:#F1F5F9;padding:1px 6px;border-radius:4px;color:#1A1A2E">廣達</code><br>
-  美股代碼：<code style="background:#F1F5F9;padding:1px 6px;border-radius:4px;color:#1A1A2E">NVDA</code>
-  <code style="background:#F1F5F9;padding:1px 6px;border-radius:4px;color:#1A1A2E">TSLA</code>
+<div style="background:var(--color-background-secondary);border-radius:8px;
+            padding:14px 18px;font-size:14px;color:var(--color-text-secondary);line-height:2.2">
+  <strong style="color:var(--color-text-primary)">支援格式</strong><br>
+  台股代碼：<code style="background:var(--color-background-tertiary);padding:1px 6px;border-radius:4px;color:var(--color-text-primary)">2330</code>
+  <code style="background:var(--color-background-tertiary);padding:1px 6px;border-radius:4px;color:var(--color-text-primary)">2454</code><br>
+  台股名稱：<code style="background:var(--color-background-tertiary);padding:1px 6px;border-radius:4px;color:var(--color-text-primary)">台積電</code>
+  <code style="background:var(--color-background-tertiary);padding:1px 6px;border-radius:4px;color:var(--color-text-primary)">廣達</code><br>
+  美股代碼：<code style="background:var(--color-background-tertiary);padding:1px 6px;border-radius:4px;color:var(--color-text-primary)">NVDA</code>
+  <code style="background:var(--color-background-tertiary);padding:1px 6px;border-radius:4px;color:var(--color-text-primary)">TSLA</code>
 </div>""", unsafe_allow_html=True)
         else:
             q = ticker_q.strip()
@@ -1458,10 +1513,9 @@ with tab_cfg:
         }
         if all_cw:
             chips = " ".join(
-                f'<span style="background:{"#FEF2F2" if lb=="利多" else "#F0FDF4"};'
-                f'padding:3px 10px;border-radius:10px;font-size:11px;'
-                f'border:1px solid {"#FECACA" if lb=="利多" else "#BBF7D0"};'
-                f'color:{"#DC2626" if lb=="利多" else "#16A34A"}">'
+                f'<span style="background:{"var(--color-bull-bg)" if lb=="利多" else "var(--color-bear-bg)"};'
+                f'padding:3px 10px;border-radius:10px;font-size:12px;'
+                f'color:{"var(--color-bull-text)" if lb=="利多" else "var(--color-bear-text)"}">'
                 f'{wd} {lb}</span>'
                 for wd, lb in all_cw.items()
             )
@@ -1487,10 +1541,10 @@ with tab_cfg:
 <tr>
   <td>{lr["來源"]}</td>
   <td>{sbadge}</td>
-  <td style="color:#64748B">{lr["抓取"]}</td>
-  <td style="color:#16A34A;font-weight:700">{lr["新增"]}</td>
-  <td style="color:#94A3B8">{lr["跳過"]}</td>
-  <td style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#94A3B8">{lr["時間(台灣)"]}</td>
+  <td style="color:var(--color-text-secondary)">{lr["抓取"]}</td>
+  <td style="color:var(--color-bear-text);font-weight:500">{lr["新增"]}</td>
+  <td style="color:var(--color-text-tertiary)">{lr["跳過"]}</td>
+  <td style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--color-text-tertiary)">{lr["時間(台灣)"]}</td>
 </tr>""")
             st.markdown(f"""
 <div style="overflow-x:auto">
@@ -1498,7 +1552,7 @@ with tab_cfg:
   <thead>
     <tr>
       <th>來源</th><th>狀態</th><th>抓取</th>
-      <th style="color:#16A34A">新增</th><th style="color:#94A3B8">跳過</th><th>時間(台灣)</th>
+      <th style="color:var(--color-bear-text)">新增</th><th style="color:var(--color-text-tertiary)">跳過</th><th>時間(台灣)</th>
     </tr>
   </thead>
   <tbody>{"".join(log_rows_html)}</tbody>
