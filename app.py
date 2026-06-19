@@ -416,21 +416,36 @@ hr { border-color: var(--color-border-tertiary) !important; margin: 10px 0 !impo
 .ai-footer { font-size: 12px; color: var(--color-text-tertiary); margin-top: 8px; }
 
 /* ══════════════════════════════════════
-   GEO 警示
+   GEO 警示（雙欄 grid，省空間多顯示）
 ══════════════════════════════════════ */
+.geo-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 10px;
+  margin-bottom: 6px;
+}
+@media (max-width: 640px) {
+  .geo-grid { grid-template-columns: 1fr; }
+}
 .geo-card {
   background: var(--color-background-warning);
   border: 0.5px solid var(--color-border-warning);
   border-left: 3px solid var(--color-text-warning); border-radius: 8px;
-  padding: 9px 13px; margin-bottom: 6px;
-  display: flex; gap: 10px; align-items: flex-start;
+  padding: 8px 12px;
+  display: flex; gap: 8px; align-items: flex-start;
+  min-width: 0;
 }
-.geo-icon { font-size: 14px; flex-shrink: 0; margin-top: 2px; }
-.geo-title { font-size: 14px; font-weight: 500; color: var(--color-text-warning); margin-bottom: 2px; }
+.geo-icon { font-size: 13px; flex-shrink: 0; margin-top: 2px; }
+.geo-title {
+  font-size: 13px; font-weight: 500; color: var(--color-text-warning); margin-bottom: 2px;
+  line-height: 1.4;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
 .geo-title a { color: var(--color-text-warning); text-decoration: none; }
 .geo-title a:hover { text-decoration: underline; }
-.geo-meta { font-size: 12px; color: var(--color-text-warning); font-weight: 500; margin-bottom: 2px; }
+.geo-meta { font-size: 12px; color: var(--color-text-warning); font-weight: 500; }
 .geo-body { font-size: 12px; color: var(--color-text-warning); line-height: 1.5; }
+
 
 /* ══════════════════════════════════════
    新聞列表（去框，分隔線取代卡片）
@@ -465,11 +480,6 @@ hr { border-color: var(--color-border-tertiary) !important; margin: 10px 0 !impo
   font-size: 12px; font-weight: 500; color: var(--color-text-tertiary); background: var(--color-background-secondary);
   border-radius: 4px; padding: 1px 7px; font-family: 'JetBrains Mono', monospace;
 }
-.nw-badge-ai {
-  font-size: 12px; font-weight: 500; letter-spacing: 0.3px;
-  color: var(--color-text-warning); background: var(--color-background-warning);
-  border-radius: 4px; padding: 1px 6px;
-}
 .nw-badge-geo {
   font-size: 12px; font-weight: 500; color: var(--color-text-warning); background: var(--color-background-warning);
   border-radius: 4px; padding: 1px 6px;
@@ -480,12 +490,6 @@ hr { border-color: var(--color-border-tertiary) !important; margin: 10px 0 !impo
 }
 .nw-src { font-size: 12px; color: var(--color-text-secondary); }
 .nw-time { font-size: 12px; color: var(--color-text-tertiary); font-family: 'JetBrains Mono', monospace; }
-.nw-ai-box {
-  margin-top: 7px; padding: 8px 11px;
-  background: var(--color-background-secondary); border-radius: 6px;
-  border-left: 3px solid var(--color-text-warning);
-  font-size: 12px; color: var(--color-text-primary); line-height: 1.7;
-}
 .nw-ai-reason { margin-top: 4px; font-size: 12px; color: var(--color-text-tertiary); }
 
 /* ══════════════════════════════════════
@@ -609,19 +613,24 @@ hr { border-color: var(--color-border-tertiary) !important; margin: 10px 0 !impo
 .chip.chip-all.active  { background: var(--color-text-primary); border-color: var(--color-text-primary); color: var(--color-background-primary); }
 
 /* ══════════════════════════════════════
-   B AI摘要展開/收合
+   B AI摘要：預設顯示前段，點擊展開全文
 ══════════════════════════════════════ */
-.nw-ai-toggle {
-  font-size: 12px; color: var(--color-text-warning); cursor: pointer;
-  display: inline-flex; align-items: center; gap: 3px;
-  padding: 1px 6px; border: 0.5px solid var(--color-border-warning);
-  background: var(--color-background-warning); border-radius: 4px;
-  font-weight: 500; user-select: none;
-  vertical-align: middle; margin-left: 4px;
+.nw-ai-preview {
+  margin-top: 5px; font-size: 13px; color: var(--color-text-secondary);
+  line-height: 1.6; cursor: pointer;
 }
-.nw-ai-toggle:hover { background: var(--color-border-warning); }
-.nw-ai-box { display: none; }
-.nw-ai-box.open { display: block; }
+.nw-ai-preview:hover { color: var(--color-text-primary); }
+.nw-ai-more { color: var(--color-text-tertiary); font-size: 12px; margin-left: 2px; }
+.nw-ai-full {
+  display: none;
+  margin-top: 5px; padding: 8px 11px;
+  background: var(--color-background-secondary); border-radius: 6px;
+  border-left: 3px solid var(--color-accent);
+  font-size: 13px; color: var(--color-text-primary); line-height: 1.7;
+  cursor: pointer;
+}
+.nw-ai-full.open { display: block; }
+.nw-ai-preview.hidden { display: none; }
 </style>
 
 <script>
@@ -666,14 +675,23 @@ document.addEventListener('click', function(e){
   } catch(e){}
 });
 
-/* ── AI 摘要展開/收合 ── */
+/* ── AI 摘要展開/收合：點擊預覽文字展開全文，點全文收合 ── */
 document.addEventListener('click', function(e){
-  var btn = e.target.closest('.nw-ai-toggle');
-  if(!btn) return;
-  var box = btn.parentElement.querySelector('.nw-ai-box');
-  if(!box) return;
-  var open = box.classList.toggle('open');
-  btn.innerHTML = open ? '&#9652; 收合' : '&#10022; AI 摘要';
+  var prev = e.target.closest('.nw-ai-preview');
+  if(prev){
+    var full = prev.nextElementSibling;
+    if(full && full.classList.contains('nw-ai-full')){
+      full.classList.add('open');
+      prev.classList.add('hidden');
+    }
+    return;
+  }
+  var full2 = e.target.closest('.nw-ai-full');
+  if(full2){
+    full2.classList.remove('open');
+    var prev2 = full2.previousElementSibling;
+    if(prev2 && prev2.classList.contains('nw-ai-preview')) prev2.classList.remove('hidden');
+  }
 });
 
 /* ── Chip 篩選 ── */
@@ -688,7 +706,7 @@ function chipFilter(el, filter){
     } else if(filter === 'bear'){
       card.style.display = card.classList.contains('bear') ? '' : 'none';
     } else if(filter === 'ai'){
-      card.style.display = card.querySelector('.nw-badge-ai') ? '' : 'none';
+      card.style.display = card.querySelector('.nw-ai-preview') ? '' : 'none';
     } else if(filter === 'geo'){
       card.style.display = card.classList.contains('geo') ? '' : 'none';
     }
@@ -811,19 +829,19 @@ def render_news(df, max_items=120):
             badges.append(f'<span class="nw-tick">{t}</span>')
         bdg = " ".join(badges)
 
-        # B AI摘要收合（預設隱藏，點按鈕展開）
+        # B AI摘要：預設顯示前30字預覽，點擊展開全文
         ai_block = ""
         if ai_sum:
             rsn_part = f'<div class="nw-ai-reason">&#128204; {ai_rsn}</div>' if ai_rsn else ""
-            ai_toggle = '<span class="nw-ai-toggle">&#10022; AI 摘要</span>'
-            ai_block = f'<div style="margin-top:5px">{ai_toggle}<div class="nw-ai-box">{ai_sum}{rsn_part}</div></div>'
-
-        # AI badge 移到標題旁
-        ai_badge = '<span class="nw-badge-ai">&#10022; AI</span> ' if ai_sum else ""
+            preview = ai_sum[:30] + ("…" if len(ai_sum) > 30 else "")
+            ai_block = (
+                f'<div class="nw-ai-preview">{preview}<span class="nw-ai-more">展開</span></div>'
+                f'<div class="nw-ai-full">{ai_sum}{rsn_part}</div>'
+            )
 
         chunks.append(f"""
 <div class="{cls}">
-  <div class="nw-title">{ai_badge}{t_html}</div>
+  <div class="nw-title">{t_html}</div>
   <div class="nw-meta">
     {score_h} {bdg}
     <span class="nw-src">{source}</span>
@@ -1002,30 +1020,27 @@ with tab_dash:
                 st.session_state.pop("_sum_key", None)
                 st.rerun()
 
-    # ── 地緣政治警示（折疊，預設展開）──
+    # ── 地緣政治警示（雙欄 grid，左三右三）──
     if not geo_df.empty:
         geo_12h = filter_12h(geo_df)
         if not geo_12h.empty:
             st.markdown('<div class="sec-hd">⚑ 地緣政治警示</div>', unsafe_allow_html=True)
             geo_chunks = []
-            for _, row in geo_12h.head(3).iterrows():
+            for _, row in geo_12h.head(6).iterrows():
                 eff    = row.get("ai_sentiment", "") or row.get("sentiment", "neutral")
                 impact = "利多" if eff == "bullish" else ("利空" if eff == "bearish" else "中性")
                 url_g  = row.get("url", "")
                 ttl_g  = row.get("title", "")
-                sum_g  = str(row.get("ai_summary", "") or "")
                 link_h = f'<a href="{url_g}" target="_blank">{ttl_g}</a>' if url_g else ttl_g
-                body_h = f'<div class="geo-body">{sum_g}</div>' if sum_g else ""
                 geo_chunks.append(f"""
 <div class="geo-card">
   <div class="geo-icon">&#9873;</div>
   <div>
     <div class="geo-title">{link_h}</div>
     <div class="geo-meta">{impact}</div>
-    {body_h}
   </div>
 </div>""")
-            st.markdown("\n".join(geo_chunks), unsafe_allow_html=True)
+            st.markdown(f'<div class="geo-grid">{"".join(geo_chunks)}</div>', unsafe_allow_html=True)
 
     # ── 今日重點新聞 + 圖表（兩欄）──
     st.markdown('<div class="sec-hd">🔑 今日重點新聞（12h）</div>', unsafe_allow_html=True)
