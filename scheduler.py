@@ -3,7 +3,7 @@ scheduler.py — 背景排程模組
 - APScheduler 定時抓取
 - 整合 Groq AI 選擇性分析（符合觸發條件才送）
 - 所有時間顯示台灣時間
-- [修改] should_use_ai 呼叫新增 has_tickers 參數
+- [修改] should_use_ai 呼叫新增 has_tickers、category 參數
 - [修改] _get_groq_key 加環境變數備援，排程器固定帶 use_ai=True
 """
 
@@ -99,7 +99,8 @@ def crawl_and_save(enabled_names=None,
                 and not _is_rate_limited()             # 熔斷中直接跳過整批
                 and ai_count < max_ai_per_run          # 每批上限
                 and should_use_ai(
-                    r.sentiment_score, item["title"], r.is_geo, has_tickers
+                    r.sentiment_score, item["title"], r.is_geo, has_tickers,
+                    item.get("category", ""),          # [修改] 傳入 category 供非財經過濾
                 )
             )
             if can_use_ai:
