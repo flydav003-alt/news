@@ -2,6 +2,7 @@
 groq_analyzer.py — Groq AI 深度分析模組
 - 使用 Llama 3.3 70B（Groq 免費額度）
 - [修改] 收窄觸發條件：只送真正有分析價值的新聞，避免每則都送導致超慢
+- [修改] should_use_ai 新增 category 參數：非財經類別 + 無財經信號詞直接排除
 - 輸出結構化 JSON：情緒、影響摘要、受影響個股、信心度
 """
 
@@ -37,11 +38,27 @@ def _set_rate_limited() -> None:
 
 
 # ── 觸發條件判斷 ──────────────────────────────────────────────────────────────
+
+# 財經相關信號詞：標題含任一詞才視為有分析價值
+_FINANCE_SIGNALS = [
+    "股", "元", "億", "萬", "獲利", "營收", "法人", "財報", "毛利", "EPS",
+    "台積", "聯發", "廣達", "緯創", "鴻海", "輝達", "漲", "跌", "漲停", "跌停",
+    "供應鏈", "訂單", "出貨", "庫存", "產能", "AI", "半導體", "晶片", "封裝",
+    "ETF", "指數", "大盤", "外資", "投信", "自營", "融資", "融券",
+    "關稅", "貿易", "出口", "進口", "景氣", "Fed", "升息", "降息",
+    "TSMC", "NVDA", "AMD", "MSFT", "AAPL", "INTC", "QCOM",
+]
+
+# 非財經類別：這些 category 的新聞直接不送（科技/科學/天文等）
+_NON_FINANCE_CATEGORIES = {"科學", "太空", "天文", "健康", "醫療", "體育", "娛樂", "生活"}
+
+
 def should_use_ai(
     keyword_score: float,
     title: str,
     is_geo: bool,
     has_tickers: bool = False,
+    category: str = "",
 ) -> bool:
     """
     判斷這則新聞是否需要送 Groq 做 AI 分析。
@@ -49,31 +66,45 @@ def should_use_ai(
     設計原則：寧可少送，不要每則都送。
     送 AI 的目的是「補關鍵字判斷不足」，不是替每則新聞都加摘要。
 
+    前置過濾（命中即直接返回 False，不進後續條件）：
+      - 非財經類別（科學/太空/天文/娛樂…）
+      - 情緒模糊帶且標題無任何財經信號詞（純科技/學術新聞幾乎都中了這條）
+
     觸發條件（任一符合即送）：
-      1. 情緒模糊帶（-0.15 ~ +0.15）：關鍵字沒把握，需要 AI
+      1. 情緒模糊帶（-0.15 ~ +0.15）且含財經信號詞：關鍵字沒把握，需要 AI
       2. 含否定詞且有強烈情緒（|score|>0.2）：否定詞可能反轉方向
       3. 地緣政治新聞：影響複雜，需要深度解讀
       4. 有個股代碼 + 強烈訊號（|score|>=0.4）：個股影響才送，避免雜訊
-         （純中性個股新聞不送，節省 quota）
 
     不送的情況：
       - 分數明確（|score|>0.15）且無否定詞、無地緣政治、無個股 → 關鍵字夠用
       - 分數很強（|score|>0.4）但沒有個股代碼 → 影響範圍不精確，不值得送
     """
-    # 條件 1：情緒模糊帶（縮小至 ±0.15，原本 ±0.20 太寬）
+    # ── 前置過濾 1：非財經類別直接排除 ─────────────────────────
+    if category in _NON_FINANCE_CATEGORIES:
+        logger.debug(f"非財經類別（{category}），跳過 AI：{title[:30]}")
+        return False
+
+    # ── 前置過濾 2：地緣政治無視財經信號詞，直接通過（條件3提前處理）
+    if is_geo:
+        return True
+
+    # ── 前置過濾 3：情緒模糊帶但無任何財經信號詞 → 純科技/學術/雜訊，排除 ──
+    has_finance_signal = any(w in title for w in _FINANCE_SIGNALS)
+    if -0.15 <= keyword_score <= 0.15 and not has_finance_signal:
+        logger.debug(f"模糊帶但無財經信號詞，跳過 AI：{title[:30]}")
+        return False
+
+    # ── 條件 1：情緒模糊帶 + 有財經信號詞（關鍵字判斷不足，需 AI）─────────
     if -0.15 <= keyword_score <= 0.15:
         return True
 
-    # 條件 2：含否定詞 且 情緒有一定強度（否定詞+中性不送，節省 quota）
+    # ── 條件 2：含否定詞 且 情緒有一定強度 ──────────────────────────────────
     negation_words = ["不", "未", "沒有", "擬", "傳", "疑", "恐"]
     if any(w in title for w in negation_words) and abs(keyword_score) > 0.20:
         return True
 
-    # 條件 3：地緣政治（一律送，影響範圍需要 AI 解讀）
-    if is_geo:
-        return True
-
-    # 條件 4：有個股代碼 且 訊號夠強（避免每個有代碼的新聞都送）
+    # ── 條件 4：有個股代碼 且 訊號夠強 ──────────────────────────────────────
     if has_tickers and abs(keyword_score) >= 0.40:
         return True
 
@@ -218,7 +249,7 @@ def batch_groq_analyze(
         is_geo     = article.get("is_geo", False)
         has_tickers = bool(article.get("tickers"))   # [新增]
 
-        if should_use_ai(kw_score, title, is_geo, has_tickers):
+        if should_use_ai(kw_score, title, is_geo, has_tickers, category):
             ai = groq_analyze(title, summary, category, api_key)
             if ai:
                 article["ai_sentiment"]        = ai["sentiment"]
