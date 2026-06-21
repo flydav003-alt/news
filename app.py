@@ -783,6 +783,7 @@ if "initialized" not in st.session_state:
         "interval":     60,
         "groq_ok":      groq_ok,
         "use_ai":       groq_ok,   # groq_ok=True 時預設開啟
+        "chip_filter":  "all",     # 最新新聞快速篩選預設全部
     })
 # ── 每次 rerun 都重新確認 groq_ok（防 secrets 讀取延遲問題）──
 if not st.session_state.get("groq_ok"):
@@ -1182,15 +1183,19 @@ with tab_dash:
     # ── 最新新聞（12h 快速篩選）──
     st.markdown('<div class="sec-hd">📋 最新新聞（12h）</div>', unsafe_allow_html=True)
 
-    # A Chip 快捷篩選列
-    st.markdown("""
-<div class="chip-bar">
-  <span class="chip chip-all active" onclick="chipFilter(this,'all')">全部</span>
-  <span class="chip chip-bull" onclick="chipFilter(this,'bull')">📈 利多</span>
-  <span class="chip chip-bear" onclick="chipFilter(this,'bear')">📉 利空</span>
-  <span class="chip chip-ai"  onclick="chipFilter(this,'ai')">✦ AI高分</span>
-  <span class="chip chip-geo" onclick="chipFilter(this,'geo')">⚑ 地緣政治</span>
-</div>""", unsafe_allow_html=True)
+    # Chip 快捷篩選列（用 st.button + session_state，onclick 在 Streamlit 會被過濾掉）
+    _chip_opts = [("全部", "all"), ("📈 利多", "bull"), ("📉 利空", "bear"),
+                  ("✦ AI高分", "ai"), ("⚑ 地緣政治", "geo")]
+    _chip_cols = st.columns(len(_chip_opts))
+    for _ci, (_clabel, _cval) in enumerate(_chip_opts):
+        with _chip_cols[_ci]:
+            _active = st.session_state.get("chip_filter", "all") == _cval
+            if st.button(_clabel,
+                         key=f"chip_{_cval}",
+                         type="primary" if _active else "secondary",
+                         use_container_width=True):
+                st.session_state["chip_filter"] = _cval
+                st.rerun()
 
     f1, f2, f3, f4 = st.columns([1, 1, 2, 1])
     with f1:
@@ -1207,6 +1212,24 @@ with tab_dash:
 
     ddf = df_12h.copy() if not df_12h.empty else pd.DataFrame()
     if not ddf.empty:
+        # ── Chip 篩選（Python 端，取代無效的 JS onclick）──────────────────
+        _chip = st.session_state.get("chip_filter", "all")
+        if _chip == "bull":
+            _bull_mask = (ddf["sentiment"] == "bullish") | (ddf["ai_sentiment"] == "bullish")
+            ddf = ddf[_bull_mask]
+        elif _chip == "bear":
+            _bear_mask = (ddf["sentiment"] == "bearish") | (ddf["ai_sentiment"] == "bearish")
+            ddf = ddf[_bear_mask]
+        elif _chip == "ai":
+            _ai_mask = (
+                ddf["ai_summary"].notna() & (ddf["ai_summary"] != "") &
+                (ddf["ai_score"].abs() >= 5)
+            )
+            ddf = ddf[_ai_mask]
+        elif _chip == "geo":
+            ddf = ddf[ddf["is_geo"] == True]
+
+        # ── 下方 selectbox / 關鍵字篩選 ──────────────────────────────────
         if hide_neu:
             ddf = ddf[ddf["sentiment"] != "neutral"]
         sm = {"利多": "bullish", "利空": "bearish", "中性": "neutral"}
