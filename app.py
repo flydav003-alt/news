@@ -2207,7 +2207,7 @@ with tab_deep:
                 rows2.append({"類股": sec2, "新聞數": cnt2, "平均情緒": round(avg2, 3), "利多": bull2, "利空": bear2})
             rank_df = pd.DataFrame(rows2)
 
-            clrs_r = ["#C0392B" if s >= 0.05 else ("#16A085" if s <= -0.05 else "#DFE6E9")  /* ← 使用新配色 */
+            clrs_r = ["#C0392B" if s >= 0.05 else ("#16A085" if s <= -0.05 else "#DFE6E9")  * 使用新配色
                       for s in rank_df.head(10)["平均情緒"]]
             fig_r = go.Figure(go.Bar(
                 x=rank_df.head(10)["新聞數"], y=rank_df.head(10)["類股"], orientation="h",
