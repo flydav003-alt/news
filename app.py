@@ -1103,12 +1103,17 @@ with tab_dash:
         else:
             key_df = ai_12h[ai_12h["ai_sentiment"].isin(["bullish", "bearish"])]
             if key_df.empty:
-                key_df = ai_12h.copy()
-            if "importance_score" in key_df.columns:
-                key_df = key_df.sort_values("importance_score", ascending=False)
+                st.markdown("""
+<div class="empty-box">
+  <div class="empty-box-icon">📭</div>
+  <div class="empty-box-txt">12h 內無 AI 判定有明確多空方向的財經新聞</div>
+</div>""", unsafe_allow_html=True)
             else:
-                key_df = key_df.reindex(key_df["ai_score"].abs().sort_values(ascending=False).index)
-            render_news(key_df, max_items=25)
+                if "importance_score" in key_df.columns:
+                    key_df = key_df.sort_values("importance_score", ascending=False)
+                else:
+                    key_df = key_df.reindex(key_df["ai_score"].abs().sort_values(ascending=False).index)
+                render_news(key_df, max_items=25)
 
     with col_chart:
         # 情緒圓餅
