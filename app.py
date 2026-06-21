@@ -78,7 +78,16 @@ def filter_12h(df):
 # AI 市場總結
 # ─────────────────────────────────────────────
 def get_daily_ai_summary(ai_news_df):
+    """
+    生成今日 AI 市場總結。
+    - 接入 groq_analyzer 共用熔斷器，避免與文章分析搶 quota
+    - 最多 retry 2 次（429 冷卻後再試）
+    - 詳細錯誤訊息供 debug
+    """
+    import time
     import requests
+    from groq_analyzer import _is_rate_limited, _set_rate_limited, COOLDOWN_SECONDS
+
     groq_key = ""
     try:
         groq_key = st.secrets.get("GROQ_API_KEY", "")
@@ -89,6 +98,11 @@ def get_daily_ai_summary(ai_news_df):
     if not groq_key:
         return "", "找不到 GROQ_API_KEY"
 
+    # ── 熔斷器：文章分析若已觸發 429，總結直接等冷卻後才試 ──────────────
+    if _is_rate_limited():
+        remaining = int(max(0, _rate_limit_until_seconds() - time.time()))
+        return "", f"Groq 熔斷冷卻中（約 {remaining} 秒後恢復），請稍後點「重新生成」"
+
     lines = []
     for _, r in ai_news_df.head(15).iterrows():
         label = {"bullish": "利多", "bearish": "利空"}.get(r.get("ai_sentiment", ""), "中性")
@@ -96,7 +110,7 @@ def get_daily_ai_summary(ai_news_df):
         lines.append(f"[{label}] {text}")
     news_text = "\n".join(lines)
     if not news_text.strip():
-        return "", "沒有可用 AI 新聞素材"
+        return "", "沒有可用 AI 新聞素材（請先抓取並啟用 AI 分析）"
 
     prompt = f"""以下是今日台灣財經新聞的 AI 分析摘要：
 
@@ -113,30 +127,57 @@ def get_daily_ai_summary(ai_news_df):
   "summary": "一段客觀總結（60至100字，財經播報員語氣）"
 }}"""
 
+    # ── 最多 retry 2 次（第一次 429 → 等 5 秒 → retry；第二次再失敗才報錯）──
+    for attempt in range(2):
+        try:
+            resp = requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {groq_key}",
+                         "Content-Type": "application/json"},
+                json={"model": "llama-3.3-70b-versatile",
+                      "messages": [{"role": "user", "content": prompt}],
+                      "max_tokens": 600, "temperature": 0.2},
+                timeout=20,
+            )
+            resp.raise_for_status()
+            raw = resp.json()["choices"][0]["message"]["content"].strip()
+            if "```" in raw:
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+            return json.loads(raw.strip()), ""
+
+        except requests.exceptions.Timeout:
+            return "", "Groq API 逾時（20s），請稍後重試"
+
+        except requests.exceptions.HTTPError as e:
+            status = e.response.status_code if e.response is not None else 0
+            if status == 429:
+                _set_rate_limited()   # 同步熔斷器，讓文章分析也知道
+                if attempt == 0:
+                    # 第一次 429 → 等 5 秒再 retry 一次
+                    time.sleep(5)
+                    continue
+                remaining = COOLDOWN_SECONDS
+                return "", f"Groq 速率限制（429）｜已觸發熔斷冷卻 {remaining}s，請等候後點「重新生成」"
+            return "", f"Groq HTTP {status} 錯誤：{e}"
+
+        except json.JSONDecodeError as e:
+            return "", f"AI 回傳 JSON 解析失敗：{e}"
+
+        except Exception as e:
+            return "", f"生成失敗：{type(e).__name__}: {e}"
+
+    return "", "多次重試後仍失敗，請稍後再試"
+
+
+def _rate_limit_until_seconds():
+    """讀取 groq_analyzer 的熔斷截止時間戳（秒）"""
     try:
-        resp = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {groq_key}", "Content-Type": "application/json"},
-            json={"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": prompt}],
-                  "max_tokens": 600, "temperature": 0.2},
-            timeout=15,
-        )
-        resp.raise_for_status()
-        raw = resp.json()["choices"][0]["message"]["content"].strip()
-        if "```" in raw:
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-        return json.loads(raw.strip()), ""
-    except requests.exceptions.Timeout:
-        return "", "Groq API 逾時，請稍後重試"
-    except requests.exceptions.HTTPError as e:
-        status = e.response.status_code if e.response else "?"
-        if status == 429:
-            return "", "Groq 速率限制（429），請等 1 分鐘後重試"
-        return "", f"Groq HTTP 錯誤 {status}"
-    except Exception as e:
-        return "", f"生成失敗：{e}"
+        from groq_analyzer import _rate_limit_until
+        return _rate_limit_until
+    except Exception:
+        return 0
 
 
 # ─────────────────────────────────────────────
@@ -1056,7 +1097,11 @@ with tab_dash:
                 st.rerun()
 
         elif serr:
-            st.error(f"AI 總結生成失敗：{serr}")
+            # 熔斷中顯示 warning（非 error），其他錯誤才用 error
+            if "熔斷" in serr or "429" in serr or "速率限制" in serr:
+                st.warning(f"⏳ {serr}")
+            else:
+                st.error(f"AI 總結生成失敗：{serr}")
             if st.button("🔄 重試", key="regen_err"):
                 st.session_state.pop("_sum_key", None)
                 st.rerun()
