@@ -1972,7 +1972,7 @@ with tab_dash:
                 labels=["利多", "利空", "中性"],
                 values=[bull_n, bear_n, mid_n],
                 hole=0.60,
-                marker=dict(colors=["#C0392B", "#16A085", "#DFE6E9"],  /* ← 使用新配色 */
+                marker=dict(colors=["#C0392B", "#16A085", "#DFE6E9"],  # 使用新配色
                             line=dict(color="#FFFFFF", width=2)),
                 textinfo="percent+label",
                 textfont=dict(size=12, color="#374151"),
