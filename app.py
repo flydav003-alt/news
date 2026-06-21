@@ -764,7 +764,7 @@ st.markdown(CSS, unsafe_allow_html=True)
 # ─────────────────────────────────────────────
 if "initialized" not in st.session_state:
     init_db()
-    start_scheduler(interval_minutes=30)
+    start_scheduler(interval_minutes=60)
     # 多一層保護：secrets 讀取失敗時退而用環境變數
     groq_ok = False
     try:
@@ -780,7 +780,7 @@ if "initialized" not in st.session_state:
         "custom_bull":  {},
         "custom_bear":  {},
         "enabled_srcs": [s["name"] for s in SOURCES if s["enabled"]],
-        "interval":     30,
+        "interval":     60,
         "groq_ok":      groq_ok,
         "use_ai":       groq_ok,   # groq_ok=True 時預設開啟
     })
@@ -1542,13 +1542,15 @@ with tab_cfg:
     st1, st2, st3 = st.tabs(["📡 來源 / 頻率", "📝 情緒詞典", "📜 執行日誌"])
 
     with st1:
-        st.markdown("#### ⏱ 抓取頻率")
-        new_iv = st.select_slider("每隔幾分鐘自動抓取", options=[15, 30, 60],
+        st.markdown("#### ⏱ 背景抓取頻率")
+        st.caption("⚠️ 背景排程**不做 AI 分析**，僅存文章到資料庫。想要 AI 分析與重點新聞，請手動點「立即抓取」。")
+        new_iv = st.select_slider("每隔幾分鐘自動抓取（僅存文章，不消耗 Groq quota）",
+                                   options=[30, 60, 90, 120],
                                    value=st.session_state["interval"])
         if st.button("套用", key="iv_apply"):
             st.session_state["interval"] = new_iv
             update_interval(new_iv)
-            st.success(f"已更新：每 {new_iv} 分鐘")
+            st.success(f"已更新：每 {new_iv} 分鐘（背景抓取，不做 AI）")
 
         st.divider()
         st.markdown("#### 📡 新聞來源開關")
