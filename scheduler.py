@@ -49,12 +49,14 @@ def crawl_and_save(enabled_names=None,
                    custom_bull=None,
                    custom_bear=None,
                    use_ai: bool = True,
-                   max_ai_per_run: int = 20) -> dict:
+                   max_ai_per_run: int = 10) -> dict:
     """
     完整流程：抓取 → 關鍵字分析 → AI 分析（選擇性）→ 存庫
 
-    max_ai_per_run：每次執行最多送幾則給 Groq（避免單次跑太久）
-    預設 20 則，每則約 1~2 秒，整體約 20~40 秒完成。
+    max_ai_per_run：每次執行最多送幾則給 Groq（避免單次跑太久 & 耗盡 quota）
+    預設 10 則（每則 ~2 秒 = 共 ~20 秒），為每日總結保留足夠 RPM 餘裕。
+    Groq 免費版 RPM=30，10 則文章用掉 ~10 RPM，總結再用 1 RPM，共 11/30，安全。
+    若需要更多分析可手動傳入 max_ai_per_run=20，但需確認當下 quota 未被耗盡。
     """
     analyzer = Analyzer(
         extra_bullish=custom_bull,
