@@ -2142,7 +2142,7 @@ with tab_deep:
 
             with ch2:
                 cdf15 = hdf.head(15)
-                colors15 = ["#C0392B" if s >= 0.15 else ("#16A085" if s <= -0.15 else "#DFE6E9")  /* ← 使用新配色 */
+                colors15 = ["#C0392B" if s >= 0.15 else ("#16A085" if s <= -0.15 else "#DFE6E9")  * 使用新配色 
                             for s in cdf15["平均情緒"]]
                 fig_sc = go.Figure(go.Bar(
                     x=cdf15["平均情緒"], y=cdf15["代碼"], orientation="h",
