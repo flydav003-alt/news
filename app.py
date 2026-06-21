@@ -2127,7 +2127,7 @@ with tab_deep:
                 fig_cnt = go.Figure(go.Bar(
                     x=hdf.head(15)["出現次數"], y=hdf.head(15)["代碼"], orientation="h",
                     marker=dict(color=hdf.head(15)["出現次數"],
-                                colorscale=[[0, "#E2E8F0"], [1, "#6C5CE7"]], showscale=False),  /* ← 使用主色 */
+                                colorscale=[[0, "#E2E8F0"], [1, "#6C5CE7"]], showscale=False),  # 使用主色
                     text=hdf.head(15)["出現次數"], textposition="outside",
                     textfont=dict(size=12, color="#64748B"),
                 ))
