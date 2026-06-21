@@ -1,10 +1,12 @@
 """
 scheduler.py — 背景排程模組
-- APScheduler 定時抓取
-- 整合 Groq AI 選擇性分析（符合觸發條件才送）
+- APScheduler 定時抓取（預設 60 分鐘）
+- 排程只抓文章存庫，不做 AI 分析（use_ai=False），保留 Groq quota 給手動抓取
+- 手動抓取時才做 AI 分析，避免 429 衝突導致重點新聞空白
 - 所有時間顯示台灣時間
 - [修改] should_use_ai 呼叫新增 has_tickers、category 參數
-- [修改] _get_groq_key 加環境變數備援，排程器固定帶 use_ai=True
+- [修改] _get_groq_key 加環境變數備援
+- [修改] 排程改為 use_ai=False，interval 預設改為 60 分鐘
 """
 
 import logging
@@ -164,7 +166,7 @@ def crawl_and_save(enabled_names=None,
     }
 
 
-def start_scheduler(interval_minutes: int = 30) -> None:
+def start_scheduler(interval_minutes: int = 60) -> None:
     global _sched
     if _sched and _sched.running:
         return
@@ -175,10 +177,10 @@ def start_scheduler(interval_minutes: int = 30) -> None:
         id                 = "news_crawl",
         replace_existing   = True,
         misfire_grace_time = 120,
-        kwargs             = {"use_ai": True},   # 排程永遠帶 AI，不依賴 session_state
+        kwargs             = {"use_ai": False},   # 排程只抓文章不做AI，保留quota給手動抓取
     )
     _sched.start()
-    logger.info(f"排程啟動，每 {interval_minutes} 分鐘抓取一次（AI 分析已強制開啟）")
+    logger.info(f"排程啟動，每 {interval_minutes} 分鐘抓取一次（AI 分析保留給手動觸發）")
 
 
 def update_interval(minutes: int) -> None:
@@ -187,7 +189,7 @@ def update_interval(minutes: int) -> None:
         _sched.reschedule_job(
             "news_crawl",
             trigger = IntervalTrigger(minutes=minutes),
-            kwargs  = {"use_ai": True},   # reschedule 也保留 AI 參數
+            kwargs  = {"use_ai": False},   # 排程永遠不做AI，quota 保留給手動抓取
         )
 
 
