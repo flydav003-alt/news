@@ -502,7 +502,9 @@ hr { border-color: var(--color-border-tertiary) !important; margin: 10px 0 !impo
 }
 .nw:hover { background: var(--color-background-secondary); }
 .nw:last-child { border-bottom: none; }
-.nw.bull, .nw.bear, .nw.geo { border-left: none; }
+.nw.bull { border-left: none; background: var(--color-bull-bg); }
+.nw.bear { border-left: none; background: var(--color-bear-bg); }
+.nw.geo  { border-left: none; }
 .nw-title {
   font-size: 14px; font-weight: 500; color: var(--color-text-primary);
   line-height: 1.5; margin-bottom: 5px;
