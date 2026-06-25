@@ -502,9 +502,9 @@ hr { border-color: var(--color-border-tertiary) !important; margin: 10px 0 !impo
 }
 .nw:hover { background: var(--color-background-secondary); }
 .nw:last-child { border-bottom: none; }
-.nw.bull { border-left: none; background: var(--color-bull-bg); }
-.nw.bear { border-left: none; background: var(--color-bear-bg); }
-.nw.geo  { border-left: none; }
+.nw.bull, .nw.bear, .nw.geo { border-left: none; }
+.nw.bull.highlight { background: var(--color-bull-bg); }
+.nw.bear.highlight { background: var(--color-bear-bg); }
 .nw-title {
   font-size: 14px; font-weight: 500; color: var(--color-text-primary);
   line-height: 1.5; margin-bottom: 5px;
@@ -802,7 +802,7 @@ if not st.session_state.get("groq_ok"):
 # ─────────────────────────────────────────────
 # 共用：渲染新聞清單
 # ─────────────────────────────────────────────
-def render_news(df, max_items=120):
+def render_news(df, max_items=120, highlight=False):
     if df is None or df.empty:
         st.markdown("""
         <div class="empty-box">
@@ -866,9 +866,9 @@ def render_news(df, max_items=120):
         if is_geo:
             cls = "nw geo"
         elif eff == "bullish":
-            cls = "nw bull"
+            cls = "nw bull highlight" if highlight else "nw bull"
         elif eff == "bearish":
-            cls = "nw bear"
+            cls = "nw bear highlight" if highlight else "nw bear"
         else:
             cls = "nw"
 
@@ -1161,7 +1161,7 @@ with tab_dash:
                     key_df = key_df.sort_values("importance_score", ascending=False)
                 else:
                     key_df = key_df.reindex(key_df["ai_score"].abs().sort_values(ascending=False).index)
-                render_news(key_df, max_items=25)
+                render_news(key_df, max_items=25, highlight=True)
 
     with col_chart:
         # 情緒圓餅
