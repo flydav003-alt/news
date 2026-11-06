@@ -47,6 +47,10 @@ _FINANCE_SIGNALS = [
     "ETF", "指數", "大盤", "外資", "投信", "自營", "融資", "融券",
     "關稅", "貿易", "出口", "進口", "景氣", "Fed", "升息", "降息",
     "TSMC", "NVDA", "AMD", "MSFT", "AAPL", "INTC", "QCOM",
+    # [新增] 英文新聞財經信號詞（title 比對時大小寫不敏感，見 should_use_ai）
+    "stock", "shares", "earnings", "revenue", "profit", "chip", "chips", "nasdaq",
+    "s&p", "dow", "fed", "rate", "inflation", "tariff", "ai ", "nvidia", "apple",
+    "tesla", "microsoft", "amazon", "oil", "yields", "bank", "ipo", "market",
 ]
 
 # 非財經類別：這些 category 的新聞直接不送（科技/科學/天文等）
@@ -90,7 +94,8 @@ def should_use_ai(
         return True
 
     # ── 前置過濾 3：情緒模糊帶但無任何財經信號詞 → 純科技/學術/雜訊，排除 ──
-    has_finance_signal = any(w in title for w in _FINANCE_SIGNALS)
+    _tl = title.lower()
+    has_finance_signal = any((w in title) or (w.lower() in _tl) for w in _FINANCE_SIGNALS)
     if -0.15 <= keyword_score <= 0.15 and not has_finance_signal:
         logger.debug(f"模糊帶但無財經信號詞，跳過 AI：{title[:30]}")
         return False
