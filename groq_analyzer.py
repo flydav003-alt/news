@@ -124,7 +124,7 @@ _FINANCE_SIGNALS = [
 ]
 
 # 非財經類別：這些 category 的新聞直接不送（科技/科學/天文等）
-_NON_FINANCE_CATEGORIES = {"科學", "太空", "天文", "健康", "醫療", "體育", "娛樂", "生活"}
+_NON_FINANCE_CATEGORIES = {"科學", "太空", "天文", "健康", "醫療", "體育", "運動", "娛樂", "電玩", "生活"}
 
 
 def should_use_ai(
@@ -239,32 +239,11 @@ def groq_analyze(
     prompt = _build_prompt(title, summary, category)
 
     try:
-        resp = requests.post(
-            GROQ_API_URL,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type":  "application/json",
-            },
-            json={
-                "model":       MODEL,
-                "messages":    [{"role": "user", "content": prompt}],
-                "max_tokens":  MAX_TOKENS,
-                "temperature": TEMPERATURE,
-            },
-            timeout=15,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-
-        raw_text = data["choices"][0]["message"]["content"].strip()
-
-        # 清理可能的 markdown 包裝
-        if "```" in raw_text:
-            raw_text = raw_text.split("```")[1]
-            if raw_text.startswith("json"):
-                raw_text = raw_text[4:]
-
-        result = json.loads(raw_text)
+        raw_text = groq_chat(prompt, api_key, timeout=40)
+        result = parse_json_loose(raw_text)
+        if not isinstance(result, dict):
+            logger.warning("Groq 回傳不是 JSON 物件")
+            return None
 
         required = {"sentiment", "score", "summary", "affected_tickers",
                     "reason", "confidence"}
@@ -276,7 +255,7 @@ def groq_analyze(
         if result["sentiment"] not in ("bullish", "bearish", "neutral"):
             result["sentiment"] = "neutral"
         result["score"]      = max(-10, min(10, float(result["score"])))
-        result["confidence"] = result["confidence"].lower()
+        result["confidence"] = str(result["confidence"]).lower()
 
         logger.info(
             f"Groq 分析完成：{title[:30]}… → {result['sentiment']} ({result['score']:+.1f})"
@@ -289,7 +268,7 @@ def groq_analyze(
     except requests.exceptions.Timeout:
         logger.error("Groq API 超時")
     except requests.exceptions.HTTPError as e:
-        status = e.response.status_code if e.response else 0
+        status = e.response.status_code if e.response is not None else 0
         if status == 429:
             _set_rate_limited()   # 啟動熔斷，這批剩餘新聞全部跳過
         else:
