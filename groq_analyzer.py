@@ -31,19 +31,49 @@ _rate_limit_until: float = 0.0   # timestamp；在這時間之前不送任何請
 COOLDOWN_SECONDS = 90            # 冷卻時間（秒），比 60 秒再多一點保險
 
 
+_cooldowns: dict = {}              # 金鑰 -> 冷卻到的時間；兩把金鑰各自計算，一把被限速就換另一把
+_rr_counter = 0
+
+
+def _get_secret(name: str) -> str:
+    try:
+        import streamlit as st
+        v = st.secrets.get(name, "")
+        if v:
+            return str(v)
+    except Exception:
+        pass
+    return os.environ.get(name, "")
+
+
+def _all_keys(primary: str = "") -> list:
+    """GROQ_API_KEY、GROQ_API_KEY_2（兩個不同帳號）依序收集，去重。"""
+    keys = []
+    for k in (primary, _get_secret("GROQ_API_KEY"), _get_secret("GROQ_API_KEY_2")):
+        if k and k not in keys:
+            keys.append(k)
+    return keys
+
+
 def _is_rate_limited() -> bool:
-    return time.time() < _rate_limit_until
+    """全部金鑰都在冷卻才算被限速（有一把能用就繼續）"""
+    keys = _all_keys()
+    now = time.time()
+    if not keys:
+        return now < _rate_limit_until
+    return all(_cooldowns.get(k, 0) > now for k in keys) or (now < _rate_limit_until and len(keys) == 1)
 
 
 def _set_rate_limited() -> None:
+    """所有金鑰都被 429 時由呼叫端觸發：全部進入冷卻"""
     global _rate_limit_until
     _rate_limit_until = time.time() + COOLDOWN_SECONDS
-    logger.warning(f"Groq 429：啟動熔斷，冷卻 {COOLDOWN_SECONDS} 秒後恢復")
+    for k in _all_keys():
+        _cooldowns[k] = _rate_limit_until
+    logger.warning(f"Groq 429：所有金鑰都被限速，冷卻 {COOLDOWN_SECONDS} 秒後恢復")
 
 
-def groq_chat(prompt: str, api_key: str, max_tokens: int = MAX_TOKENS,
-              temperature: float = TEMPERATURE, timeout: int = 40) -> str:
-    """呼叫 Groq，回傳模型文字。HTTP 錯誤會原樣拋出 requests.HTTPError，由呼叫端處理。"""
+def _chat_once(prompt: str, key: str, max_tokens: int, temperature: float, timeout: int) -> str:
     payload = {
         "model":       MODEL,
         "messages":    [{"role": "user", "content": prompt}],
@@ -54,14 +84,52 @@ def groq_chat(prompt: str, api_key: str, max_tokens: int = MAX_TOKENS,
         payload["reasoning_effort"] = "low"     # 新聞分類不需要長思考，省 token 又快
     resp = requests.post(
         GROQ_API_URL,
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
         json=payload, timeout=timeout,
     )
     if not resp.ok:
-        logger.error(f"Groq HTTP {resp.status_code}（model={MODEL}）：{resp.text[:300]}")
+        logger.error(f"Groq HTTP {resp.status_code}（model={MODEL}，key=…{key[-4:]}）：{resp.text[:300]}")
     resp.raise_for_status()
     msg = resp.json()["choices"][0]["message"]
     return (msg.get("content") or "").strip()
+
+
+def groq_chat(prompt: str, api_key: str, max_tokens: int = MAX_TOKENS,
+              temperature: float = TEMPERATURE, timeout: int = 40) -> str:
+    """
+    呼叫 Groq，回傳模型文字。有多把金鑰時輪流使用（分攤額度），
+    某把遇到 429 就標記冷卻並改用下一把；全部都被限速才把 429 丟給呼叫端。
+    其他 HTTP 錯誤（例如 404 模型下架）直接拋出 requests.HTTPError。
+    """
+    global _rr_counter
+    keys = _all_keys(api_key)
+    if not keys:
+        raise requests.exceptions.HTTPError("沒有可用的 Groq 金鑰")
+    start = _rr_counter % len(keys)
+    _rr_counter += 1
+    order = keys[start:] + keys[:start]
+    last = None
+    for k in order:
+        if _cooldowns.get(k, 0) > time.time():
+            continue
+        try:
+            return _chat_once(prompt, k, max_tokens, temperature, timeout)
+        except requests.exceptions.HTTPError as e:
+            sc = e.response.status_code if e.response is not None else 0
+            if sc == 429:
+                _cooldowns[k] = time.time() + COOLDOWN_SECONDS
+                logger.warning(f"Groq 金鑰 …{k[-4:]} 被限速 429，改用下一把")
+                last = e
+                continue
+            if sc in (401, 403) and len(keys) > 1:
+                _cooldowns[k] = time.time() + 3600
+                logger.error(f"Groq 金鑰 …{k[-4:]} 無效（{sc}），本輪改用其他金鑰")
+                last = e
+                continue
+            raise
+    if last is not None:
+        raise last
+    raise requests.exceptions.HTTPError("所有 Groq 金鑰都在冷卻中")
 
 
 def parse_json_loose(raw: str):
@@ -262,7 +330,7 @@ def groq_analyze(
         )
 
         # ── 成功後依 RPM=30 限制，每次請求間隔至少 2 秒 ──────
-        time.sleep(2)
+        time.sleep(1 if len(_all_keys(api_key)) > 1 else 2)
         return result
 
     except requests.exceptions.Timeout:
