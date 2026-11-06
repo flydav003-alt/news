@@ -127,7 +127,8 @@ hr{border-color:var(--line)!important;margin:10px 0!important}
 
 /* 行情條 */
 .qbar{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:6px 0 12px}
-.q{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 12px}
+.q{display:block;text-decoration:none!important;color:inherit!important;transition:box-shadow .15s,border-color .15s;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 12px}
+.q:hover{border-color:var(--accent);box-shadow:0 4px 12px rgba(80,60,20,.12)}
 .q-n{font-size:12px;color:var(--tx2)}
 .q-p{font-size:17px;font-weight:700;font-family:'JetBrains Mono',monospace;line-height:1.3}
 .q-c{font-size:12px;font-family:'JetBrains Mono',monospace;font-weight:600}
@@ -308,7 +309,14 @@ if df_all.empty and not st.session_state.get("auto_crawled"):
 # 行情條（Yahoo Finance chart API；失敗就不顯示）
 # ─────────────────────────────────────────────
 QUOTE_SYMS = [("^TWII", "加權指數"), ("2330.TW", "台積電"), ("^SOX", "費城半導體"),
-              ("^IXIC", "那斯達克"), ("^GSPC", "S&P 500"), ("TWD=X", "美元/台幣")]
+              ("^IXIC", "那斯達克"), ("^N225", "日經 225"), ("^KS11", "韓國 KOSPI"), ("TWD=X", "美元/台幣")]
+
+
+def quote_url(sym: str) -> str:
+    """點行情卡跳到 Yahoo 報價頁：台股用奇摩股市，其餘用 Yahoo Finance"""
+    if sym in ("^TWII", "2330.TW"):
+        return f"https://tw.stock.yahoo.com/quote/{quote(sym)}"
+    return f"https://finance.yahoo.com/quote/{quote(sym)}"
 _UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36"}
 
 
@@ -327,7 +335,7 @@ def _one_quote(sym_name):
             prev = closes[-1]
         else:
             return None
-        return {"name": name, "price": price, "chg": price - prev,
+        return {"sym": sym, "name": name, "price": price, "chg": price - prev,
                 "pct": (price - prev) / prev * 100 if prev else 0.0}
     except Exception:
         return None
@@ -335,7 +343,7 @@ def _one_quote(sym_name):
 
 @st.cache_data(ttl=120, show_spinner=False)
 def fetch_quotes():
-    with ThreadPoolExecutor(max_workers=6) as ex:
+    with ThreadPoolExecutor(max_workers=7) as ex:
         return [q for q in ex.map(_one_quote, QUOTE_SYMS) if q]
 
 
@@ -347,9 +355,10 @@ def quotes_html(qs) -> str:
         cls = "up" if q["chg"] > 0 else ("dn" if q["chg"] < 0 else "flat")
         arrow = "▲" if q["chg"] > 0 else ("▼" if q["chg"] < 0 else "–")
         cells.append(
-            f'<div class="q"><div class="q-n">{esc(q["name"])}</div>'
+            f'<a class="q" href="{esc(quote_url(q["sym"]), quote=True)}" target="_blank" rel="noopener">'
+            f'<div class="q-n">{esc(q["name"])}</div>'
             f'<div class="q-p">{q["price"]:,.2f}</div>'
-            f'<div class="q-c {cls}">{arrow} {abs(q["chg"]):,.2f} ({q["pct"]:+.2f}%)</div></div>')
+            f'<div class="q-c {cls}">{arrow} {abs(q["chg"]):,.2f} ({q["pct"]:+.2f}%)</div></a>')
     return f'<div class="qbar">{"".join(cells)}</div>'
 
 
