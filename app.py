@@ -28,7 +28,7 @@ logging.basicConfig(level=logging.INFO,
 from database import (init_db, SessionLocal, get_articles_df,
                       get_sector_counts, get_ticker_counts, import_json, TZ_TW)
 from scheduler import crawl_and_save
-from crawler import SOURCES
+from crawler import SOURCES, is_routine_revenue
 
 esc = _html.escape
 
@@ -184,6 +184,16 @@ hr{border-color:var(--line)!important;margin:10px 0!important}
 .card .thumb{height:150px;display:block}
 .strip{height:30px;display:flex;align-items:center;padding:0 13px;font-size:11.5px;font-weight:700;color:rgba(255,255,255,.95);letter-spacing:.5px}
 .grid{align-items:start}
+.card.read,.si.read{opacity:.55;transition:opacity .15s} .card.read:hover,.si.read:hover{opacity:1}
+.ct:visited{color:var(--tx3)!important}
+.more{font-size:12px;color:var(--tx2);margin-top:2px}
+.more summary{cursor:pointer;color:var(--accent);font-weight:600;list-style:none}
+.more summary::-webkit-details-marker{display:none}
+.more ul{margin:6px 0 0;padding-left:16px}
+.more li{margin:4px 0;line-height:1.45}
+.more li a{color:var(--tx)!important;text-decoration:none!important}
+.more li a:hover{color:var(--accent)!important}
+.more li span{color:var(--tx3)}
 .seg{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 16px}
 .subhead{font-size:12.5px;color:var(--tx2);margin:2px 0 8px}
 .ph{font-size:20px}
@@ -227,6 +237,59 @@ hr{border-color:var(--line)!important;margin:10px 0!important}
 </style>
 """
 st.markdown(CSS, unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────
+# 主題（顏色 + 背景圖案）。網址加 ?theme=night 可直接指定
+# ─────────────────────────────────────────────
+_LIGHT = dict(card="#FFFFFF", line="#EADFCB", tx="#2B2418", tx2="#7A6E5A", tx3="#A89C86",
+              up="#C0392B", upbg="#FBE9E5", dn="#1B7A34", dnbg="#E4F2E8", warn="#92400E", warnbg="#FFF3D6")
+THEMES = {
+    "classic": ("🟫 經典米色", dict(_LIGHT, bg="#FCF8F0", soft="#F5EEDF", accent="#B8742A"), "none"),
+    "dots":    ("⚪ 米色點點", dict(_LIGHT, bg="#FCF8F0", soft="#F5EEDF", accent="#B8742A"),
+                "radial-gradient(rgba(184,116,42,.16) 1.2px,transparent 1.2px) 0 0/22px 22px"),
+    "grid":    ("📐 方格紙", dict(_LIGHT, bg="#FBF8F1", soft="#F3EDDF", accent="#9A6B2F"),
+                "linear-gradient(rgba(120,100,60,.09) 1px,transparent 1px) 0 0/28px 28px,"
+                "linear-gradient(90deg,rgba(120,100,60,.09) 1px,transparent 1px) 0 0/28px 28px"),
+    "forest":  ("🌲 森林", dict(_LIGHT, bg="#F1F6EE", soft="#E4EEDF", line="#D3E2CB", accent="#2F7D4F",
+                                tx="#1F2A21", tx2="#5C6E5F", tx3="#8DA090"),
+                "radial-gradient(circle at 12% 8%,rgba(120,180,120,.22),transparent 40%),"
+                "radial-gradient(circle at 90% 85%,rgba(160,210,150,.25),transparent 45%)"),
+    "ocean":   ("🌊 海洋", dict(_LIGHT, bg="#EEF5FA", soft="#DFEBF4", line="#CFE0EC", accent="#2E6FB5",
+                                tx="#1B2733", tx2="#587186", tx3="#8AA1B3"),
+                "linear-gradient(160deg,rgba(120,180,230,.28),transparent 45%),"
+                "radial-gradient(circle at 95% 90%,rgba(90,150,210,.2),transparent 40%)"),
+    "sakura":  ("🌸 櫻花", dict(_LIGHT, bg="#FDF2F4", soft="#F9E3E8", line="#F0D2D9", accent="#C2527A",
+                                tx="#33212A", tx2="#7E5C69", tx3="#B398A3"),
+                "radial-gradient(circle at 8% 12%,rgba(240,150,180,.28),transparent 38%),"
+                "radial-gradient(circle at 92% 80%,rgba(250,190,205,.3),transparent 42%)"),
+    "aurora":  ("🌌 極光", dict(_LIGHT, bg="#F4F2FB", soft="#E8E4F6", line="#DAD4EE", accent="#6C5CE7",
+                                tx="#241F3A", tx2="#625B85", tx3="#9A94BB"),
+                "radial-gradient(circle at 10% 10%,rgba(130,110,240,.25),transparent 38%),"
+                "radial-gradient(circle at 85% 20%,rgba(80,170,240,.22),transparent 40%),"
+                "radial-gradient(circle at 60% 95%,rgba(240,130,200,.18),transparent 40%)"),
+    "night":   ("🌙 夜間", dict(bg="#15120E", card="#211C16", soft="#2B251D", line="#3A3228", tx="#F2EBDD",
+                                tx2="#BDB19B", tx3="#8C816E", up="#FF6F5E", upbg="#3C211C", dn="#4FD27F",
+                                dnbg="#17321F", warn="#F5C16C", warnbg="#3A2E12", accent="#E0A458"),
+                "radial-gradient(circle at 15% 0%,rgba(224,164,88,.10),transparent 40%)"),
+}
+DEFAULT_THEME = "classic"
+_qt = st.query_params.get("theme", DEFAULT_THEME)
+st.session_state.setdefault("theme_sel", _qt if _qt in THEMES else DEFAULT_THEME)
+_tv, _pat = THEMES[st.session_state["theme_sel"]][1], THEMES[st.session_state["theme_sel"]][2]
+THEME_CSS = f"""<style>
+:root{{--bg:{_tv['bg']};--card:{_tv['card']};--soft:{_tv['soft']};--line:{_tv['line']};--tx:{_tv['tx']};--tx2:{_tv['tx2']};
+--tx3:{_tv['tx3']};--up:{_tv['up']};--up-bg:{_tv['upbg']};--dn:{_tv['dn']};--dn-bg:{_tv['dnbg']};--warn:{_tv['warn']};
+--warn-bg:{_tv['warnbg']};--accent:{_tv['accent']}}}
+.stApp{{background:{_pat + ',' if _pat != 'none' else ''}{_tv['bg']}!important;background-attachment:fixed!important}}
+.stApp p,.stApp label,.stApp span,.stApp li,[data-testid="stMarkdownContainer"]{{color:var(--tx)}}
+[data-testid="stCaptionContainer"],[data-testid="stCaptionContainer"] *{{color:var(--tx2)!important}}
+.stSelectbox [data-baseweb="select"]>div,.stTextInput input{{background:var(--card)!important;color:var(--tx)!important}}
+div[data-baseweb="popover"] ul,div[data-baseweb="popover"] li{{background:var(--card)!important;color:var(--tx)!important}}
+.stButton>button{{background:var(--card);color:var(--tx)}}
+.thumb .ph,.strip,.hero-t,.hero-m,.hero-o{{color:#fff}}
+.q-p,.m-v{{color:var(--tx)}} .m-v.up,.up{{color:var(--up)!important}} .m-v.dn,.dn{{color:var(--dn)!important}}
+</style>"""
+st.markdown(THEME_CSS, unsafe_allow_html=True)
 
 
 # ─────────────────────────────────────────────
@@ -295,6 +358,8 @@ def clean_images(df):
 
 
 df_all = clean_images(load_all())
+if not st.session_state.get("show_rev", False) and not df_all.empty:
+    df_all = df_all[~df_all["title"].fillna("").apply(is_routine_revenue)]
 
 # 保險：資料庫是空的（第一次部署 / Actions 還沒跑過）→ 自動抓一次，不讓畫面空白
 if df_all.empty and not st.session_state.get("auto_crawled"):
@@ -303,6 +368,8 @@ if df_all.empty and not st.session_state.get("auto_crawled"):
         crawl_and_save(enabled_names=st.session_state["enabled_srcs"], use_ai=False)
     st.cache_data.clear()
     df_all = clean_images(load_all())
+    if not st.session_state.get("show_rev", False) and not df_all.empty:
+        df_all = df_all[~df_all["title"].fillna("").apply(is_routine_revenue)]
 
 
 # ─────────────────────────────────────────────
@@ -465,7 +532,68 @@ def tickers_chips(row, n=3) -> str:
     return "".join(out)
 
 
-def card_html(row) -> str:
+# ── 同一事件合併 ──────────────────────────────────────────────────────────────
+_NUMTOK = re.compile(r"\d+\.\d+[%％兆億萬]?|\d{2,}[%％兆億萬點]")
+
+
+def _sig(row):
+    t = titles(row)[0]
+    s = re.sub(r"[\W_]+", "", t.lower())
+    grams = {s[i:i + 2] for i in range(len(s) - 1)}
+    tk = {x.strip() for x in str(row.get("ai_affected_tickers", "") or row.get("tickers", "") or "").split(",") if x.strip()}
+    nums = set(_NUMTOK.findall(t))
+    for p in re.findall(r"(\d+(?:\.\d+)?)[%％]", t):      # 9.26% 與 9% 視為同一個數字
+        nums.add(f"{int(float(p))}%")
+    return grams, nums, tk
+
+
+def _sim(a, b) -> float:
+    ga, na, ta = a
+    gb, nb, tb = b
+    if len(ga) < 4 or len(gb) < 4:
+        return 0.0
+    j = len(ga & gb) / len(ga | gb)
+    return j + (0.25 if na & nb else 0.0) + (0.2 if ta & tb else 0.0)
+
+
+def cluster_events(df, threshold=0.4, window_h=48):
+    """把「同一事件、多家報導」合成一組。回傳 [(代表列, [其他列…])]。
+    代表 = 有圖 > 有 AI 摘要 > 重要度高 > 較新。"""
+    if df is None or df.empty:
+        return []
+    d = df.copy()
+    d["_k"] = ((d["image_url"].fillna("") != "").astype(int) * 4
+               + (d["ai_summary"].fillna("") != "").astype(int) * 2
+               + d["importance_score"].fillna(0).astype(float) / 10.0)
+    order = list(df.index)                        # 保持呼叫端排序（例如最新優先）
+    groups = []                                    # [{"rep":idx, "sig":sig, "ts":ts, "members":[idx]}]
+    for idx in order:
+        r = d.loc[idx]
+        sg = _sig(r)
+        ts = r.get("published_at")
+        hit = None
+        for g in groups:
+            try:
+                near = abs((ts - g["ts"]).total_seconds()) <= window_h * 3600
+            except Exception:
+                near = True
+            if near and g["src"] != str(r.get("source", "")) or (near and g["src"] == str(r.get("source", "")) and False):
+                pass
+            if near and _sim(sg, g["sig"]) >= threshold:
+                hit = g
+                break
+        if hit is None:
+            groups.append({"sig": sg, "ts": ts, "src": str(r.get("source", "")), "members": [idx]})
+        else:
+            hit["members"].append(idx)
+    out = []
+    for g in groups:
+        mem = d.loc[g["members"]].sort_values("_k", ascending=False)
+        out.append((mem.iloc[0], [m for _, m in mem.iloc[1:].iterrows()]))
+    return out
+
+
+def card_html(row, others=None) -> str:
     sent, sv = eff_sent(row)
     cls = {"bullish": "bull", "bearish": "bear"}.get(sent, "")
     main, orig = titles(row)
@@ -474,6 +602,13 @@ def card_html(row) -> str:
     summ = str(row.get("ai_summary", "") or "")
     geo = '<span class="bd bd-g">⚑ 地緣</span>' if row.get("is_geo") else ""
     has_img = str(row.get("image_url", "") or "").startswith("http")
+    others = others or []
+    more_h = ""
+    if others:
+        li = "".join(
+            f'<li><a href="{esc(str(o.get("url", "#")), quote=True)}" target="_blank" rel="noopener">'
+            f'{esc(titles(o)[0])}</a> <span>· {esc(str(o.get("source", "")))}</span></li>' for o in others[:8])
+        more_h = (f'<details class="more"><summary>📚 另有 {len(others)} 則相關報導</summary><ul>{li}</ul></details>')
     orig_h = f'<div class="co">{esc(orig)}</div>' if orig else ""
     summ_h = f'<div class="cs">✦ {esc(summ)}</div>' if summ else ""
     return _h(f"""
@@ -481,16 +616,26 @@ def card_html(row) -> str:
       <a href="{href}" target="_blank" rel="noopener">{thumb_html(row) if has_img else strip_html(row)}</a>
       <div class="cb">
         <a class="ct" href="{href}" target="_blank" rel="noopener">{esc(main)}</a>
-        {orig_h}{summ_h}
+        {orig_h}{summ_h}{more_h}
         <div class="cm">{badge_html(sent, sv)}{geo}{tickers_chips(row)}</div>
         <div class="cm"><span>{esc(str(row.get("source", "")))}</span><span>· {relative_time(row.get("published_at"))}</span>{translate_link(row)}</div>
       </div>
     </div>""")
 
 
-def render_grid(df, max_items=60):
+def render_grid(df, max_items=60, merge=True):
     if df is None or df.empty:
         st.markdown('<div class="empty">📭 沒有符合條件的新聞</div>', unsafe_allow_html=True)
+        return
+    if merge and st.session_state.get("merge_events", True):
+        groups = cluster_events(df.head(400))
+        cards = "".join(card_html(rep, oth) for rep, oth in groups[:max_items])
+        st.markdown(f'<div class="grid">{cards}</div>', unsafe_allow_html=True)
+        merged = len(df.head(400)) - len(groups)
+        if len(groups) > max_items:
+            st.caption(f"顯示前 {max_items} 組事件，共 {len(groups)} 組（已把 {merged} 則重複報導合併）")
+        elif merged:
+            st.caption(f"已把 {merged} 則重複報導合併進對應卡片")
         return
     cards = "".join(card_html(r) for _, r in df.head(max_items).iterrows())
     st.markdown(f'<div class="grid">{cards}</div>', unsafe_allow_html=True)
@@ -626,12 +771,18 @@ elif sync["ok"]:
 else:
     status = '<span class="pill pill-warn">⚠ 未連到 GitHub 資料</span>'
 
-tb1, tb2 = st.columns([6, 1])
+tb1, tb3, tb2 = st.columns([5, 1.3, 1])
 with tb1:
     st.markdown(_h(f"""
     <div class="topbar"><span class="logo">📈 FinNews AI</span>{status}
     <span class="tmono">資料產生 {gen_str} · 本頁載入 {datetime.now(TZ_TW).strftime("%H:%M")}</span></div>"""),
                 unsafe_allow_html=True)
+with tb3:
+    _keys = list(THEMES.keys())
+    st.selectbox("主題", _keys, key="theme_sel", format_func=lambda k: THEMES[k][0],
+                 label_visibility="collapsed")
+    if st.query_params.get("theme") != st.session_state["theme_sel"]:
+        st.query_params["theme"] = st.session_state["theme_sel"]
 with tb2:
     if st.button("🔄 立即抓取", type="primary", use_container_width=True):
         with st.spinner("抓取中，約 30～60 秒…"):
@@ -1035,6 +1186,10 @@ with tab_deep:
 # TAB 3：設定
 # ═══════════════════════════════════════════════
 with tab_cfg:
+    st.markdown("#### 🧹 顯示內容")
+    st.checkbox("把同一事件的多家報導合併成一張卡片", value=True, key="merge_events")
+    st.checkbox("顯示例行「月營收公布」快訊（預設隱藏）", key="show_rev",
+                help="像「聯詠10月營收100億元」這類每月大量出現的制式公告。勾選後下次重新整理生效。")
     st.markdown("#### 📦 資料狀態")
     st.caption(f"資料來源網址：{DATA_URL or '（未設定）'}")
     st.write(f"最近同步：{'成功' if sync['ok'] else '失敗 – ' + sync['error']}｜本次併入 {sync['added']} 則｜"
@@ -1057,3 +1212,54 @@ with tab_cfg:
     if st.button("💾 儲存來源設定", type="primary", key="save_srcs"):
         st.session_state["enabled_srcs"] = enabled
         st.success(f"已儲存，啟用 {len(enabled)} 個來源")
+
+
+# ─────────────────────────────────────────────
+# 已讀變淡：點過的新聞記在「你這個瀏覽器」的 localStorage，之後自動變淡
+# （腳本放在 iframe 裡，透過 parent 操作頁面；每次重跑會先清掉舊的監聽器避免重複）
+# ─────────────────────────────────────────────
+_READ_JS = """
+<script>
+(function(){
+  var P = window.parent, D, K = 'finnews_read', S;
+  try { D = P.document; } catch(e) { return; }
+  if (P.__fnCleanup) { try { P.__fnCleanup(); } catch(e) {} }
+  function load(){ try { return new Set(JSON.parse(P.localStorage.getItem(K) || '[]')); } catch(e) { return new Set(); } }
+  function save(){ try { P.localStorage.setItem(K, JSON.stringify(Array.from(S).slice(-2000))); } catch(e) {} }
+  S = load();
+  function mainLink(el){
+    if (el.classList.contains('card')) return el.querySelector('a.ct');
+    return el.tagName === 'A' ? el : el.querySelector('a');
+  }
+  function mark(){
+    D.querySelectorAll('.card, .si').forEach(function(el){
+      var a = mainLink(el);
+      if (a && S.has(a.href)) el.classList.add('read');
+    });
+  }
+  function onClick(e){
+    var a = e.target.closest ? e.target.closest('a[href^="http"]') : null;
+    if (!a) return;
+    var box = a.closest('.card, .si');
+    if (!box) return;
+    var m = mainLink(box);
+    S.add(a.href); if (m) S.add(m.href);
+    save(); mark();
+  }
+  var t = null;
+  var obs = new MutationObserver(function(){ clearTimeout(t); t = setTimeout(mark, 150); });
+  obs.observe(D.body, {childList: true, subtree: true});
+  D.addEventListener('click', onClick, true);
+  P.__fnCleanup = function(){ obs.disconnect(); D.removeEventListener('click', onClick, true); };
+  mark();
+})();
+</script>
+"""
+try:                                   # 新版 Streamlit 用 st.iframe；舊版退回 components.html
+    st.iframe(_READ_JS, height=1)
+except Exception:
+    try:
+        import streamlit.components.v1 as components
+        components.html(_READ_JS, height=0)
+    except Exception:
+        pass                           # 已讀功能失敗不影響頁面其他功能
