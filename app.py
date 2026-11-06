@@ -235,9 +235,16 @@ hr{border-color:var(--line)!important;margin:10px 0!important}
 .empty{text-align:center;padding:40px;color:var(--tx3)}
 
 /* Streamlit 元件 */
-.stTabs [data-baseweb="tab-list"]{gap:4px;border-bottom:1px solid var(--line)}
-.stTabs [data-baseweb="tab"]{font-size:14px;font-weight:500;padding:8px 16px;color:var(--tx2)}
-.stTabs [aria-selected="true"]{color:var(--accent)!important}
+[role="tablist"]{gap:8px!important;padding:8px 2px 10px!important;flex-wrap:wrap;position:sticky;top:3.2rem;z-index:60;
+  background:var(--bg);border-bottom:2px solid var(--line)!important}
+[role="tab"]{height:auto!important;padding:9px 20px!important;border-radius:12px!important;background:var(--card)!important;
+  border:1px solid var(--line)!important;color:var(--tx)!important;box-shadow:0 1px 3px rgba(80,60,20,.06);transition:all .15s;cursor:pointer}
+[role="tab"]:hover{border-color:var(--accent)!important;transform:translateY(-1px)}
+[role="tab"] p{font-size:17px!important;font-weight:700!important;margin:0!important}
+[role="tab"][aria-selected="true"]{background:var(--accent)!important;border-color:var(--accent)!important;box-shadow:0 4px 12px rgba(80,60,20,.2)}
+[role="tab"][aria-selected="true"] p{color:#fff!important}
+.react-aria-SelectionIndicator,[data-baseweb="tab-highlight"],[data-baseweb="tab-border"]{display:none!important}
+@media (max-width:640px){[role="tab"]{padding:7px 12px!important}[role="tab"] p{font-size:15px!important}}
 .stButton>button{border-radius:8px;font-weight:500;border:1px solid var(--line);background:var(--card);color:var(--tx)}
 .stButton>button[kind="primary"]{background:var(--accent);border-color:var(--accent);color:#fff}
 .stSelectbox>div>div,.stTextInput>div>div>input{background:var(--card)!important;border:1px solid var(--line)!important;border-radius:8px!important}
@@ -294,6 +301,10 @@ THEME_CSS = f"""<style>
 .stSelectbox [data-baseweb="select"]>div,.stTextInput input{{background:var(--card)!important;color:var(--tx)!important}}
 div[data-baseweb="popover"] ul,div[data-baseweb="popover"] li{{background:var(--card)!important;color:var(--tx)!important}}
 .stButton>button{{background:var(--card);color:var(--tx)}}
+div[data-baseweb="select"] *,[data-testid="stSelectbox"] *{{color:var(--tx)!important}}
+div[data-baseweb="select"] svg{{fill:var(--tx)!important}}
+[data-testid="stAlert"],[data-testid="stAlert"]>div,[data-testid="stAlertContainer"]{{background:var(--soft)!important;border:1px solid var(--line)!important;border-radius:10px}}
+[data-testid="stAlert"] *,[data-testid="stAlertContainer"] *{{color:var(--tx)!important}}
 .thumb .ph,.strip,.hero-t,.hero-m,.hero-o{{color:#fff}}
 .q-p,.m-v{{color:var(--tx)}} .m-v.up,.up{{color:var(--up)!important}} .m-v.dn,.dn{{color:var(--dn)!important}}
 </style>"""
@@ -858,8 +869,8 @@ qs = fetch_quotes()
 if qs:
     st.markdown(quotes_html(qs), unsafe_allow_html=True)
 
-tab_home, tab_search, tab_ai, tab_life, tab_deep, tab_cfg = st.tabs(
-    ["📰 今日新聞", "🔎 搜尋新聞", "🤖 AI 專區", "🎮 生活", "🔍 深度篩選", "⚙️ 設定"])
+tab_home, tab_ai, tab_sports, tab_ent, tab_game, tab_search, tab_cfg = st.tabs(
+    ["📰 今日新聞", "🤖 AI 專區", "⚽ 運動", "🎬 娛樂", "🎮 電玩", "🔎 搜尋", "⚙️ 設定"])
 
 # ═══════════════════════════════════════════════
 # TAB 1：今日新聞
@@ -1144,143 +1155,29 @@ with tab_ai:
 
 
 # ═══════════════════════════════════════════════
-# TAB：生活（運動／娛樂／電玩）— 輕量，不做股市判斷
+# TAB：運動 / 娛樂 / 電玩（輕量，不做股市判斷）
 # ═══════════════════════════════════════════════
-with tab_life:
-    life = df_all[df_all["category"].isin(LIFE_CATS)]
-    if life.empty:
-        st.markdown('<div class="empty">🎮 生活區還沒有資料，等下一次自動抓取就會出現。</div>', unsafe_allow_html=True)
-    else:
-        sub = st.radio("類別", ["全部", "⚽ 運動", "🎬 娛樂", "🎮 電玩"], horizontal=True,
-                       label_visibility="collapsed", key="life_cat")
-        if sub != "全部":
-            life = life[life["category"] == sub.split(" ")[1]]
-        life, lh = recent(life, hours_steps=(24, 48, 72, 168), min_n=6)
-        st.caption(f"共 {len(life)} 則（只保留精華，每個來源 8～12 則）")
-        n_life = st.session_state.setdefault("n_life", 18)
-        render_grid(life.sort_values("published_at", ascending=False), max_items=n_life)
-        if len(life) > n_life and st.button("顯示更多（+18）", key="more_life"):
-            st.session_state["n_life"] += 18
-            st.rerun()
+def render_life_tab(cat: str, icon: str):
+    d0 = df_all[df_all["category"] == cat]
+    if d0.empty:
+        st.markdown(f'<div class="empty">{icon} {cat}還沒有資料，等下一次自動抓取就會出現。</div>', unsafe_allow_html=True)
+        return
+    d0, _ = recent(d0, hours_steps=(24, 48, 72, 168), min_n=6)
+    st.caption(f"共 {len(d0)} 則（只保留精華，每個來源 8～12 則）")
+    nk = f"n_{cat}"
+    n_show_ = st.session_state.setdefault(nk, 18)
+    render_grid(d0.sort_values("published_at", ascending=False), max_items=n_show_)
+    if len(d0) > n_show_ and st.button("顯示更多（+18）", key=f"more_{cat}"):
+        st.session_state[nk] += 18
+        st.rerun()
 
 
-# ═══════════════════════════════════════════════
-# TAB 2：深度篩選
-# ═══════════════════════════════════════════════
-with tab_deep:
-    mode = st.radio("分析模式",
-                    ["✦ AI 深度分析", "🔥 熱門股票", "⚑ 地緣政治", "🏭 類股排行", "🔍 個股聚焦"],
-                    horizontal=True, key="deep_mode")
-
-    if mode == "✦ AI 深度分析":
-        ai_df = df_all[(df_all["ai_summary"].fillna("") != "") & (df_all["ai_sentiment"].fillna("") != "")].copy() if not df_all.empty else pd.DataFrame()
-        if ai_df.empty:
-            st.markdown('<div class="empty">🤖 尚無 AI 分析結果</div>', unsafe_allow_html=True)
-        else:
-            ai_df["_agree"] = ai_df.apply(lambda r: r["ai_sentiment"] == r["sentiment"], axis=1)
-            a1, a2, a3, a4 = st.columns(4)
-            a1.metric("✦ AI 分析總數", len(ai_df))
-            a2.metric("📈 AI 判多", int((ai_df["ai_sentiment"] == "bullish").sum()))
-            a3.metric("📉 AI 判空", int((ai_df["ai_sentiment"] == "bearish").sum()))
-            a4.metric("⚡ 與關鍵字不一致", int((~ai_df["_agree"]).sum()))
-            af1, af2, af3 = st.columns(3)
-            with af1:
-                asf = st.selectbox("AI 情緒", ["全部", "利多", "利空", "中性"], key="asf")
-            with af2:
-                acf = st.selectbox("信心程度", ["全部", "high", "medium", "low"], key="acf")
-            with af3:
-                diff_only = st.checkbox("只看與關鍵字不一致", key="adiff")
-            sm = {"利多": "bullish", "利空": "bearish", "中性": "neutral"}
-            if asf != "全部":
-                ai_df = ai_df[ai_df["ai_sentiment"] == sm[asf]]
-            if acf != "全部":
-                ai_df = ai_df[ai_df["ai_confidence"] == acf]
-            if diff_only:
-                ai_df = ai_df[~ai_df["_agree"]]
-            ai_df = ai_df.reindex(ai_df["ai_score"].abs().sort_values(ascending=False).index)
-            st.caption(f"顯示 {len(ai_df)} 則")
-            render_grid(ai_df)
-
-    elif mode == "🔥 熱門股票":
-        db = SessionLocal()
-        try:
-            hdf = get_ticker_counts(db, limit=20)
-        finally:
-            db.close()
-        if hdf.empty:
-            st.info("尚無資料")
-        else:
-            items = []
-            for _, r in hdf.iterrows():
-                sc = float(r["平均情緒"])
-                color = "#C0392B" if sc >= 0.15 else ("#1B7A34" if sc <= -0.15 else "#C9BC9F")
-                items.append((f'{r["代碼"]}', float(r["出現次數"]), color,
-                              f'{int(r["出現次數"])} 則 {sc:+.2f}'))
-            st.markdown('<div class="sec">出現次數（紅=平均偏多 綠=偏空）</div>', unsafe_allow_html=True)
-            st.markdown(hbars(items), unsafe_allow_html=True)
-            names = " ".join(f'<span class="chip-t">{esc(str(r["代碼"]))} {esc(str(r["名稱"]))}</span>'
-                             for _, r in hdf.iterrows() if str(r["名稱"]) != str(r["代碼"]))
-            st.markdown(names, unsafe_allow_html=True)
-
-    elif mode == "⚑ 地緣政治":
-        gdf = df_all[df_all["is_geo"] == True] if not df_all.empty else pd.DataFrame()
-        if gdf.empty:
-            st.info("目前沒有地緣政治相關新聞")
-        else:
-            g1, g2, g3 = st.columns(3)
-            g1.metric("⚑ 地緣新聞", len(gdf))
-            g2.metric("📉 利空", int((gdf["sentiment"] == "bearish").sum()))
-            g3.metric("📈 利多", int((gdf["sentiment"] == "bullish").sum()))
-            render_grid(gdf)
-
-    elif mode == "🏭 類股排行":
-        db = SessionLocal()
-        try:
-            secs = get_sector_counts(db)
-        finally:
-            db.close()
-        if secs.empty:
-            st.info("尚無資料")
-        else:
-            rows, base = [], df_all
-            for _, r in secs.head(12).iterrows():
-                msk = base["sectors"].fillna("").str.contains(r["sector"], regex=False)
-                avg = float(base[msk]["sentiment_score"].mean()) if msk.any() else 0.0
-                color = "#C0392B" if avg >= 0.05 else ("#1B7A34" if avg <= -0.05 else "#C9BC9F")
-                rows.append((r["sector"], float(r["count"]), color, f'{int(r["count"])} 則 {avg:+.2f}'))
-            st.markdown('<div class="sec">類股新聞數（紅=偏多 綠=偏空）</div>', unsafe_allow_html=True)
-            st.markdown(hbars(rows), unsafe_allow_html=True)
-            sel = st.selectbox("查看類股新聞", [r[0] for r in rows], key="sec_sel")
-            if sel:
-                msk = base["sectors"].fillna("").str.contains(sel, regex=False)
-                render_grid(base[msk])
-
-    elif mode == "🔍 個股聚焦":
-        q = st.text_input("股票代碼或公司名稱", placeholder="台積電 / 2330 / 聯發科 / NVDA / 輝達…", key="ticker_q").strip()
-        if q:
-            try:
-                from analyzer import TW_COMPANY_TO_CODE, US_NAME_TO_CODE
-                code_q = TW_COMPANY_TO_CODE.get(q) or US_NAME_TO_CODE.get(q) or q.upper()
-            except ImportError:
-                code_q = q.upper()
-            db = SessionLocal()
-            try:
-                sdf = get_articles_df(db, ticker=code_q, limit=150)
-                if sdf.empty:
-                    sdf = get_articles_df(db, keyword=q, limit=150)
-            finally:
-                db.close()
-            if sdf.empty:
-                st.warning(f"找不到 **{q}** 的相關新聞")
-            else:
-                s1, s2, s3 = st.columns(3)
-                s1.metric("總計", len(sdf))
-                s2.metric("📈 利多", int((sdf["sentiment"] == "bullish").sum()))
-                s3.metric("📉 利空", int((sdf["sentiment"] == "bearish").sum()))
-                csv_s = sdf[["title", "title_zh", "sentiment_label", "ai_sentiment", "ai_score", "ai_summary",
-                             "tickers", "source", "published_at", "url"]].to_csv(index=False, encoding="utf-8-sig")
-                st.download_button("⬇ 匯出 CSV", csv_s, file_name=f"finnews_{code_q}.csv", mime="text/csv")
-                render_grid(sdf)
+with tab_sports:
+    render_life_tab("運動", "⚽")
+with tab_ent:
+    render_life_tab("娛樂", "🎬")
+with tab_game:
+    render_life_tab("電玩", "🎮")
 
 
 # ═══════════════════════════════════════════════
