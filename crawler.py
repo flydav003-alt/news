@@ -1,27 +1,22 @@
 """
-crawler.py — 新聞抓取模組（全中文來源版）
+crawler.py — 新聞抓取模組 v3（中英文來源 + 縮圖）
 
-來源狀態（依 2025/06 實測）：
-  ✅ 穩定：科技新報、經濟日報、Yahoo奇摩股市、聯合報財經
-  🔧 新增替換：
-      自由時報財經   → 替換工商時報（無公開 RSS）
-      中央社財經     → 替換鉅亨網-台股（feedburner 已死）
-      中央社產業     → 替換鉅亨網-美股
-      風傳媒財經     → 替換鉅亨網-財經
-      信傳媒         → 替換 MoneyDJ-台股（需 session，無法繞過）
-      新頭殼財經     → 替換 MoneyDJ-國際
-
-移除來源：
-  ✗ 鉅亨網三個    — feedburner 停服，JSON API 需 cookie
-  ✗ MoneyDJ 兩個  — 需完整 session，Referer 不足以繞過
-  ✗ 工商時報      — 無公開 RSS feed
+改動重點：
+  - 移除已停服的 feedburner（中央社）、非財經的新頭殼全站、需 session 的信傳媒
+  - 新增 Google News 台股關鍵字 RSS（涵蓋鉅亨、MoneyDJ、工商時報、經濟日報等多家）
+  - 新增英文來源：Yahoo Finance、CNBC、MarketWatch、BBC Business（英文標題由 scheduler 翻成中文）
+  - 抓縮圖：RSS 內的 media_thumbnail / enclosure / <img>；缺圖再用 og:image 補（僅在背景排程啟用）
+  - 每來源上限 30 → 50 則
 """
 
 import logging
+import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Optional
+from urllib.parse import quote
 
 import requests
 from bs4 import BeautifulSoup
@@ -41,88 +36,128 @@ HEADERS = {
         "Chrome/124.0.0.0 Safari/537.36"
     ),
     "Accept": "application/rss+xml,application/xml,text/html,*/*;q=0.8",
-    "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.3",
+    "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.5",
     "Accept-Encoding": "gzip, deflate",
 }
 TIMEOUT   = 20
-MAX_ITEMS = 30
+MAX_ITEMS = 50
+
+
+def _gnews(query: str) -> str:
+    """Google News RSS（繁中、台灣、最近 1 天）"""
+    q = quote(f"{query} when:1d")
+    return f"https://news.google.com/rss/search?q={q}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
 
 
 # ── 來源清單 ──────────────────────────────────────────────────────────────────
+# strip_suffix=True：Google News 標題尾巴有「 - 媒體名」，要拆掉並把媒體名當 source
 SOURCES = [
-    # ── 原有穩定來源 ──────────────────────────────────────────
-    {
-        "name":     "科技新報",
-        "url":      "https://technews.tw/feed/",
-        "language": "zh",
-        "category": "科技",
-        "enabled":  True,
-    },
-    {
-        "name":     "經濟日報",
-        "url":      "https://money.udn.com/rssfeed/news/1001/5591?ch=money",
-        "language": "zh",
-        "category": "財經",
-        "enabled":  True,
-    },
-    {
-        "name":     "Yahoo奇摩股市",
-        "url":      "https://tw.news.yahoo.com/rss/finance",
-        "language": "zh",
-        "category": "財經",
-        "enabled":  True,
-    },
-    {
-        "name":     "聯合報財經",
-        "url":      "https://money.udn.com/rssfeed/news/1001/5590?ch=money",
-        "language": "zh",
-        "category": "財經",
-        "enabled":  True,
-    },
-    # ── 新增替換來源 ──────────────────────────────────────────
-    {
-        "name":     "自由時報財經",
-        "url":      "https://news.ltn.com.tw/rss/business.xml",
-        "language": "zh",
-        "category": "財經",
-        "enabled":  True,
-    },
-    {
-        "name":     "中央社財經",
-        "url":      "https://feeds.feedburner.com/rsscna/finance",   # 產經證券頻道
-        "language": "zh",
-        "category": "財經",
-        "enabled":  True,
-    },
-    {
-        "name":     "中央社科技",
-        "url":      "https://feeds.feedburner.com/rsscna/technology", # 科技頻道
-        "language": "zh",
-        "category": "科技",
-        "enabled":  True,
-    },
-    {
-        "name":     "風傳媒",
-        "url":      "https://www.storm.mg/feed",                      # 全站 RSS（含財經）
-        "language": "zh",
-        "category": "財經",
-        "enabled":  True,
-    },
-    {
-        "name":     "信傳媒",
-        "url":      "https://www.cmmedia.com.tw/rss/yahoo/article",
-        "language": "zh",
-        "category": "財經",
-        "enabled":  True,
-    },
-    {
-        "name":     "新頭殼財經",
-        "url":      "https://newtalk.tw/rss/all",
-        "language": "zh",
-        "category": "財經",
-        "enabled":  True,
-    },
+    # ── 中文：原本穩定的 ──────────────────────────────────────
+    {"name": "科技新報",     "url": "https://technews.tw/feed/",
+     "language": "zh", "category": "科技", "enabled": True},
+    {"name": "經濟日報",     "url": "https://money.udn.com/rssfeed/news/1001/5591?ch=money",
+     "language": "zh", "category": "財經", "enabled": True},
+    {"name": "聯合報財經",   "url": "https://money.udn.com/rssfeed/news/1001/5590?ch=money",
+     "language": "zh", "category": "財經", "enabled": True},
+    {"name": "Yahoo奇摩股市", "url": "https://tw.news.yahoo.com/rss/finance",
+     "language": "zh", "category": "財經", "enabled": True},
+    {"name": "自由時報財經", "url": "https://news.ltn.com.tw/rss/business.xml",
+     "language": "zh", "category": "財經", "enabled": True},
+    {"name": "風傳媒",       "url": "https://www.storm.mg/feed",
+     "language": "zh", "category": "財經", "enabled": True},
+    # ── 中文：Google News 關鍵字（取代死掉的中央社/鉅亨/MoneyDJ）──
+    {"name": "GN-台股",      "url": _gnews("台股 OR 加權指數"),
+     "language": "zh", "category": "財經", "enabled": True, "strip_suffix": True},
+    {"name": "GN-法人籌碼",  "url": _gnews("外資 OR 投信 買超 OR 賣超 台股"),
+     "language": "zh", "category": "財經", "enabled": True, "strip_suffix": True},
+    {"name": "GN-AI供應鏈",  "url": _gnews("台積電 OR 輝達 OR 廣達 OR 緯創 AI 伺服器"),
+     "language": "zh", "category": "科技", "enabled": True, "strip_suffix": True},
+    {"name": "GN-重大訊息",  "url": _gnews("重大訊息 OR 法說會 OR 營收 公布 上市櫃"),
+     "language": "zh", "category": "財經", "enabled": True, "strip_suffix": True},
+    {"name": "GN-美股",      "url": _gnews("美股 OR 那斯達克 OR 費城半導體"),
+     "language": "zh", "category": "國際", "enabled": True, "strip_suffix": True},
+    # ── 英文（標題會自動翻成中文）────────────────────────────
+    {"name": "Yahoo Finance", "url": "https://finance.yahoo.com/news/rssindex",
+     "language": "en", "category": "國際", "enabled": True},
+    {"name": "CNBC",          "url": "https://www.cnbc.com/id/100003114/device/rss/rss.html",
+     "language": "en", "category": "國際", "enabled": True},
+    {"name": "CNBC Tech",     "url": "https://www.cnbc.com/id/19854910/device/rss/rss.html",
+     "language": "en", "category": "科技", "enabled": True},
+    {"name": "MarketWatch",   "url": "https://feeds.content.dowjones.io/public/rss/mw_topstories",
+     "language": "en", "category": "國際", "enabled": True},
+    {"name": "BBC Business",  "url": "https://feeds.bbci.co.uk/news/business/rss.xml",
+     "language": "en", "category": "國際", "enabled": True},
+    # ── 已停用（保留設定，需要時到設定頁開）──────────────────
+    {"name": "信傳媒",        "url": "https://www.cmmedia.com.tw/rss/yahoo/article",
+     "language": "zh", "category": "財經", "enabled": False},
 ]
+
+
+# ── 圖片擷取 ──────────────────────────────────────────────────────────────────
+_IMG_RE = re.compile(r'<img[^>]+src=["\']([^"\']+)["\']', re.I)
+_OG_RE  = re.compile(
+    r'<meta[^>]+(?:property|name)=["\'](?:og:image|twitter:image)["\'][^>]+content=["\']([^"\']+)["\']'
+    r'|<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\'](?:og:image|twitter:image)["\']',
+    re.I,
+)
+_BAD_IMG = ("pixel", "1x1", "feedburner", "spacer", "blank.gif", "/ads/", "logo")
+
+
+def _ok_img(u: str) -> bool:
+    return bool(u) and u.startswith("http") and not any(b in u.lower() for b in _BAD_IMG)
+
+
+def _extract_image(entry) -> str:
+    """從 RSS entry 找縮圖；找不到回傳空字串"""
+    for key in ("media_thumbnail", "media_content"):
+        for m in getattr(entry, key, None) or []:
+            u = m.get("url", "")
+            if _ok_img(u):
+                return u
+    for enc in getattr(entry, "enclosures", None) or []:
+        if str(enc.get("type", "")).startswith("image") and _ok_img(enc.get("href", "")):
+            return enc["href"]
+    for lk in getattr(entry, "links", None) or []:
+        if str(lk.get("type", "")).startswith("image") and _ok_img(lk.get("href", "")):
+            return lk["href"]
+    raw = getattr(entry, "summary", "") or ""
+    for c in getattr(entry, "content", None) or []:
+        raw += c.get("value", "")
+    for m in _IMG_RE.finditer(raw):
+        if _ok_img(m.group(1)):
+            return m.group(1)
+    return ""
+
+
+def _fetch_og_image(url: str) -> str:
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=6, stream=True)
+        html = r.raw.read(80_000, decode_content=True).decode("utf-8", "ignore")
+        m = _OG_RE.search(html)
+        if m:
+            u = (m.group(1) or m.group(2) or "").strip()
+            return u if _ok_img(u) else ""
+    except Exception:
+        pass
+    return ""
+
+
+def fill_missing_images(articles: list[dict], limit: int = 60) -> int:
+    """缺圖文章用 og:image 補（Google News 轉址連結跳過）。回傳補到幾張。"""
+    todo = [a for a in articles
+            if not a.get("image_url")
+            and a.get("url", "").startswith("http")
+            and "news.google.com" not in a["url"]][:limit]
+    if not todo:
+        return 0
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        imgs = list(ex.map(lambda a: _fetch_og_image(a["url"]), todo))
+    n = 0
+    for a, img in zip(todo, imgs):
+        if img:
+            a["image_url"] = img
+            n += 1
+    return n
 
 
 # ── RSS 抓取核心 ──────────────────────────────────────────────────────────────
@@ -145,9 +180,21 @@ def fetch_rss(source: dict) -> list[dict]:
             return []
 
         for entry in feed.entries[:MAX_ITEMS]:
-            title   = _clean(getattr(entry, "title",   ""))
+            title   = _clean(getattr(entry, "title", ""))
             summary = _clean(getattr(entry, "summary", ""))
             url     = getattr(entry, "link", "")
+            src_name = source["name"]
+
+            if source.get("strip_suffix"):
+                pub = getattr(entry, "source", None)
+                pub_name = pub.get("title", "") if pub else ""
+                if pub_name and title.endswith(f" - {pub_name}"):
+                    title = title[: -len(f" - {pub_name}")].strip()
+                else:
+                    title = re.sub(r"\s+-\s+[^-]{2,20}$", "", title)
+                if pub_name:
+                    src_name = pub_name
+                summary = ""   # Google News 的 summary 只是重複標題
 
             if not title or len(title) < 4:
                 continue
@@ -156,9 +203,10 @@ def fetch_rss(source: dict) -> list[dict]:
                 "title":        title,
                 "summary":      summary[:600],
                 "url":          url,
-                "source":       source["name"],
+                "source":       src_name,
                 "language":     source["language"],
                 "category":     source.get("category", "財經"),
+                "image_url":    _extract_image(entry),
                 "published_at": _parse_time(entry),
             })
 
@@ -171,11 +219,14 @@ def fetch_rss(source: dict) -> list[dict]:
 
 
 # ── 主執行入口 ────────────────────────────────────────────────────────────────
-def run_crawl(enabled_names: Optional[list[str]] = None) -> tuple[list[dict], list[dict]]:
+def run_crawl(enabled_names: Optional[list[str]] = None,
+              fetch_og: bool = False,
+              known_urls: Optional[set] = None) -> tuple[list[dict], list[dict]]:
     """
     執行全部來源抓取。
-    enabled_names：None 表示依 source["enabled"] 決定；
-                   傳入名稱 list 可讓設定頁動態控制。
+    enabled_names：None 表示依 source["enabled"] 決定；傳入名稱 list 可讓設定頁動態控制。
+    fetch_og：True 時對缺圖文章補抓 og:image（較慢，僅背景排程用）
+    known_urls：已在資料庫的網址，不重複補圖
     回傳 (articles, logs)
     """
     all_articles, logs = [], []
@@ -194,7 +245,13 @@ def run_crawl(enabled_names: Optional[list[str]] = None) -> tuple[list[dict], li
             "count":  len(articles),
         })
         all_articles.extend(articles)
-        time.sleep(0.5)
+        time.sleep(0.3)
+
+    if fetch_og:
+        known = known_urls or set()
+        fresh = [a for a in all_articles if a.get("url") not in known]
+        got = fill_missing_images(fresh)
+        logger.info(f"og:image 補圖 {got} 張")
 
     return all_articles, logs
 
@@ -216,7 +273,7 @@ def _parse_time(entry) -> datetime:
     raw = getattr(entry, "published", "") or getattr(entry, "updated", "")
     if raw:
         try:
-            return parsedate_to_datetime(raw).replace(tzinfo=timezone.utc)
+            return parsedate_to_datetime(raw).astimezone(timezone.utc)
         except Exception:
             pass
     return datetime.now(timezone.utc)
