@@ -1,0 +1,8 @@
+feedparser
+requests
+beautifulsoup4
+lxml
+jieba
+sqlalchemy
+pandas
+deep-translator
