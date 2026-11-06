@@ -212,6 +212,11 @@ US_NAME_TO_CODE: dict[str, str] = {
     "埃克森": "XOM", "ExxonMobil": "XOM",
     "雪佛龍": "CVX", "Chevron": "CVX",
     "OpenAI": "MSFT",   # 指引到微軟（最大股東）
+    # [新增] 英文新聞常見公司名
+    "Nvidia": "NVDA", "Intel": "INTC", "Qualcomm": "QCOM", "Broadcom": "AVGO",
+    "Micron": "MU", "Samsung": "005930", "Taiwan Semiconductor": "TSM",
+    "Alibaba": "BABA", "Boeing": "BA", "Walmart": "WMT", "Oracle": "ORCL",
+    "Palantir": "PLTR", "Coinbase": "COIN",
 }
 
 # 美股英文代碼白名單
@@ -224,6 +229,7 @@ US_WHITELIST = {
     "LMT", "RTX", "NOC", "GD",
     "XOM", "CVX",
     "QQQ", "SPY", "GLD", "TLT",
+    "BABA", "BA", "WMT", "ORCL", "PLTR", "COIN", "TSM", "SMCI",
 }
 
 
@@ -249,6 +255,12 @@ BULLISH: dict[str, float] = {
     "beat": 0.8, "record high": 1.0, "rally": 0.7, "upgrade": 0.7,
     "outperform": 0.8, "bullish": 0.8, "surge": 0.8, "soar": 0.8,
     "rate cut": 0.6, "ceasefire": 0.6,
+    # [新增] 英文新聞常見詞（單詞；英文 token 以單字切）
+    "jumps": 0.7, "jump": 0.6, "gains": 0.5, "gain": 0.4, "climbs": 0.6,
+    "rises": 0.5, "boost": 0.6, "boosts": 0.6, "strong": 0.5, "growth": 0.5,
+    "profit": 0.5, "profits": 0.5, "optimism": 0.6, "rebound": 0.6,
+    "buy": 0.4, "raises": 0.5, "optimistic": 0.6, "breakthrough": 0.7,
+    "record": 0.5, "boom": 0.7, "expands": 0.5, "wins": 0.5, "approval": 0.5,
 }
 
 BEARISH: dict[str, float] = {
@@ -275,6 +287,13 @@ BEARISH: dict[str, float] = {
     "downgrade": -0.7, "recession": -0.8, "tariff": -0.5,
     "war": -0.8, "invasion": -0.9, "sanction": -0.7,
     "airstrike": -0.9, "conflict": -0.6,
+    # [新增] 英文新聞常見詞
+    "plunge": -0.9, "plunges": -0.9, "tumble": -0.8, "tumbles": -0.8,
+    "slump": -0.8, "slumps": -0.8, "falls": -0.5, "drops": -0.5, "sinks": -0.7,
+    "slides": -0.6, "crash": -0.9, "fears": -0.6, "fear": -0.5, "weak": -0.5,
+    "loss": -0.6, "losses": -0.6, "cuts": -0.4, "probe": -0.5, "ban": -0.6,
+    "bankruptcy": -1.0, "selloff": -0.8, "sell-off": -0.8, "warns": -0.6,
+    "warning": -0.5, "crisis": -0.8, "default": -0.7, "fraud": -0.9,
 }
 
 NEGATION = {"不", "沒有", "未", "無", "非", "不再", "不是", "not", "no", "without", "never"}
@@ -391,7 +410,7 @@ class Analyzer:
 
     def analyze(self, title: str, summary: str = "", language: str = "zh") -> Result:
         text = f"{title} {summary}"
-        ticker_details = self._tickers(text)
+        ticker_details = self._tickers(text, language)
         tickers        = [t.code for t in ticker_details]
         sectors        = self._sectors(text, tickers)
         is_geo         = self._is_geo(text)
@@ -408,7 +427,7 @@ class Analyzer:
         )
 
     # ── 股票代碼抽取（三層：中文名稱→代碼、4位數字、英文代碼）──────────────────
-    def _tickers(self, text: str) -> list[TickerMatch]:
+    def _tickers(self, text: str, language: str = "zh") -> list[TickerMatch]:
         found: dict[str, TickerMatch] = {}
 
         # 第一層：台股公司名稱對照
@@ -417,8 +436,9 @@ class Analyzer:
                 found[code] = TickerMatch(code=code, name=name, market="TW")
 
         # 第二層：4位數字直接出現（排除年份 2000-2030 及常見非代碼數字）
+        # [修改] 英文新聞的 4 位數多半是指數點位/金額（如 5000），不當台股代碼
         EXCLUDE_NUMS = set(str(y) for y in range(2000, 2031))
-        for m in re.finditer(r"(?<!\d)(\d{4})(?!\d)", text):
+        for m in (re.finditer(r"(?<!\d)(\d{4})(?!\d)", text) if language != "en" else []):
             code = m.group(1)
             code_int = int(code)
             if (1000 <= code_int <= 9999
@@ -452,23 +472,22 @@ class Analyzer:
         return any(kw.lower() in tl for kw in GEO_KEYWORDS)
 
     def _score(self, text: str, language: str) -> float:
-        if language == "zh" and JIEBA_OK:
-            tokens = list(jieba.cut(text))
-        else:
-            tokens = text.split()
+        # [修改] 中文改用「最長詞優先的子字串比對」：jieba 常把「創新高」切成「創新/高」而漏掉
+        if language == "zh":
+            return self._score_zh(text)
 
+        # 英文：先去標點再切詞，否則 "surge," 之類會對不到詞典
+        tokens = re.findall(r"[A-Za-z][A-Za-z'\-]*", text)
         score, negate = 0.0, False
         for i, tok in enumerate(tokens):
             tl = tok.lower()
             if tl in NEGATION or tok in NEGATION:
                 negate = True
                 continue
-            # 單詞查詢
             w = self.bull.get(tok, self.bull.get(tl,
                 self.bear.get(tok, self.bear.get(tl, 0.0))))
-            # Bigram 查詢（中文兩字詞）
             if i + 1 < len(tokens):
-                bigram = tok + tokens[i + 1]
+                bigram = tl + " " + tokens[i + 1].lower()
                 w2 = self.bull.get(bigram, self.bear.get(bigram, 0.0))
                 if w2:
                     w = w2
@@ -477,12 +496,41 @@ class Analyzer:
             negate = False
         return max(-1.0, min(1.0, score))
 
+    def _score_zh(self, text: str) -> float:
+        lex = {**self.bull, **self.bear}
+        terms = sorted((t for t in lex if any("\u4e00" <= c <= "\u9fff" for c in t)),
+                       key=len, reverse=True)
+        used = [False] * len(text)
+        score = 0.0
+        for t in terms:
+            start = 0
+            while True:
+                i = text.find(t, start)
+                if i < 0:
+                    break
+                j = i + len(t)
+                start = i + 1
+                if any(used[i:j]):
+                    continue
+                for k in range(i, j):
+                    used[k] = True
+                w = lex[t]
+                prev = text[max(0, i - 2):i]
+                if any(n in prev for n in ("不", "未", "無", "沒有", "非")):
+                    w = -w
+                score += w
+        # 中文新聞夾帶的英文詞（beat / surge…）
+        for tok in re.findall(r"[A-Za-z][A-Za-z'\-]*", text):
+            w = lex.get(tok.lower(), 0.0)
+            score += w
+        return max(-1.0, min(1.0, score))
+
     @staticmethod
     def _classify(score: float):
-        # [修改] 門檻從 ±0.15 提高至 ±0.25，減少中性雜訊誤判為利多/利空
-        if score >= 0.25:
+        # [修改] 門檻 ±0.25 → ±0.15：0.25 太嚴，大部分新聞被判中性而看不到
+        if score >= 0.15:
             return "bullish", "利多"
-        if score <= -0.25:
+        if score <= -0.15:
             return "bearish", "利空"
         return "neutral", "中性"
 
