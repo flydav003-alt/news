@@ -182,10 +182,18 @@ hr{border-color:var(--line)!important;margin:10px 0!important}
 .card{box-shadow:0 1px 3px rgba(80,60,20,.06)}
 .card:hover{box-shadow:0 8px 22px rgba(80,60,20,.14);transform:translateY(-2px)}
 .card .thumb{height:150px;display:block}
+.card>a{text-decoration:none!important}
 .strip{height:30px;display:flex;align-items:center;padding:0 13px;font-size:11.5px;font-weight:700;color:rgba(255,255,255,.95);letter-spacing:.5px}
 .grid{align-items:start}
 .card.read,.si.read{opacity:.55;transition:opacity .15s} .card.read:hover,.si.read:hover{opacity:1}
 .ct:visited{color:var(--tx3)!important}
+.fn-reco-wrap{margin-top:6px}
+.fn-reco-chips{font-weight:500;color:var(--accent);margin-left:6px}
+.fn-reco-clear{margin-left:auto;font-size:11.5px;font-weight:500;color:var(--tx3)!important;text-decoration:none!important;cursor:pointer}
+.fn-reco-clear:hover{color:var(--accent)!important}
+.fn-reco-note{font-size:12.5px;color:var(--tx2);margin:-2px 0 8px}
+.fn-reco:empty{display:none}
+.card.reco{border-color:var(--accent)}
 .more{font-size:12px;color:var(--tx2);margin-top:2px}
 .more summary{cursor:pointer;color:var(--accent);font-weight:600;list-style:none}
 .more summary::-webkit-details-marker{display:none}
@@ -532,6 +540,44 @@ def tickers_chips(row, n=3) -> str:
     return "".join(out)
 
 
+# ── 搜尋新聞模式（即時查 Google News，不存資料庫）─────────────────────────────
+@st.cache_data(ttl=600, show_spinner=False)
+def live_search(q: str, lang: str, days: int):
+    from crawler import fetch_rss, _gnews
+    from analyzer import Analyzer
+    from scheduler import translate_titles
+    srcs = []
+    if lang in ("中文", "中英文都找"):
+        srcs.append({"name": "GN-搜尋", "url": _gnews(q, en=False, when=f"{days}d"), "language": "zh",
+                     "category": "財經", "strip_suffix": True, "max_items": 40})
+    if lang in ("英文（標題自動翻中文）", "中英文都找"):
+        srcs.append({"name": "GN-搜尋EN", "url": _gnews(q, en=True, when=f"{days}d"), "language": "en",
+                     "category": "國際", "strip_suffix": True, "max_items": 40})
+    items = []
+    for s in srcs:
+        items.extend(fetch_rss(s))
+    seen, uniq = set(), []
+    for it in items:
+        if it["url"] in seen:
+            continue
+        seen.add(it["url"])
+        uniq.append(it)
+    an = Analyzer()
+    for it in uniq:
+        r = an.analyze(it["title"], it.get("summary", ""), it["language"])
+        it.update({"sentiment": r.sentiment, "sentiment_score": r.sentiment_score,
+                   "tickers": ",".join(r.tickers), "sectors": ",".join(r.sectors), "is_geo": r.is_geo,
+                   "ticker_details": json.dumps([{"code": t.code, "name": t.name} for t in r.ticker_details],
+                                                ensure_ascii=False),
+                   "ai_sentiment": "", "ai_score": 0.0, "ai_summary": "", "ai_affected_tickers": "",
+                   "importance_score": 0.0, "title_zh": "", "image_url": ""})
+    translate_titles(uniq, limit=40, api_key=_secret("GROQ_API_KEY"))
+    df = pd.DataFrame(uniq)
+    if not df.empty:
+        df = df.sort_values("published_at", ascending=False).reset_index(drop=True)
+    return df
+
+
 # ── 同一事件合併 ──────────────────────────────────────────────────────────────
 _NUMTOK = re.compile(r"\d+\.\d+[%％兆億萬]?|\d{2,}[%％兆億萬點]")
 
@@ -611,8 +657,15 @@ def card_html(row, others=None) -> str:
         more_h = (f'<details class="more"><summary>📚 另有 {len(others)} 則相關報導</summary><ul>{li}</ul></details>')
     orig_h = f'<div class="co">{esc(orig)}</div>' if orig else ""
     summ_h = f'<div class="cs">✦ {esc(summ)}</div>' if summ else ""
+    _sec = ",".join(x.strip() for x in str(row.get("sectors", "") or "").split(",") if x.strip())
+    _tk = ",".join(x.strip() for x in str(row.get("ai_affected_tickers", "") or row.get("tickers", "") or "").split(",") if x.strip())
+    _attrs = (f'data-tk="{esc(_tk, quote=True)}" data-sec="{esc(_sec, quote=True)}" '
+              f'data-cat="{esc(str(row.get("category", "") or ""), quote=True)}" '
+              f'data-src="{esc(str(row.get("source", "") or ""), quote=True)}" '
+              f'data-age="{min(age_hours(row.get("published_at")), 999):.0f}" '
+              f'data-imp="{_num(row.get("importance_score")):.1f}"')
     return _h(f"""
-    <div class="card {cls}">
+    <div class="card {cls}" {_attrs}>
       <a href="{href}" target="_blank" rel="noopener">{thumb_html(row) if has_img else strip_html(row)}</a>
       <div class="cb">
         <a class="ct" href="{href}" target="_blank" rel="noopener">{esc(main)}</a>
@@ -802,8 +855,8 @@ qs = fetch_quotes()
 if qs:
     st.markdown(quotes_html(qs), unsafe_allow_html=True)
 
-tab_home, tab_ai, tab_life, tab_deep, tab_cfg = st.tabs(
-    ["📰 今日新聞", "🤖 AI 專區", "🎮 生活", "🔍 深度篩選", "⚙️ 設定"])
+tab_home, tab_search, tab_ai, tab_life, tab_deep, tab_cfg = st.tabs(
+    ["📰 今日新聞", "🔎 搜尋新聞", "🤖 AI 專區", "🎮 生活", "🔍 深度篩選", "⚙️ 設定"])
 
 # ═══════════════════════════════════════════════
 # TAB 1：今日新聞
@@ -842,6 +895,16 @@ with tab_home:
         # ── 頭條 ──
         st.markdown('<div class="sec">🔥 今日頭條</div>', unsafe_allow_html=True)
         st.markdown(hero_html(df_r), unsafe_allow_html=True)
+
+        # ── ✨ 為你推薦（內容由瀏覽器端依你的點擊紀錄挑選，這裡只放容器與候選池）──
+        st.markdown(_h("""
+        <div class="fn-reco-wrap"><div class="sec">✨ 為你推薦 <span class="fn-reco-chips"></span>
+        <a href="#" class="fn-reco-clear">清除偏好</a></div>
+        <div class="fn-reco-note"></div><div class="grid fn-reco"></div></div>"""), unsafe_allow_html=True)
+        _pool_src = df_all[df_all["published_at"].apply(age_hours) <= 48]
+        _pool_src = _pool_src.sort_values("published_at", ascending=False).head(160)
+        _pool_cards = "".join(card_html(rep_, oth_) for rep_, oth_ in cluster_events(_pool_src)[:80])
+        st.markdown(f'<div class="fn-pool" style="display:none">{_pool_cards}</div>', unsafe_allow_html=True)
 
         # ── AI 市場總結 ──
         st.markdown('<div class="sec">✦ AI 市場總結</div>', unsafe_allow_html=True)
@@ -939,6 +1002,41 @@ with tab_home:
             if st.button(f"顯示更多（+24）", key="more"):
                 st.session_state["n_show"] += 24
                 st.rerun()
+
+
+# ═══════════════════════════════════════════════
+# TAB：搜尋新聞（即時查 Google News）
+# ═══════════════════════════════════════════════
+with tab_search:
+    st.caption("輸入任何關鍵字，現場去 Google News 查（不限於資料庫裡已有的新聞），結果不會存起來。")
+    with st.form("search_form", clear_on_submit=False):
+        sc1, sc2, sc3, sc4 = st.columns([3, 1.3, 1.3, 0.8])
+        with sc1:
+            sq = st.text_input("關鍵字", placeholder="例：台積電 2奈米 / Nvidia Rubin / 聯準會 降息", label_visibility="collapsed")
+        with sc2:
+            slang = st.selectbox("語言", ["中文", "英文（標題自動翻中文）", "中英文都找"], label_visibility="collapsed")
+        with sc3:
+            sdays = st.selectbox("時間", [1, 3, 7, 30], index=2, format_func=lambda d: f"近 {d} 天", label_visibility="collapsed")
+        with sc4:
+            go = st.form_submit_button("🔎 搜尋", type="primary", use_container_width=True)
+    if go and sq.strip():
+        st.session_state["last_search"] = (sq.strip(), slang, int(sdays))
+    ls = st.session_state.get("last_search")
+    if ls:
+        with st.spinner(f"正在搜尋「{ls[0]}」…"):
+            try:
+                sdf = live_search(*ls)
+            except Exception as e:
+                sdf = None
+                st.warning(f"搜尋失敗：{type(e).__name__}: {e}")
+        if sdf is not None:
+            if sdf.empty:
+                st.markdown('<div class="empty">找不到結果，換個關鍵字或放寬時間試試</div>', unsafe_allow_html=True)
+            else:
+                st.caption(f"「{ls[0]}」共 {len(sdf)} 則")
+                render_grid(sdf, max_items=40)
+    else:
+        st.markdown('<div class="empty">🔎 在上面輸入關鍵字開始搜尋</div>', unsafe_allow_html=True)
 
 
 # ═══════════════════════════════════════════════
@@ -1221,37 +1319,114 @@ with tab_cfg:
 _READ_JS = """
 <script>
 (function(){
-  var P = window.parent, D, K = 'finnews_read', S;
+  var P = window.parent, D, K = 'finnews_read', PK = 'finnews_prof', CK = 'finnews_clicks', S;
   try { D = P.document; } catch(e) { return; }
   if (P.__fnCleanup) { try { P.__fnCleanup(); } catch(e) {} }
-  function load(){ try { return new Set(JSON.parse(P.localStorage.getItem(K) || '[]')); } catch(e) { return new Set(); } }
-  function save(){ try { P.localStorage.setItem(K, JSON.stringify(Array.from(S).slice(-2000))); } catch(e) {} }
-  S = load();
+  function jget(k, d){ try { return JSON.parse(P.localStorage.getItem(k) || d); } catch(e) { return JSON.parse(d); } }
+  function jset(k, v){ try { P.localStorage.setItem(k, JSON.stringify(v)); } catch(e) {} }
+  S = new Set(jget(K, '[]'));
+  function saveRead(){ jset(K, Array.from(S).slice(-2000)); }
   function mainLink(el){
     if (el.classList.contains('card')) return el.querySelector('a.ct');
     return el.tagName === 'A' ? el : el.querySelector('a');
   }
-  function mark(){
+  function markRead(){
     D.querySelectorAll('.card, .si').forEach(function(el){
       var a = mainLink(el);
       if (a && S.has(a.href)) el.classList.add('read');
     });
   }
+  // ── 偏好：每次點擊替該卡片的股票/類股/類別/來源加分，半衰期 14 天 ──
+  var HALF = 14 * 864e5;
+  function eff(p, k){ var e = p[k]; return e ? e[0] * Math.pow(0.5, (Date.now() - e[1]) / HALF) : 0; }
+  function feats(el){
+    var f = [], d = el.dataset || {};
+    (d.tk || '').split(',').forEach(function(t){ if (t) f.push(['tk:' + t, 1]); });
+    (d.sec || '').split(',').forEach(function(t){ if (t) f.push(['sec:' + t, 1]); });
+    if (d.cat) f.push(['cat:' + d.cat, 0.6]);
+    if (d.src) f.push(['src:' + d.src, 0.3]);
+    return f;
+  }
+  function learn(card){
+    var p = jget(PK, '{}'), now = Date.now();
+    feats(card).forEach(function(x){
+      p[x[0]] = [eff(p, x[0]) + x[1], now];
+    });
+    var keys = Object.keys(p);
+    if (keys.length > 300) {   // 太多就丟掉最弱的
+      keys.sort(function(a, b){ return eff(p, b) - eff(p, a); });
+      keys.slice(300).forEach(function(k){ delete p[k]; });
+    }
+    jset(PK, p); jset(CK, (jget(CK, '0') | 0) + 1);
+  }
+  function score(el, p){
+    var s = 0, d = el.dataset || {};
+    feats(el).forEach(function(x){ s += x[1] * eff(p, x[0]); });
+    var age = parseFloat(d.age || '99');
+    return s + 0.8 * Math.max(0, 1 - age / 36) + 0.05 * parseFloat(d.imp || '0');
+  }
+  function label(k){ return k.replace(/^(tk|sec|cat):/, ''); }
+  function buildReco(){
+    var wrap = D.querySelector('.fn-reco-wrap'), box = D.querySelector('.fn-reco'), pool = D.querySelector('.fn-pool');
+    if (!wrap || !box || !pool) return;
+    var note = wrap.querySelector('.fn-reco-note'), chips = wrap.querySelector('.fn-reco-chips');
+    var clicks = jget(CK, '0') | 0, p = jget(PK, '{}');
+    function setText(el, txt){ if (el.textContent !== txt) el.textContent = txt; }
+    if (clicks < 3) {
+      if (box.children.length) box.innerHTML = '';
+      setText(chips, '');
+      setText(note, '多點幾則你有興趣的新聞（目前 ' + clicks + '/3），這裡就會開始學你的喜好。記錄只存在你的瀏覽器。');
+      return;
+    }
+    var top = Object.keys(p).filter(function(k){ return !/^src:/.test(k); })
+      .sort(function(a, b){ return eff(p, b) - eff(p, a); }).slice(0, 4).map(label);
+    setText(chips, top.length ? '· 你常看：' + top.join('、') : '');
+    var cards = Array.prototype.slice.call(pool.querySelectorAll('.card')).filter(function(c){
+      var a = mainLink(c); return a && !S.has(a.href);
+    });
+    var scored = cards.map(function(c){ return {c: c, s: score(c, p)}; }).sort(function(a, b){ return b.s - a.s; });
+    var pick = [], secCount = {};
+    for (var i = 0; i < scored.length && pick.length < 5; i++) {
+      var sec = (scored[i].c.dataset.sec || '').split(',')[0] || '-';
+      if ((secCount[sec] || 0) >= 2) continue;     // 同類股最多 2 張，避免一面倒
+      secCount[sec] = (secCount[sec] || 0) + 1; pick.push(scored[i].c);
+    }
+    var rest = scored.map(function(x){ return x.c; }).filter(function(c){ return pick.indexOf(c) < 0; });
+    rest.sort(function(a, b){ return parseFloat(b.dataset.imp || 0) - parseFloat(a.dataset.imp || 0); });
+    if (rest.length) pick.push(rest[0]);            // 第 6 張：不看偏好的「重要新聞」，保留探索
+    var sig = pick.map(function(c){ var a = mainLink(c); return a ? a.href : ''; }).join('|');
+    setText(note, '依你的點擊紀錄挑選（最近的點擊權重較高，14 天減半）；最後一張是不看偏好的重要新聞。');
+    if (box.getAttribute('data-sig') === sig && box.children.length) return;
+    box.setAttribute('data-sig', sig);
+    box.innerHTML = '';
+    pick.forEach(function(c){ var n = c.cloneNode(true); n.classList.add('reco'); box.appendChild(n); });
+    markRead();
+  }
   function onClick(e){
     var a = e.target.closest ? e.target.closest('a[href^="http"]') : null;
+    var clr = e.target.closest ? e.target.closest('.fn-reco-clear') : null;
+    if (clr) {
+      e.preventDefault();
+      try { P.localStorage.removeItem(PK); P.localStorage.removeItem(CK); } catch(x) {}
+      var b = D.querySelector('.fn-reco'); if (b) b.removeAttribute('data-sig');
+      buildReco(); return;
+    }
     if (!a) return;
     var box = a.closest('.card, .si');
     if (!box) return;
     var m = mainLink(box);
     S.add(a.href); if (m) S.add(m.href);
-    save(); mark();
+    saveRead();
+    if (box.classList.contains('card')) learn(box);
+    markRead();
+    setTimeout(buildReco, 400);
   }
   var t = null;
-  var obs = new MutationObserver(function(){ clearTimeout(t); t = setTimeout(mark, 150); });
+  var obs = new MutationObserver(function(){ clearTimeout(t); t = setTimeout(function(){ markRead(); buildReco(); }, 200); });
   obs.observe(D.body, {childList: true, subtree: true});
   D.addEventListener('click', onClick, true);
   P.__fnCleanup = function(){ obs.disconnect(); D.removeEventListener('click', onClick, true); };
-  mark();
+  markRead(); buildReco();
 })();
 </script>
 """
