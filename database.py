@@ -78,6 +78,9 @@ class NewsArticle(Base):
     ai_confidence       = Column(String(10), default="")
     # ── [新增] 重要性分數（0~5）──────────────────────────────
     importance_score    = Column(Float, default=0.0)
+    # ── [新增] 縮圖網址、中文標題（英文新聞翻譯）────────────────
+    image_url           = Column(Text, default="")
+    title_zh            = Column(Text, default="")
     # ── 時間（存 UTC，顯示時轉台灣）──────────────────────────
     published_at    = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     fetched_at      = Column(DateTime, default=lambda: datetime.now(timezone.utc))
@@ -108,6 +111,8 @@ def init_db():
         ("ai_reason",           "TEXT DEFAULT ''"),
         ("ai_confidence",       "TEXT DEFAULT ''"),
         ("importance_score",    "REAL DEFAULT 0.0"),   # [新增]
+        ("image_url",           "TEXT DEFAULT ''"),    # [新增]
+        ("title_zh",            "TEXT DEFAULT ''"),    # [新增]
     ]
     with engine.connect() as conn:
         for col, col_def in new_cols:
@@ -209,6 +214,8 @@ def save_article(db: Session, data: dict) -> bool:
         ai_reason           = data.get("ai_reason", ""),
         ai_confidence       = data.get("ai_confidence", ""),
         importance_score    = _calc_importance(data),   # [新增]
+        image_url           = data.get("image_url", "") or "",
+        title_zh            = data.get("title_zh", "") or "",
         published_at        = pub,
         fetched_at          = datetime.now(timezone.utc),
     )
@@ -251,6 +258,8 @@ def _row_to_dict(r: NewsArticle) -> dict:
         "ai_reason":           r.ai_reason or "",
         "ai_confidence":       r.ai_confidence or "",
         "importance_score":    r.importance_score or 0.0,   # [新增]
+        "image_url":           r.image_url or "",
+        "title_zh":            r.title_zh or "",
         "published_at":        to_tw(r.published_at),
         "fetched_at":          to_tw(r.fetched_at),
     }
@@ -374,6 +383,80 @@ def get_ticker_counts(db: Session, limit=20) -> pd.DataFrame:
         })
     df = pd.DataFrame(rows_out).sort_values("出現次數", ascending=False)
     return df.head(limit).reset_index(drop=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# [新增] JSON 同步：GitHub Actions 抓完輸出 news.json，Streamlit 啟動時讀回 SQLite
+# ══════════════════════════════════════════════════════════════════════════════
+_JSON_FIELDS = [
+    "title", "summary", "url", "source", "language", "category",
+    "sentiment", "sentiment_score", "sentiment_label",
+    "tickers", "ticker_details", "sectors", "is_geo",
+    "ai_sentiment", "ai_score", "ai_summary", "ai_affected_tickers",
+    "ai_reason", "ai_confidence", "importance_score",
+    "image_url", "title_zh",
+]
+
+
+def known_urls(db: Session) -> set:
+    return {u for (u,) in db.query(NewsArticle.url).all() if u}
+
+
+def export_json(db: Session, path: str, keep_hours: int = 72) -> int:
+    """匯出最近 keep_hours 小時的文章到 JSON，回傳筆數"""
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=keep_hours)
+    rows = (db.query(NewsArticle)
+              .filter(NewsArticle.published_at >= cutoff)
+              .order_by(NewsArticle.published_at.desc())
+              .all())
+    out = []
+    for r in rows:
+        d = {f: getattr(r, f) for f in _JSON_FIELDS}
+        d["published_at"] = (r.published_at.replace(tzinfo=timezone.utc)
+                             if r.published_at.tzinfo is None else r.published_at).isoformat()
+        d["fetched_at"] = (r.fetched_at.replace(tzinfo=timezone.utc)
+                           if r.fetched_at and r.fetched_at.tzinfo is None
+                           else (r.fetched_at or datetime.now(timezone.utc))).isoformat()
+        out.append(d)
+    payload = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "count": len(out),
+        "articles": out,
+    }
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False)
+    return len(out)
+
+
+def import_json(db: Session, payload: dict) -> int:
+    """把 JSON 內容併入資料庫（依 hash_id 去重，已存在就跳過），回傳新增筆數"""
+    added = 0
+    existing = {h for (h,) in db.query(NewsArticle.hash_id).all()}
+    for d in payload.get("articles", []):
+        h = _make_hash(d.get("title", ""), d.get("url", ""))
+        if h in existing:
+            continue
+        try:
+            pub = datetime.fromisoformat(d["published_at"])
+            fet = datetime.fromisoformat(d.get("fetched_at") or d["published_at"])
+        except Exception:
+            continue
+        kwargs = {f: d.get(f) for f in _JSON_FIELDS if f in d}
+        for k in ("summary", "url", "source", "tickers", "ticker_details", "sectors",
+                  "ai_sentiment", "ai_summary", "ai_affected_tickers", "ai_reason",
+                  "ai_confidence", "image_url", "title_zh"):
+            if kwargs.get(k) is None:
+                kwargs[k] = ""
+        db.add(NewsArticle(hash_id=h, published_at=pub, fetched_at=fet, **kwargs))
+        existing.add(h)
+        added += 1
+    db.commit()
+    return added
+
+
+def update_title_zh(db: Session, url: str, title_zh: str) -> None:
+    db.query(NewsArticle).filter(NewsArticle.url == url).update({"title_zh": title_zh})
 
 
 def get_crawl_logs(db: Session, limit=30) -> pd.DataFrame:
