@@ -235,7 +235,7 @@ hr{border-color:var(--line)!important;margin:10px 0!important}
 .empty{text-align:center;padding:40px;color:var(--tx3)}
 
 /* Streamlit 元件 */
-[role="tablist"]{gap:8px!important;padding:8px 2px 10px!important;flex-wrap:wrap;position:sticky;top:3.2rem;z-index:60;
+[role="tablist"]{gap:8px!important;padding:8px 2px 10px!important;flex-wrap:wrap;position:sticky;top:0;z-index:999;
   background:var(--bg);border-bottom:2px solid var(--line)!important}
 [role="tab"]{height:auto!important;padding:9px 20px!important;border-radius:12px!important;background:var(--card)!important;
   border:1px solid var(--line)!important;color:var(--tx)!important;box-shadow:0 1px 3px rgba(80,60,20,.06);transition:all .15s;cursor:pointer}
