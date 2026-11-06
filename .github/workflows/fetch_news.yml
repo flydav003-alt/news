@@ -43,7 +43,8 @@ jobs:
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}   # 第二個帳號的金鑰；沒設定也沒關係
-          MAX_AI: "16"
+          MAX_AI: "20"             # 總名額；其中 4 個留給 AI 專區技術摘要，財經維持 16
+          AI_TECH_SLOTS: "4"
         run: python scheduler.py data_out/news.json
 
       - name: 推到 data 分支（只保留 1 個 commit，不會讓 repo 變肥）
