@@ -66,7 +66,7 @@ SOURCES = [
     {"name": "自由時報財經", "url": "https://news.ltn.com.tw/rss/business.xml",
      "language": "zh", "category": "財經", "enabled": True},
     {"name": "風傳媒",       "url": "https://www.storm.mg/feed",
-     "language": "zh", "category": "財經", "enabled": True},
+     "language": "zh", "category": "財經", "enabled": False},
     # ── 中文：Google News 關鍵字（取代死掉的中央社/鉅亨/MoneyDJ）──
     {"name": "GN-台股",      "url": _gnews("台股 OR 加權指數"),
      "language": "zh", "category": "財經", "enabled": True, "strip_suffix": True},
@@ -80,7 +80,7 @@ SOURCES = [
      "language": "zh", "category": "國際", "enabled": True, "strip_suffix": True},
     # ── 英文（標題會自動翻成中文）────────────────────────────
     {"name": "Yahoo Finance", "url": "https://finance.yahoo.com/news/rssindex",
-     "language": "en", "category": "國際", "enabled": True},
+     "language": "en", "category": "國際", "enabled": False},
     {"name": "CNBC",          "url": "https://www.cnbc.com/id/100003114/device/rss/rss.html",
      "language": "en", "category": "國際", "enabled": True},
     {"name": "CNBC Tech",     "url": "https://www.cnbc.com/id/19854910/device/rss/rss.html",
@@ -115,7 +115,7 @@ SOURCES = [
     # ── 🎮 生活：運動／娛樂／電玩（資料量刻意少，每源 10~12 則）──
     {"name": "自由時報運動",  "url": "https://news.ltn.com.tw/rss/sports.xml",
      "language": "zh", "category": "運動", "enabled": True, "max_items": 12},
-    {"name": "ESPN",          "url": "https://www.espn.com/espn/rss/news",
+    {"name": "BBC Sport",     "url": "https://feeds.bbci.co.uk/sport/rss.xml",
      "language": "en", "category": "運動", "enabled": True, "max_items": 8},
     {"name": "自由時報娛樂",  "url": "https://news.ltn.com.tw/rss/entertainment.xml",
      "language": "zh", "category": "娛樂", "enabled": True, "max_items": 12},
