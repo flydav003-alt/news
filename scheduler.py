@@ -23,7 +23,8 @@ from analyzer import Analyzer
 from crawler import run_crawl
 from database import (SessionLocal, init_db, save_article, log_crawl,
                       known_urls, export_json, import_json)
-from groq_analyzer import should_use_ai, groq_analyze, _clear_ai_fields, _is_rate_limited
+from groq_analyzer import (should_use_ai, groq_analyze, groq_translate_titles,
+                           _clear_ai_fields, _is_rate_limited)
 
 logger    = logging.getLogger(__name__)
 _analyzer = Analyzer()
@@ -50,29 +51,58 @@ def _needs_translation(title: str) -> bool:
     return len(_CJK_RE.findall(title)) < 2 and letters >= 10
 
 
+_translate_err_logged = False
+
+
 def _translate_one(title: str) -> str:
+    """備援：Google 翻譯（deep_translator）。錯誤只記一次 WARNING，方便從 log 診斷。"""
+    global _translate_err_logged
     try:
         from deep_translator import GoogleTranslator
         return GoogleTranslator(source="auto", target="zh-TW").translate(title) or ""
     except Exception as e:
-        logger.debug(f"翻譯失敗：{e}")
+        if not _translate_err_logged:
+            logger.warning(f"deep_translator 失敗（之後同類錯誤不再重複）：{type(e).__name__}: {e}")
+            _translate_err_logged = True
         return ""
 
 
-def translate_titles(items: list[dict], limit: int = 150) -> int:
-    """替英文標題加上 title_zh。失敗就留空（畫面會退回顯示原文）。回傳成功數。"""
+def translate_titles(items: list[dict], limit: int = 150, api_key: str = "") -> int:
+    """
+    替英文標題加上 title_zh。優先用 Groq 批次翻譯（25 則一批，台灣財經譯名較準），
+    Groq 沒 key / 失敗的剩餘標題再用 Google 翻譯備援。失敗就留空（畫面退回顯示原文）。
+    """
     todo = [it for it in items if _needs_translation(it["title"])][:limit]
     if not todo:
         return 0
-    with ThreadPoolExecutor(max_workers=4) as ex:
-        results = list(ex.map(lambda it: _translate_one(it["title"]), todo))
     n = 0
-    for it, zh in zip(todo, results):
-        if zh and zh != it["title"]:
-            it["title_zh"] = zh
-            n += 1
-    logger.info(f"標題翻譯 {n}/{len(todo)} 則")
+
+    if api_key:
+        for i in range(0, len(todo), 25):
+            chunk = todo[i:i + 25]
+            out = groq_translate_titles([it["title"] for it in chunk], api_key)
+            for it, zh in zip(chunk, out):
+                if zh and zh != it["title"]:
+                    it["title_zh"] = zh
+                    n += 1
+            if not out and _is_rate_limited():
+                break
+    groq_n = n
+
+    left = [it for it in todo if not it.get("title_zh")]
+    if left:
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            results = list(ex.map(lambda it: _translate_one(it["title"]), left))
+        for it, zh in zip(left, results):
+            if zh and zh != it["title"]:
+                it["title_zh"] = zh
+                n += 1
+    logger.info(f"標題翻譯 {n}/{len(todo)} 則（Groq {groq_n}、備援 {n - groq_n}）")
     return n
+
+
+# 生活類（運動/娛樂/電玩）不做股市情緒、個股、地緣判斷
+LIFESTYLE = {"運動", "娛樂", "電玩"}
 
 
 # ── 主流程 ────────────────────────────────────────────────────────────────────
@@ -118,6 +148,13 @@ def crawl_and_save(enabled_names=None,
 
     # ── Step 1：關鍵字分析（全部新文章）────────────────────────
     for item in fresh:
+        if item.get("category") in LIFESTYLE:
+            item.update({"sentiment": "neutral", "sentiment_score": 0.0,
+                         "sentiment_label": "中性", "tickers": [], "ticker_details": [],
+                         "sectors": [], "is_geo": False})
+            _clear_ai_fields(item)
+            item.setdefault("title_zh", "")
+            continue
         r = analyzer.analyze(item["title"], item.get("summary", ""),
                              item.get("language", "zh"))
         item.update({
@@ -160,7 +197,7 @@ def crawl_and_save(enabled_names=None,
         logger.warning("use_ai=True 但 Groq key 為空，AI 分析將跳過")
 
     # ── Step 3：英文標題翻譯 ───────────────────────────────────
-    tr_count = translate_titles(fresh) if translate else 0
+    tr_count = translate_titles(fresh, api_key=groq_key) if translate else 0
 
     # ── Step 4：存庫 ───────────────────────────────────────────
     db = SessionLocal()
