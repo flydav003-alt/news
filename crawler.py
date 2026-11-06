@@ -94,6 +94,18 @@ SOURCES = [
      "language": "en", "category": "AI", "enabled": True, "strip_suffix": True, "max_items": 25},
     {"name": "GN-中國AI",     "url": _gnews("DeepSeek OR Alibaba Qwen OR Huawei Ascend OR Moonshot OR Baidu AI China chips", en=True, when="3d"),
      "language": "en", "category": "AI", "enabled": True, "strip_suffix": True, "max_items": 25},
+    {"name": "GN-AI模型產品", "url": _gnews("ChatGPT OR GPT-5 OR Claude OR Gemini OR Grok OR Llama new model launch release", en=True, when="2d"),
+     "language": "en", "category": "AI", "enabled": True, "strip_suffix": True, "max_items": 25},
+    {"name": "GN-大陸AI模型", "url": _gnews("DeepSeek OR 通義千問 OR 豆包 OR Kimi OR 智譜 OR 文心 大模型", when="3d"),
+     "language": "zh", "category": "AI", "enabled": True, "strip_suffix": True, "max_items": 20},
+    {"name": "GN-AI新工具(中文)", "url": _gnews("ChatGPT OR Claude OR Gemini OR Grok 新功能 OR 新模型 OR 發布", when="2d"),
+     "language": "zh", "category": "AI", "enabled": True, "strip_suffix": True, "max_items": 20},
+    {"name": "Ars Technica AI", "url": "https://arstechnica.com/ai/feed/",
+     "language": "en", "category": "AI", "enabled": True, "max_items": 12},
+    {"name": "VentureBeat AI", "url": "https://venturebeat.com/category/ai/feed/",
+     "language": "en", "category": "AI", "enabled": True, "max_items": 12},
+    {"name": "MIT Tech Review AI", "url": "https://www.technologyreview.com/topic/artificial-intelligence/feed",
+     "language": "en", "category": "AI", "enabled": True, "max_items": 10},
     {"name": "TechCrunch AI", "url": "https://techcrunch.com/category/artificial-intelligence/feed/",
      "language": "en", "category": "AI", "enabled": True, "max_items": 15},
     {"name": "The Verge AI",  "url": "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml",
@@ -170,16 +182,22 @@ def _fetch_og_image(url: str) -> str:
     return ""
 
 
-def fill_missing_images(articles: list[dict], limit: int = 160) -> int:
-    """缺圖文章用 og:image 補（Google News 轉址連結跳過）。回傳補到幾張。"""
+def fill_missing_images(articles: list[dict], limit: int = 400) -> int:
+    """缺圖文章用 og:image 補（Google News 轉址連結跳過）。回傳補到幾張。
+    生活類／AI 排在前面：以前照來源順序補，名額被前面的財經來源用完，運動/娛樂就永遠沒圖。"""
+    prio = {"運動": 0, "娛樂": 0, "電玩": 0, "AI": 1, "科技": 1}
     todo = [a for a in articles
             if not a.get("image_url")
             and a.get("url", "").startswith("http")
-            and "news.google.com" not in a["url"]][:limit]
+            and "news.google.com" not in a["url"]]
+    todo.sort(key=lambda a: prio.get(a.get("category", ""), 2))
+    todo = todo[:limit]
     if not todo:
         return 0
-    with ThreadPoolExecutor(max_workers=8) as ex:
+    with ThreadPoolExecutor(max_workers=10) as ex:
         imgs = list(ex.map(lambda a: _fetch_og_image(a["url"]), todo))
+    logger.info(f"og:image 嘗試 {len(todo)} 篇（各類別：" + ", ".join(
+        f"{c}={sum(1 for a in todo if a.get('category') == c)}" for c in sorted({a.get('category') for a in todo})) + "）")
     n = 0
     for a, img in zip(todo, imgs):
         if img:
