@@ -493,6 +493,9 @@ def strip_html(row) -> str:
 
 
 def eff_sent(row):
+    if (str(row.get("category", "")) == "AI" and str(row.get("ai_summary", "") or "")
+            and not str(row.get("ai_sentiment", "") or "")):
+        return "neutral", 0.0          # AI 專區技術摘要：不顯示利多/利空
     ai_s = str(row.get("ai_sentiment", "") or "")
     if ai_s in ("bullish", "bearish", "neutral"):
         return ai_s, _num(row.get("ai_score"))
@@ -1170,7 +1173,7 @@ with tab_deep:
                     horizontal=True, key="deep_mode")
 
     if mode == "✦ AI 深度分析":
-        ai_df = df_all[df_all["ai_summary"].fillna("") != ""].copy() if not df_all.empty else pd.DataFrame()
+        ai_df = df_all[(df_all["ai_summary"].fillna("") != "") & (df_all["ai_sentiment"].fillna("") != "")].copy() if not df_all.empty else pd.DataFrame()
         if ai_df.empty:
             st.markdown('<div class="empty">🤖 尚無 AI 分析結果</div>', unsafe_allow_html=True)
         else:
