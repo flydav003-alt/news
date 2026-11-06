@@ -438,14 +438,23 @@ class Analyzer:
         # 第二層：4位數字直接出現（排除年份 2000-2030 及常見非代碼數字）
         # [修改] 英文新聞的 4 位數多半是指數點位/金額（如 5000），不當台股代碼
         EXCLUDE_NUMS = set(str(y) for y in range(2000, 2031))
-        for m in (re.finditer(r"(?<!\d)(\d{4})(?!\d)", text) if language != "en" else []):
+        _UNIT = "點元億萬千百%％年月日號張股人台美倍季檔筆次度歲坪公里噸桶"
+        for m in (re.finditer(r"(?<![\d.,$＄])(\d{4})(?![\d,.]\d)(?!\d)", text) if language != "en" else []):
             code = m.group(1)
             code_int = int(code)
-            if (1000 <= code_int <= 9999
-                    and code not in EXCLUDE_NUMS
-                    and code not in found):
-                name = CODE_TO_COMPANY.get(code, f"台股{code}")
-                found[code] = TickerMatch(code=code, name=name, market="TW")
+            if not (1000 <= code_int <= 9999) or code in EXCLUDE_NUMS or code in found:
+                continue
+            nxt  = text[m.end():m.end() + 1]
+            prev = text[max(0, m.start() - 3):m.start()]
+            if nxt and nxt in _UNIT:                 # 4000點、2026年、5000元 → 不是代碼
+                continue
+            if code in CODE_TO_COMPANY:              # 已知上市櫃代碼 → 收
+                name = CODE_TO_COMPANY[code]
+            elif (prev[-1:] in ("(", "（", "「") and nxt in (")", "）", "」")) or "股" in prev or "代號" in prev:
+                name = f"台股{code}"                 # 未知代碼：必須有括號或「股/代號」脈絡
+            else:
+                continue
+            found[code] = TickerMatch(code=code, name=name, market="TW")
 
         # 第三層：美股中文名稱
         for name, code in US_NAME_TO_CODE.items():
@@ -469,7 +478,15 @@ class Analyzer:
 
     def _is_geo(self, text: str) -> bool:
         tl = text.lower()
-        return any(kw.lower() in tl for kw in GEO_KEYWORDS)
+        for kw in GEO_KEYWORDS:
+            k = kw.lower()
+            if k.isascii():
+                # 英文要整詞比對：避免 "war" 命中 "warrant/software"、"attack" 命中 "heart attack" 以外的雜訊
+                if re.search(r"\b" + re.escape(k) + r"s?\b", tl):
+                    return True
+            elif k in tl:
+                return True
+        return False
 
     def _score(self, text: str, language: str) -> float:
         # [修改] 中文改用「最長詞優先的子字串比對」：jieba 常把「創新高」切成「創新/高」而漏掉
