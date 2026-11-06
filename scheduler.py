@@ -23,7 +23,7 @@ from analyzer import Analyzer
 from crawler import run_crawl, is_routine_revenue
 from database import (SessionLocal, init_db, save_article, log_crawl,
                       known_urls, export_json, import_json)
-from groq_analyzer import (should_use_ai, groq_analyze, groq_translate_titles,
+from groq_analyzer import (should_use_ai, groq_analyze, groq_tech_summary, groq_translate_titles,
                            _clear_ai_fields, _is_rate_limited)
 
 logger    = logging.getLogger(__name__)
@@ -175,14 +175,20 @@ def crawl_and_save(enabled_names=None,
     if use_ai and groq_key and not _is_rate_limited():
         cands = [
             it for it in fresh
-            if should_use_ai(it["sentiment_score"], it["title"], it["is_geo"],
+            if it.get("category") != "AI"      # AI 類走下面的「技術摘要」專用名額
+            and should_use_ai(it["sentiment_score"], it["title"], it["is_geo"],
                              bool(it["tickers"]), it.get("category", ""))
         ]
         # 優先序：地緣 > 有個股 > 情緒強度；同分者較新的優先
         cands.sort(key=lambda it: (it["is_geo"], bool(it["tickers"]),
                                    abs(it["sentiment_score"]),
                                    it["published_at"].timestamp()), reverse=True)
-        for it in cands[:max_ai_per_run]:
+        # AI 專區保留名額：AI 類（ChatGPT/Claude/DeepSeek…）技術新聞用「技術摘要」提示詞，不談股價
+        ai_items = [it for it in fresh if it.get("category") == "AI"]
+        tech_n = min(int(os.environ.get("AI_TECH_SLOTS", "4")), len(ai_items), max_ai_per_run)
+        fin_n = max_ai_per_run - tech_n
+        fin_pick = cands[:fin_n]
+        for it in fin_pick:
             if _is_rate_limited():
                 break
             ai = groq_analyze(it["title"], it.get("summary", ""),
@@ -195,6 +201,21 @@ def crawl_and_save(enabled_names=None,
                 it["ai_reason"]           = ai["reason"]
                 it["ai_confidence"]       = ai["confidence"]
                 ai_count += 1
+        picked = {id(x) for x in fin_pick}
+        tech_pool = [it for it in ai_items if id(it) not in picked]
+        tech_pool.sort(key=lambda it: it["published_at"].timestamp(), reverse=True)
+        tech_done = 0
+        for it in tech_pool[:tech_n]:
+            if _is_rate_limited():
+                break
+            ai = groq_tech_summary(it["title"], it.get("summary", ""), groq_key)
+            if ai:
+                it["ai_sentiment"], it["ai_score"] = "", 0.0     # 技術新聞不顯示利多/利空，只顯示摘要
+                it["ai_summary"] = ai["summary"]
+                it["ai_reason"], it["ai_confidence"] = ai["reason"], ai["confidence"]
+                ai_count += 1
+                tech_done += 1
+        logger.info(f"AI 分析：財經 {len(fin_pick)} 則送出、AI 專區技術摘要 {tech_done} 則")
     elif use_ai and not groq_key:
         logger.warning("use_ai=True 但 Groq key 為空，AI 分析將跳過")
 
