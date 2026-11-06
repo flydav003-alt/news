@@ -20,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
 
 from analyzer import Analyzer
-from crawler import run_crawl
+from crawler import run_crawl, is_routine_revenue
 from database import (SessionLocal, init_db, save_article, log_crawl,
                       known_urls, export_json, import_json)
 from groq_analyzer import (should_use_ai, groq_analyze, groq_translate_titles,
@@ -141,6 +141,8 @@ def crawl_and_save(enabled_names=None,
         if u in known or u in seen:
             continue
         seen.add(u)
+        if is_routine_revenue(a.get("title", "")):
+            continue                      # 例行月營收公告：不存、不分析、不翻譯
         fresh.append(a)
 
     saved = skipped = ai_count = 0
