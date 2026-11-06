@@ -43,9 +43,11 @@ TIMEOUT   = 20
 MAX_ITEMS = 50
 
 
-def _gnews(query: str) -> str:
-    """Google News RSS（繁中、台灣、最近 1 天）"""
-    q = quote(f"{query} when:1d")
+def _gnews(query: str, en: bool = False, when: str = "1d") -> str:
+    """Google News RSS（預設繁中台灣；en=True 為美國英文版）"""
+    q = quote(f"{query} when:{when}")
+    if en:
+        return f"https://news.google.com/rss/search?q={q}&hl=en-US&gl=US&ceid=US:en"
     return f"https://news.google.com/rss/search?q={q}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
 
 
@@ -87,6 +89,32 @@ SOURCES = [
      "language": "en", "category": "國際", "enabled": True},
     {"name": "BBC Business",  "url": "https://feeds.bbci.co.uk/news/business/rss.xml",
      "language": "en", "category": "國際", "enabled": True},
+    # ── 🤖 AI 專區（美國／中國，英文，標題自動翻中文）────────
+    {"name": "GN-美國AI",     "url": _gnews("Nvidia OR OpenAI OR Anthropic OR Microsoft OR Google AI chips data center", en=True),
+     "language": "en", "category": "AI", "enabled": True, "strip_suffix": True, "max_items": 25},
+    {"name": "GN-中國AI",     "url": _gnews("DeepSeek OR Alibaba Qwen OR Huawei Ascend OR Moonshot OR Baidu AI China chips", en=True, when="3d"),
+     "language": "en", "category": "AI", "enabled": True, "strip_suffix": True, "max_items": 25},
+    {"name": "TechCrunch AI", "url": "https://techcrunch.com/category/artificial-intelligence/feed/",
+     "language": "en", "category": "AI", "enabled": True, "max_items": 15},
+    {"name": "The Verge AI",  "url": "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml",
+     "language": "en", "category": "AI", "enabled": True, "max_items": 15},
+    {"name": "SCMP Tech",     "url": "https://www.scmp.com/rss/36/feed",
+     "language": "en", "category": "AI", "enabled": True, "max_items": 15},
+    # ── 🎮 生活：運動／娛樂／電玩（資料量刻意少，每源 10~12 則）──
+    {"name": "自由時報運動",  "url": "https://news.ltn.com.tw/rss/sports.xml",
+     "language": "zh", "category": "運動", "enabled": True, "max_items": 12},
+    {"name": "ESPN",          "url": "https://www.espn.com/espn/rss/news",
+     "language": "en", "category": "運動", "enabled": True, "max_items": 8},
+    {"name": "自由時報娛樂",  "url": "https://news.ltn.com.tw/rss/entertainment.xml",
+     "language": "zh", "category": "娛樂", "enabled": True, "max_items": 12},
+    {"name": "Variety",       "url": "https://variety.com/feed/",
+     "language": "en", "category": "娛樂", "enabled": True, "max_items": 8},
+    {"name": "巴哈姆特GNN",   "url": "https://gnn.gamer.com.tw/rss.xml",
+     "language": "zh", "category": "電玩", "enabled": True, "max_items": 12},
+    {"name": "IGN",           "url": "https://feeds.ign.com/ign/all",
+     "language": "en", "category": "電玩", "enabled": True, "max_items": 8},
+    {"name": "The Verge",     "url": "https://www.theverge.com/rss/index.xml",
+     "language": "en", "category": "科技", "enabled": True, "max_items": 10},
     # ── 已停用（保留設定，需要時到設定頁開）──────────────────
     {"name": "信傳媒",        "url": "https://www.cmmedia.com.tw/rss/yahoo/article",
      "language": "zh", "category": "財經", "enabled": False},
@@ -100,7 +128,7 @@ _OG_RE  = re.compile(
     r'|<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\'](?:og:image|twitter:image)["\']',
     re.I,
 )
-_BAD_IMG = ("pixel", "1x1", "feedburner", "spacer", "blank.gif", "/ads/", "logo")
+_BAD_IMG = ("pixel", "1x1", "feedburner", "spacer", "blank.gif", "/ads/", "logo", "favicon", "default-image", "placeholder", "googleusercontent.com/proxy")
 
 
 def _ok_img(u: str) -> bool:
@@ -142,7 +170,7 @@ def _fetch_og_image(url: str) -> str:
     return ""
 
 
-def fill_missing_images(articles: list[dict], limit: int = 60) -> int:
+def fill_missing_images(articles: list[dict], limit: int = 160) -> int:
     """缺圖文章用 og:image 補（Google News 轉址連結跳過）。回傳補到幾張。"""
     todo = [a for a in articles
             if not a.get("image_url")
@@ -160,6 +188,30 @@ def fill_missing_images(articles: list[dict], limit: int = 60) -> int:
     return n
 
 
+_CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def _parse_feed(url: str):
+    """
+    先用 requests 抓內容，清掉非法控制字元後再交給 feedparser。
+    （以前直接 feedparser.parse(url)，遇到格式小瑕疵會整個來源變 0 則）
+    """
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+        raw = r.content
+        if r.status_code >= 400:
+            logger.warning(f"HTTP {r.status_code}：{url[:70]}")
+        txt = raw.decode(r.encoding or "utf-8", "ignore") if not raw[:100].lstrip().startswith(b"<?xml") else raw.decode("utf-8", "ignore")
+        txt = _CTRL_RE.sub("", txt)
+        # feedparser 對含 encoding 宣告的 str 會警告，改丟 bytes
+        feed = feedparser.parse(txt.encode("utf-8"))
+        if feed.entries:
+            return feed
+    except Exception as e:
+        logger.debug(f"requests 抓取失敗，改用 feedparser 直連：{e}")
+    return feedparser.parse(url, request_headers=HEADERS, agent=HEADERS["User-Agent"])
+
+
 # ── RSS 抓取核心 ──────────────────────────────────────────────────────────────
 def fetch_rss(source: dict) -> list[dict]:
     """抓取單一 RSS 來源，回傳標準化文章 list"""
@@ -169,17 +221,13 @@ def fetch_rss(source: dict) -> list[dict]:
 
     results = []
     try:
-        feed = feedparser.parse(
-            source["url"],
-            request_headers=HEADERS,
-            agent=HEADERS["User-Agent"],
-        )
+        feed = _parse_feed(source["url"])
 
-        if feed.bozo and not feed.entries:
-            logger.warning(f"[{source['name']}] RSS 格式異常：{feed.bozo_exception}")
+        if not feed.entries:
+            logger.warning(f"[{source['name']}] 沒有文章（{getattr(feed, 'bozo_exception', '空回應')}）")
             return []
 
-        for entry in feed.entries[:MAX_ITEMS]:
+        for entry in feed.entries[:source.get("max_items", MAX_ITEMS)]:
             title   = _clean(getattr(entry, "title", ""))
             summary = _clean(getattr(entry, "summary", ""))
             url     = getattr(entry, "link", "")
