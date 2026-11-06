@@ -218,6 +218,26 @@ hr{border-color:var(--line)!important;margin:10px 0!important}
 .tk{font-size:11px;background:var(--soft);border-radius:4px;padding:1px 6px;font-family:'JetBrains Mono',monospace;color:var(--tx2)}
 .tr{font-size:11.5px;color:var(--accent)!important;text-decoration:none!important}
 .tr:hover{text-decoration:underline!important}
+.bd-w{background:var(--accent);color:#fff}
+.card.wl{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset}
+.fav{margin-left:auto;cursor:pointer;font-size:18px;line-height:1;color:var(--tx3);user-select:none;padding:0 2px}
+.fav:hover{color:var(--accent)}
+.fav.on{color:#E0A020}
+.favc{background:var(--card);border:1px solid var(--line);border-radius:12px;box-shadow:0 1px 3px rgba(80,60,20,.06);display:flex;flex-direction:column}
+.fn-fav:empty{display:none}
+.fn-fav-note{font-size:12.5px;color:var(--tx2);margin:2px 0 10px}
+.fav-clear{cursor:pointer;color:var(--tx3);margin-left:10px;text-decoration:underline}
+.sgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}
+.sg{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:10px;padding:10px 13px}
+.sg.wl{box-shadow:0 0 0 1px var(--accent) inset}
+.sg-h{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.sg-tk{font-family:'JetBrains Mono',monospace;font-weight:700;font-size:15px}
+.sg-nm{font-size:13px;color:var(--tx2)}
+.sg-x{margin-left:auto;font-family:'JetBrains Mono',monospace;font-weight:700;font-size:15px;color:var(--accent)}
+.sg-m{font-size:11.5px;color:var(--tx3);margin:4px 0 6px}
+.sg-l{margin:0;padding-left:16px;font-size:12.5px;line-height:1.5}
+.sg-l a{color:var(--tx)!important;text-decoration:none!important}
+.sg-l a:hover{color:var(--accent)!important}
 
 /* 地緣 */
 .geo-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
@@ -309,6 +329,67 @@ div[data-baseweb="select"] svg{{fill:var(--tx)!important}}
 .q-p,.m-v{{color:var(--tx)}} .m-v.up,.up{{color:var(--up)!important}} .m-v.dn,.dn{{color:var(--dn)!important}}
 </style>"""
 st.markdown(THEME_CSS, unsafe_allow_html=True)
+
+
+# ─────────────────────────────────────────────
+# 自選股：存在網址參數 ?wl=2330,2454（可加書籤）＋ 瀏覽器 localStorage（下面的 JS 負責還原）
+# 比對規則：代號命中新聞的個股標籤，或名稱/代號出現在標題、個股名稱
+# ─────────────────────────────────────────────
+WL_MAX = 30
+
+
+def parse_wl(text: str) -> list:
+    out, seen = [], set()
+    for t in re.split(r"[,，、;；\s]+", text or ""):
+        t = t.strip().upper()
+        if t and t != "-" and t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out[:WL_MAX]
+
+
+def _wl_compile(tokens):
+    pats = []
+    for t in tokens:
+        if re.fullmatch(r"[A-Z0-9.\-]+", t):      # 英數代號：要求前後不是英數，避免 AMD 命中 DAMDX
+            pats.append((t, re.compile(r"(?<![A-Za-z0-9])" + re.escape(t) + r"(?![A-Za-z0-9])", re.I)))
+        else:                                       # 中文名稱：直接子字串
+            pats.append((t, re.compile(re.escape(t), re.I)))
+    return pats
+
+
+_wl_q = st.query_params.get("wl", "")
+if "wl_text" not in st.session_state:
+    st.session_state["wl_text"] = "" if _wl_q in ("", "-") else _wl_q.replace(",", ", ")
+_WL_TOKENS = parse_wl(st.session_state["wl_text"])
+_WL_PATS = _wl_compile(_WL_TOKENS)
+_wl_val = ",".join(_WL_TOKENS)
+if _wl_val:
+    if st.query_params.get("wl") != _wl_val:
+        st.query_params["wl"] = _wl_val
+elif st.session_state.get("_wl_had") and st.query_params.get("wl") != "-":
+    st.query_params["wl"] = "-"                    # 使用者主動清空：用 "-" 告訴瀏覽器端別再還原舊清單
+st.session_state["_wl_had"] = bool(_wl_val)
+
+
+def _row_tickers(row) -> list:
+    raw = str(row.get("ai_affected_tickers", "") or row.get("tickers", "") or "")
+    return [x.strip() for x in raw.split(",") if x.strip()]
+
+
+def wl_hits(row) -> list:
+    """這則新聞命中了哪些自選股（沒設定自選股就回傳空）"""
+    if not _WL_PATS:
+        return []
+    tks = {t.upper() for t in _row_tickers(row)}
+    names = []
+    try:
+        for it in json.loads(row.get("ticker_details") or "[]"):
+            names.append(str(it.get("name") or ""))
+    except Exception:
+        pass
+    text = " ".join([str(row.get("title", "") or ""), str(row.get("title_zh", "") or ""), " ".join(names)])
+    return [tok for tok, pat in _WL_PATS if tok in tks or pat.search(text)]
 
 
 # ─────────────────────────────────────────────
@@ -673,19 +754,30 @@ def card_html(row, others=None) -> str:
     summ_h = f'<div class="cs">✦ {esc(summ)}</div>' if summ else ""
     _sec = ",".join(x.strip() for x in str(row.get("sectors", "") or "").split(",") if x.strip())
     _tk = ",".join(x.strip() for x in str(row.get("ai_affected_tickers", "") or row.get("tickers", "") or "").split(",") if x.strip())
+    _hits = wl_hits(row)
+    for _o in others:
+        _hits += wl_hits(_o)
+    wl_cls = " wl" if _hits else ""
+    wl_b = '<span class="bd bd-w">★ 自選</span>' if _hits else ""
+    try:
+        _ts = int(row.get("published_at").timestamp())
+    except Exception:
+        _ts = 0
+    _sent_lbl = {"bullish": f"利多 {sv:+.1f}", "bearish": f"利空 {sv:+.1f}"}.get(sent, "中性")
     _attrs = (f'data-tk="{esc(_tk, quote=True)}" data-sec="{esc(_sec, quote=True)}" '
+              f'data-ts="{_ts}" data-sent="{esc(_sent_lbl, quote=True)}" '
               f'data-cat="{esc(str(row.get("category", "") or ""), quote=True)}" '
               f'data-src="{esc(str(row.get("source", "") or ""), quote=True)}" '
               f'data-age="{min(age_hours(row.get("published_at")), 999):.0f}" '
               f'data-imp="{_num(row.get("importance_score")):.1f}"')
     return _h(f"""
-    <div class="card {cls}" {_attrs}>
+    <div class="card {cls}{wl_cls}" {_attrs}>
       <a href="{href}" target="_blank" rel="noopener">{thumb_html(row) if has_img else strip_html(row)}</a>
       <div class="cb">
         <a class="ct" href="{href}" target="_blank" rel="noopener">{esc(main)}</a>
         {orig_h}{summ_h}{more_h}
-        <div class="cm">{badge_html(sent, sv)}{geo}{tickers_chips(row)}</div>
-        <div class="cm"><span>{esc(str(row.get("source", "")))}</span><span>· {relative_time(row.get("published_at"))}</span>{translate_link(row)}</div>
+        <div class="cm">{badge_html(sent, sv)}{wl_b}{geo}{tickers_chips(row)}</div>
+        <div class="cm"><span>{esc(str(row.get("source", "")))}</span><span>· {relative_time(row.get("published_at"))}</span>{translate_link(row)}<span class="fav" role="button" title="收藏">☆</span></div>
       </div>
     </div>""")
 
@@ -755,6 +847,98 @@ def hbars(items) -> str:
         f'<span class="hb-t"><i style="width:{abs(v) / mx * 100:.0f}%;background:{c}"></i></span>'
         f'<span class="hb-v">{esc(t)}</span></div>' for l, v, c, t in items)
     return rows
+
+
+# ─────────────────────────────────────────────
+# 提及量暴增偵測：某檔股票「最近 N 小時」被提及次數 ≥ 過去平均同長度時段的 K 倍
+# 參數都在這裡，想更敏感就調低 SURGE_RATIO / SURGE_MIN_N
+# ─────────────────────────────────────────────
+SURGE_WIN_H = 3            # 觀察窗（小時）
+SURGE_RATIO = 3.0          # 超過平均幾倍才算暴增
+SURGE_MIN_N = 3            # 觀察窗內至少幾則（避免 1→3 這種小數字亂跳）
+SURGE_MIN_SRC = 2          # 至少幾家媒體（避免單一來源洗版）
+SURGE_MIN_HISTORY_H = 12   # 資料至少涵蓋幾小時才有「平均」可比
+
+
+def detect_surge(df, top=6):
+    """回傳 (暴增清單, 資料涵蓋小時數)。基準 = 觀察窗之前的所有文章，換算成每個觀察窗的平均數。"""
+    if df is None or df.empty:
+        return [], 0.0
+    d = df[~df["category"].isin(LIFE_CATS)]
+    if d.empty:
+        return [], 0.0
+    recs = d.to_dict("records")
+    ages = [age_hours(r.get("published_at")) for r in recs]
+    span = min(72.0, max(ages))
+    if span < SURGE_MIN_HISTORY_H:
+        return [], span
+    blocks = max((span - SURGE_WIN_H) / SURGE_WIN_H, 1.0)
+    rec, base, names = {}, {}, {}
+    for r, a in zip(recs, ages):
+        if a > 72:
+            continue
+        try:
+            for it in json.loads(r.get("ticker_details") or "[]"):
+                nm = str(it.get("name") or "")
+                if it.get("code") and nm and nm != it.get("code") and not nm.startswith("台股"):
+                    names.setdefault(it["code"], nm)
+        except Exception:
+            pass
+        for t in _row_tickers(r):
+            if a <= SURGE_WIN_H:
+                rec.setdefault(t, []).append(r)
+            else:
+                base[t] = base.get(t, 0) + 1
+    out = []
+    for t, rows in rec.items():
+        n = len(rows)
+        srcs = {str(x.get("source", "")) for x in rows}
+        if n < SURGE_MIN_N or len(srcs) < SURGE_MIN_SRC:
+            continue
+        expected = base.get(t, 0) / blocks
+        ratio = n / max(expected, 1.0)
+        if ratio < SURGE_RATIO:
+            continue
+        sents = [eff_sent(x)[0] for x in rows]
+        bull, bear = sents.count("bullish"), sents.count("bearish")
+        if bull and bull >= 2 * bear:
+            tone, tcls = "偏多", "up"
+        elif bear and bear >= 2 * bull:
+            tone, tcls = "偏空", "dn"
+        elif bull or bear:
+            tone, tcls = "多空分歧", "flat"
+        else:
+            tone, tcls = "中性", "flat"
+        seen_t, heads = set(), []
+        for x in sorted(rows, key=lambda z: age_hours(z.get("published_at"))):
+            ttl, _o = titles(x)
+            if ttl not in seen_t:
+                seen_t.add(ttl)
+                heads.append((ttl, str(x.get("url", "") or "#")))
+            if len(heads) >= 2:
+                break
+        nm = names.get(t, "")
+        is_wl = bool(_WL_PATS) and any(tok == t.upper() or (nm and pat.search(nm)) for tok, pat in _WL_PATS)
+        out.append({"code": t, "name": nm, "n": n, "nsrc": len(srcs), "exp": expected, "ratio": ratio,
+                    "tone": tone, "tcls": tcls, "heads": heads, "wl": is_wl})
+    out.sort(key=lambda z: (z["wl"], z["ratio"], z["n"]), reverse=True)
+    return out[:top], span
+
+
+def surge_html(items) -> str:
+    cards = ""
+    for it in items:
+        li = "".join(f'<li><a href="{esc(u, quote=True)}" target="_blank" rel="noopener">{esc(t)}</a></li>'
+                     for t, u in it["heads"])
+        wl_b = '<span class="bd bd-w">★ 自選</span>' if it["wl"] else ""
+        cards += (f'<div class="sg{" wl" if it["wl"] else ""}">'
+                  f'<div class="sg-h"><span class="sg-tk">{esc(it["code"])}</span>'
+                  f'<span class="sg-nm">{esc(it["name"])}</span>{wl_b}'
+                  f'<span class="sg-x">×{it["ratio"]:.1f}</span></div>'
+                  f'<div class="sg-m">近 {SURGE_WIN_H} 小時 {it["n"]} 則（平均 {it["exp"]:.1f} 則）· {it["nsrc"]} 家媒體 · '
+                  f'<span class="{it["tcls"]}">{it["tone"]}</span></div>'
+                  f'<ul class="sg-l">{li}</ul></div>')
+    return f'<div class="sgrid">{cards}</div>'
 
 
 # ─────────────────────────────────────────────
@@ -869,8 +1053,8 @@ qs = fetch_quotes()
 if qs:
     st.markdown(quotes_html(qs), unsafe_allow_html=True)
 
-tab_home, tab_ai, tab_sports, tab_ent, tab_game, tab_search, tab_cfg = st.tabs(
-    ["📰 今日新聞", "🤖 AI 專區", "⚽ 運動", "🎬 娛樂", "🎮 電玩", "🔎 搜尋", "⚙️ 設定"])
+tab_home, tab_ai, tab_sports, tab_ent, tab_game, tab_search, tab_fav, tab_cfg = st.tabs(
+    ["📰 今日新聞", "🤖 AI 專區", "⚽ 運動", "🎬 娛樂", "🎮 電玩", "🔎 搜尋", "⭐ 收藏", "⚙️ 設定"])
 
 # ═══════════════════════════════════════════════
 # TAB 1：今日新聞
@@ -879,6 +1063,13 @@ with tab_home:
     if df_all.empty:
         st.markdown('<div class="empty">📭 還沒有任何新聞，請按右上角「立即抓取」</div>', unsafe_allow_html=True)
     else:
+        wl1, wl2 = st.columns([4, 1.3])
+        with wl1:
+            st.text_input("自選股", key="wl_text", label_visibility="collapsed",
+                          placeholder="⭐ 自選股：代號或名稱，逗號分隔（例：2330, 2454, 緯穎, NVDA），按 Enter 套用")
+        with wl2:
+            st.checkbox("只看自選股", key="wl_only")
+
         df_fin = df_all[~df_all["category"].isin(LIFE_CATS + ("AI",))]
         df_r, used_h = recent(df_fin if not df_fin.empty else df_all)
         if used_h > 12:
@@ -905,6 +1096,28 @@ with tab_home:
           <i style="width:{neu_n / tot * 100:.1f}%;background:#D9CDB3"></i>
           <i style="width:{bear_n / tot * 100:.1f}%;background:var(--dn)"></i>
         </div>"""), unsafe_allow_html=True)
+
+        # ── 題材升溫（提及量暴增）──
+        _sg, _span = detect_surge(df_all)
+        if _sg:
+            st.markdown(f'<div class="sec">📈 題材升溫 <span class="fn-reco-chips">近 {SURGE_WIN_H} 小時被提及次數 ≥ 平均的 '
+                        f'{SURGE_RATIO:g} 倍</span></div>' + surge_html(_sg), unsafe_allow_html=True)
+        elif _span < SURGE_MIN_HISTORY_H:
+            st.caption(f"📈 題材升溫：資料只涵蓋 {_span:.0f} 小時，累積到 {SURGE_MIN_HISTORY_H} 小時以上才會開始偵測")
+        else:
+            st.caption(f"📈 題材升溫：近 {SURGE_WIN_H} 小時沒有個股的提及量超過平均 {SURGE_RATIO:g} 倍")
+
+        # ── 自選股動態 ──
+        if _WL_TOKENS:
+            _wsrc = df_all[~df_all["category"].isin(LIFE_CATS)]
+            _wsrc = _wsrc[_wsrc["published_at"].apply(age_hours) <= 72].sort_values("published_at", ascending=False)
+            _wdf = _wsrc[_wsrc.apply(lambda r: bool(wl_hits(r)), axis=1)] if not _wsrc.empty else _wsrc
+            st.markdown(f'<div class="sec">⭐ 自選股動態 <span class="fn-reco-chips">{esc("、".join(_WL_TOKENS[:8]))}'
+                        f'{"…" if len(_WL_TOKENS) > 8 else ""}</span></div>', unsafe_allow_html=True)
+            if _wdf.empty:
+                st.caption("近 72 小時沒有提到你的自選股")
+            else:
+                render_grid(_wdf, max_items=6)
 
         # ── 頭條 ──
         st.markdown('<div class="sec">🔥 今日頭條</div>', unsafe_allow_html=True)
@@ -1009,6 +1222,15 @@ with tab_home:
         if sort_f == "重要度":
             ddf = ddf.sort_values(["importance_score", "published_at"], ascending=False)
 
+        if _WL_TOKENS and len(ddf):
+            _m = ddf.apply(lambda r: bool(wl_hits(r)), axis=1)
+            if st.session_state.get("wl_only"):
+                ddf = ddf[_m]
+            else:
+                ddf = pd.concat([ddf[_m], ddf[~_m]])          # 自選股新聞置頂，其餘維持原排序
+        elif st.session_state.get("wl_only"):
+            st.caption("⭐ 請先在上方輸入自選股，「只看自選股」才有作用")
+
         st.caption(f"共 {len(ddf)} 則")
         n_show = st.session_state["n_show"]
         render_grid(ddf, max_items=n_show)
@@ -1016,6 +1238,14 @@ with tab_home:
             if st.button(f"顯示更多（+24）", key="more"):
                 st.session_state["n_show"] += 24
                 st.rerun()
+
+
+# ═══════════════════════════════════════════════
+# TAB：收藏（內容由瀏覽器端 JS 依 localStorage 畫出；收藏的是標題/連結快照，不受 72 小時限制）
+# ═══════════════════════════════════════════════
+with tab_fav:
+    st.markdown('<div class="fn-fav-wrap"><div class="fn-fav-note"></div><div class="grid fn-fav"></div></div>',
+                unsafe_allow_html=True)
 
 
 # ═══════════════════════════════════════════════
@@ -1224,6 +1454,29 @@ _READ_JS = """
   if (P.__fnCleanup) { try { P.__fnCleanup(); } catch(e) {} }
   function jget(k, d){ try { return JSON.parse(P.localStorage.getItem(k) || d); } catch(e) { return JSON.parse(d); } }
   function jset(k, v){ try { P.localStorage.setItem(k, JSON.stringify(v)); } catch(e) {} }
+  // ── 自選股：網址有 ?wl= 就記到 localStorage；網址沒有但 localStorage 有 → 補上並重新載入一次 ──
+  function syncWl(){
+    try {
+      var w = new URL(P.location.href).searchParams.get('wl');
+      if (w === null) return;
+      if (w === '-') P.localStorage.removeItem('finnews_wl');
+      else if (w) P.localStorage.setItem('finnews_wl', w);
+    } catch(e) {}
+  }
+  function restoreWl(){
+    try {
+      var u = new URL(P.location.href);
+      if (u.searchParams.get('wl') !== null) return false;
+      var w = P.localStorage.getItem('finnews_wl'); if (!w) return false;
+      var last = parseInt(P.sessionStorage.getItem('fn_wl_redir') || '0', 10);
+      if (Date.now() - last < 15000) return false;          // 15 秒內只跳一次，避免無限重新載入
+      P.sessionStorage.setItem('fn_wl_redir', String(Date.now()));
+      u.searchParams.set('wl', w); P.location.replace(u.toString());
+      return true;
+    } catch(e) { return false; }
+  }
+  if (restoreWl()) return;
+  syncWl();
   S = new Set(jget(K, '[]'));
   function saveRead(){ jset(K, Array.from(S).slice(-2000)); }
   function mainLink(el){
@@ -1302,7 +1555,72 @@ _READ_JS = """
     pick.forEach(function(c){ var n = c.cloneNode(true); n.classList.add('reco'); box.appendChild(n); });
     markRead();
   }
+  // ── 收藏：存標題/連結/來源/時間的快照到 localStorage（上限 300 則）──
+  var FK = 'finnews_fav';
+  function favs(){ return jget(FK, '[]'); }
+  function saveFavs(a){ jset(FK, a.slice(0, 300)); }
+  function markFav(){
+    var set = new Set(favs().map(function(f){ return f.u; }));
+    D.querySelectorAll('.card .fav').forEach(function(el){
+      var c = el.closest('.card'), a = c && c.querySelector('a.ct');
+      var on = !!(a && set.has(a.href));
+      if (el.classList.contains('on') !== on) { el.classList.toggle('on', on); el.textContent = on ? '★' : '☆'; }
+    });
+  }
+  function toggleFav(card){
+    var a = card.querySelector('a.ct'); if (!a) return;
+    var d = card.dataset || {}, list = favs(), i = -1;
+    list.forEach(function(f, k){ if (f.u === a.href) i = k; });
+    if (i >= 0) list.splice(i, 1);
+    else list.unshift({u: a.href, t: a.textContent.trim(), s: d.src || '', p: parseInt(d.ts || '0', 10), b: d.sent || '', a: Date.now()});
+    saveFavs(list); markFav(); buildFav();
+  }
+  function removeFav(u){ saveFavs(favs().filter(function(f){ return f.u !== u; })); markFav(); buildFav(); }
+  function rel(ts){
+    if (!ts) return '';
+    var s = Date.now() / 1000 - ts;
+    if (s < 3600) return Math.max(1, Math.floor(s / 60)) + '分鐘前';
+    if (s < 86400) return Math.floor(s / 3600) + '小時前';
+    return Math.floor(s / 86400) + '天前';
+  }
+  function mk(tag, cls, txt){ var n = D.createElement(tag); if (cls) n.className = cls; if (txt) n.textContent = txt; return n; }
+  function buildFav(){
+    var box = D.querySelector('.fn-fav'), note = D.querySelector('.fn-fav-note');
+    if (!box || !note) return;
+    var list = favs();
+    var sig = list.map(function(f){ return f.u; }).join('|');
+    if (box.getAttribute('data-sig') === sig && note.textContent) return;
+    box.setAttribute('data-sig', sig);
+    note.textContent = '';
+    if (!list.length) {
+      note.textContent = '還沒有收藏。在新聞卡片右下角按 ☆ 就會收藏到這裡（只存在你這個瀏覽器，不受 72 小時限制）。';
+      box.innerHTML = ''; return;
+    }
+    note.appendChild(D.createTextNode('共收藏 ' + list.length + ' 則（只存在你這個瀏覽器）'));
+    var clr = mk('span', 'fav-clear', '清除全部'); clr.setAttribute('data-clear', '1'); note.appendChild(clr);
+    box.innerHTML = '';
+    list.forEach(function(f){
+      var c = mk('div', 'favc'), b = mk('div', 'cb');
+      var a = mk('a', 'ct', f.t); a.href = f.u; a.target = '_blank'; a.rel = 'noopener';
+      var m = mk('div', 'cm');
+      if (f.b) m.appendChild(mk('span', 'bd ' + (f.b.indexOf('利多') === 0 ? 'bd-b' : (f.b.indexOf('利空') === 0 ? 'bd-d' : 'bd-n')), f.b));
+      m.appendChild(mk('span', '', f.s));
+      if (f.p) m.appendChild(mk('span', '', '· ' + rel(f.p)));
+      var x = mk('span', 'fav on', '★'); x.setAttribute('data-rm', f.u); x.title = '取消收藏';
+      m.appendChild(x); b.appendChild(a); b.appendChild(m); c.appendChild(b); box.appendChild(c);
+    });
+  }
   function onClick(e){
+    var tg = e.target, cl = function(sel){ return tg && tg.closest ? tg.closest(sel) : null; };
+    var fv = cl('.card .fav');
+    if (fv) { e.preventDefault(); e.stopPropagation(); toggleFav(fv.closest('.card')); return; }
+    var rm = cl('[data-rm]');
+    if (rm) { e.preventDefault(); removeFav(rm.getAttribute('data-rm')); return; }
+    if (cl('[data-clear]')) {
+      e.preventDefault();
+      if (P.confirm('確定清除全部收藏？')) { saveFavs([]); markFav(); buildFav(); }
+      return;
+    }
     var a = e.target.closest ? e.target.closest('a[href^="http"]') : null;
     var clr = e.target.closest ? e.target.closest('.fn-reco-clear') : null;
     if (clr) {
@@ -1322,11 +1640,11 @@ _READ_JS = """
     setTimeout(buildReco, 400);
   }
   var t = null;
-  var obs = new MutationObserver(function(){ clearTimeout(t); t = setTimeout(function(){ markRead(); buildReco(); }, 200); });
+  var obs = new MutationObserver(function(){ clearTimeout(t); t = setTimeout(function(){ markRead(); buildReco(); markFav(); buildFav(); syncWl(); }, 200); });
   obs.observe(D.body, {childList: true, subtree: true});
   D.addEventListener('click', onClick, true);
   P.__fnCleanup = function(){ obs.disconnect(); D.removeEventListener('click', onClick, true); };
-  markRead(); buildReco();
+  markRead(); buildReco(); markFav(); buildFav();
 })();
 </script>
 """
