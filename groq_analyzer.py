@@ -349,6 +349,44 @@ def groq_analyze(
     return None
 
 
+# ── AI 專區：技術新聞摘要（不談股價）───────────────────────────────────────────
+def _build_tech_prompt(title: str, summary: str) -> str:
+    return f"""你是一位科技新聞編輯，專門整理 AI 產業動態給中文讀者。
+
+新聞標題：{title}
+新聞摘要：{summary[:400] if summary else "（無摘要）"}
+
+請用繁體中文（台灣用語）回答，只輸出以下 JSON，不要有任何其他文字：
+
+{{
+  "summary": "40至60字：說明發生了什麼事、為什麼值得注意（新模型/新功能/新晶片/政策/合作等），不要談股價或投資建議",
+  "topic": "主題標籤，8字內，如：大型語言模型、AI晶片、中國AI、開源模型、AI監管、AI應用"
+}}"""
+
+
+def groq_tech_summary(title: str, summary: str = "", api_key: str = "") -> Optional[dict]:
+    """AI 專區用：產生技術重點摘要。回傳與 groq_analyze 相同欄位（情緒固定中性）；失敗回 None。"""
+    if _is_rate_limited():
+        return None
+    try:
+        raw = groq_chat(_build_tech_prompt(title, summary), api_key, max_tokens=900, timeout=40)
+        d = parse_json_loose(raw)
+        if not isinstance(d, dict) or not str(d.get("summary", "")).strip():
+            logger.warning("Groq 技術摘要格式不符")
+            return None
+        logger.info(f"Groq 技術摘要完成：{title[:30]}…")
+        time.sleep(1 if len(_all_keys(api_key)) > 1 else 2)
+        return {"sentiment": "neutral", "score": 0.0, "summary": str(d["summary"]).strip(),
+                "affected_tickers": [], "reason": str(d.get("topic", "")).strip()[:20],
+                "confidence": "medium"}
+    except requests.exceptions.HTTPError as e:
+        if e.response is not None and e.response.status_code == 429:
+            _set_rate_limited()
+    except Exception as e:
+        logger.warning(f"Groq 技術摘要失敗：{type(e).__name__}: {e}")
+    return None
+
+
 # ── 批次分析（帶速率控制）────────────────────────────────────────────────────
 def batch_groq_analyze(
     articles: list[dict],
