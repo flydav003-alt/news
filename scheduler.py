@@ -1,40 +1,39 @@
 """
-scheduler.py — 背景排程模組
-- APScheduler 定時抓取（預設 60 分鐘）
-- 排程只抓文章存庫，不做 AI 分析（use_ai=False），保留 Groq quota 給手動抓取
-- 手動抓取時才做 AI 分析，避免 429 衝突導致重點新聞空白
-- 所有時間顯示台灣時間
-- [修改] should_use_ai 呼叫新增 has_tickers、category 參數
-- [修改] _get_groq_key 加環境變數備援
-- [修改] 排程改為 use_ai=False，interval 預設改為 60 分鐘
+scheduler.py — 抓取流程模組 v3
+
+重大改動：
+  - 不再用 APScheduler 在 Streamlit 裡跑背景排程（Streamlit Cloud 休眠就停，資料庫又放 /tmp 會清空）
+  - 改由 GitHub Actions 定時執行本檔：  python scheduler.py data_out/news.json
+    流程：載入舊 news.json → 抓取 → 關鍵字分析 → AI 分析（挑最重要的前 N 則）
+          → 英文標題翻中文 → 補縮圖 → 存庫 → 匯出 news.json
+  - Streamlit 端只讀 news.json；手動「立即抓取」仍可呼叫 crawl_and_save()
+  - 修正：以前已存在的舊文章也會被送去 AI（浪費 quota），現在只處理「新文章」
+  - 修正：AI 名額改成「挑分數/個股/地緣最重要的」而不是照 RSS 順序先到先用
 """
 
+import json
 import logging
 import os
+import re
+import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
-
-from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.triggers.interval import IntervalTrigger
 
 from analyzer import Analyzer
 from crawler import run_crawl
-from database import SessionLocal, save_article, log_crawl
+from database import (SessionLocal, init_db, save_article, log_crawl,
+                      known_urls, export_json, import_json)
 from groq_analyzer import should_use_ai, groq_analyze, _clear_ai_fields, _is_rate_limited
 
 logger    = logging.getLogger(__name__)
-_sched    = None
 _analyzer = Analyzer()
 TZ_TW     = timezone(timedelta(hours=8))
 
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+
 
 def _get_groq_key() -> str:
-    """
-    取得 Groq API Key。
-    優先從 st.secrets 讀（Streamlit Cloud 正常情況）；
-    若 Streamlit context 不存在（排程背景執行時），
-    退而從環境變數讀（Streamlit Cloud 會把 secrets 注入成環境變數）。
-    """
-    # 第一優先：st.secrets
+    """st.secrets（Streamlit 內）→ 環境變數（GitHub Actions / 排程背景）"""
     try:
         import streamlit as st
         key = st.secrets.get("GROQ_API_KEY", "")
@@ -42,23 +41,54 @@ def _get_groq_key() -> str:
             return key
     except Exception:
         pass
-
-    # 備援：環境變數（排程器背景執行、或 Streamlit reboot 後 session 遺失時）
     return os.environ.get("GROQ_API_KEY", "")
 
 
+# ── 英文標題 → 繁體中文 ───────────────────────────────────────────────────────
+def _needs_translation(title: str) -> bool:
+    letters = sum(c.isascii() and c.isalpha() for c in title)
+    return len(_CJK_RE.findall(title)) < 2 and letters >= 10
+
+
+def _translate_one(title: str) -> str:
+    try:
+        from deep_translator import GoogleTranslator
+        return GoogleTranslator(source="auto", target="zh-TW").translate(title) or ""
+    except Exception as e:
+        logger.debug(f"翻譯失敗：{e}")
+        return ""
+
+
+def translate_titles(items: list[dict], limit: int = 150) -> int:
+    """替英文標題加上 title_zh。失敗就留空（畫面會退回顯示原文）。回傳成功數。"""
+    todo = [it for it in items if _needs_translation(it["title"])][:limit]
+    if not todo:
+        return 0
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        results = list(ex.map(lambda it: _translate_one(it["title"]), todo))
+    n = 0
+    for it, zh in zip(todo, results):
+        if zh and zh != it["title"]:
+            it["title_zh"] = zh
+            n += 1
+    logger.info(f"標題翻譯 {n}/{len(todo)} 則")
+    return n
+
+
+# ── 主流程 ────────────────────────────────────────────────────────────────────
 def crawl_and_save(enabled_names=None,
                    custom_bull=None,
                    custom_bear=None,
                    use_ai: bool = True,
-                   max_ai_per_run: int = 10) -> dict:
+                   max_ai_per_run: int = 10,
+                   fetch_og: bool = False,
+                   translate: bool = True) -> dict:
     """
-    完整流程：抓取 → 關鍵字分析 → AI 分析（選擇性）→ 存庫
+    抓取 → 去除已存在 → 關鍵字分析 → AI 分析（挑最重要的 N 則）→ 翻譯 → 存庫
 
-    max_ai_per_run：每次執行最多送幾則給 Groq（避免單次跑太久 & 耗盡 quota）
-    預設 10 則（每則 ~2 秒 = 共 ~20 秒），為每日總結保留足夠 RPM 餘裕。
-    Groq 免費版 RPM=30，10 則文章用掉 ~10 RPM，總結再用 1 RPM，共 11/30，安全。
-    若需要更多分析可手動傳入 max_ai_per_run=20，但需確認當下 quota 未被耗盡。
+    max_ai_per_run：每次最多送幾則給 Groq。GitHub Actions 每小時一次，預設 8 則較安全，
+                    約 17 次/天 × 8 ≈ 136 次，落在 Groq 免費額度內。
+    fetch_og：缺圖時補抓 og:image（較慢，僅 Actions 開）
     """
     analyzer = Analyzer(
         extra_bullish=custom_bull,
@@ -66,138 +96,138 @@ def crawl_and_save(enabled_names=None,
     ) if (custom_bull or custom_bear) else _analyzer
 
     t0 = datetime.now()
-    articles, logs = run_crawl(enabled_names)
+    db = SessionLocal()
+    try:
+        known = known_urls(db)
+    finally:
+        db.close()
+
+    articles, logs = run_crawl(enabled_names, fetch_og=fetch_og, known_urls=known)
+
+    # 只處理「新」文章（網址不在庫、且同批內不重複）
+    seen, fresh = set(), []
+    for a in articles:
+        u = a.get("url", "")
+        if u in known or u in seen:
+            continue
+        seen.add(u)
+        fresh.append(a)
 
     saved = skipped = ai_count = 0
     groq_key = _get_groq_key() if use_ai else ""
 
-    if use_ai:
-        if groq_key:
-            logger.info("Groq key 取得成功，AI 分析已啟用")
-        else:
-            logger.warning("use_ai=True 但 Groq key 為空，AI 分析將跳過")
+    # ── Step 1：關鍵字分析（全部新文章）────────────────────────
+    for item in fresh:
+        r = analyzer.analyze(item["title"], item.get("summary", ""),
+                             item.get("language", "zh"))
+        item.update({
+            "sentiment":       r.sentiment,
+            "sentiment_score": r.sentiment_score,
+            "sentiment_label": r.sentiment_label,
+            "tickers":         r.tickers,
+            "ticker_details":  r.ticker_details,
+            "sectors":         r.sectors,
+            "is_geo":          r.is_geo,
+        })
+        _clear_ai_fields(item)
+        item.setdefault("title_zh", "")
 
+    # ── Step 2：AI 分析（挑最重要的前 N 則）────────────────────
+    if use_ai and groq_key and not _is_rate_limited():
+        cands = [
+            it for it in fresh
+            if should_use_ai(it["sentiment_score"], it["title"], it["is_geo"],
+                             bool(it["tickers"]), it.get("category", ""))
+        ]
+        # 優先序：地緣 > 有個股 > 情緒強度；同分者較新的優先
+        cands.sort(key=lambda it: (it["is_geo"], bool(it["tickers"]),
+                                   abs(it["sentiment_score"]),
+                                   it["published_at"].timestamp()), reverse=True)
+        for it in cands[:max_ai_per_run]:
+            if _is_rate_limited():
+                break
+            ai = groq_analyze(it["title"], it.get("summary", ""),
+                              it.get("category", "財經"), groq_key)
+            if ai:
+                it["ai_sentiment"]        = ai["sentiment"]
+                it["ai_score"]            = ai["score"]
+                it["ai_summary"]          = ai["summary"]
+                it["ai_affected_tickers"] = ",".join(ai.get("affected_tickers", []))
+                it["ai_reason"]           = ai["reason"]
+                it["ai_confidence"]       = ai["confidence"]
+                ai_count += 1
+    elif use_ai and not groq_key:
+        logger.warning("use_ai=True 但 Groq key 為空，AI 分析將跳過")
+
+    # ── Step 3：英文標題翻譯 ───────────────────────────────────
+    tr_count = translate_titles(fresh) if translate else 0
+
+    # ── Step 4：存庫 ───────────────────────────────────────────
     db = SessionLocal()
     try:
-        for item in articles:
-            # ── Step 1：關鍵字分析 ─────────────────────────────
-            r = analyzer.analyze(
-                item["title"],
-                item.get("summary", ""),
-                item.get("language", "zh"),
-            )
-            item.update({
-                "sentiment":       r.sentiment,
-                "sentiment_score": r.sentiment_score,
-                "sentiment_label": r.sentiment_label,
-                "tickers":         r.tickers,
-                "ticker_details":  r.ticker_details,
-                "sectors":         r.sectors,
-                "is_geo":          r.is_geo,
-            })
-
-            # ── Step 2：AI 分析（條件觸發 + 每批上限 + 熔斷檢查）──
-            has_tickers = bool(r.tickers)
-            can_use_ai  = (
-                groq_key
-                and not _is_rate_limited()             # 熔斷中直接跳過整批
-                and ai_count < max_ai_per_run          # 每批上限
-                and should_use_ai(
-                    r.sentiment_score, item["title"], r.is_geo, has_tickers,
-                    item.get("category", ""),          # [修改] 傳入 category 供非財經過濾
-                )
-            )
-            if can_use_ai:
-                ai = groq_analyze(
-                    title    = item["title"],
-                    summary  = item.get("summary", ""),
-                    category = item.get("category", "財經"),
-                    api_key  = groq_key,
-                )
-                if ai:
-                    item["ai_sentiment"]        = ai["sentiment"]
-                    item["ai_score"]            = ai["score"]
-                    item["ai_summary"]          = ai["summary"]
-                    item["ai_affected_tickers"] = ",".join(
-                        ai.get("affected_tickers", []))
-                    item["ai_reason"]           = ai["reason"]
-                    item["ai_confidence"]       = ai["confidence"]
-                    ai_count += 1
-                    # 429 速率限制時 groq_analyze 內部已 sleep(5)，這裡不再額外等待
-                else:
-                    _clear_ai_fields(item)
-            else:
-                _clear_ai_fields(item)
-
-            # ── Step 3：存庫 ───────────────────────────────────
+        for item in fresh:
             if save_article(db, item):
                 saved += 1
             else:
                 skipped += 1
-
         for lg in logs:
-            log_crawl(db,
-                      source    = lg["source"],
-                      status    = lg["status"],
-                      count     = lg["count"],
-                      new_saved = saved,
-                      skipped   = skipped)
-
-        logger.info(
-            f"完成：抓取 {len(articles)} 則，新增 {saved}，跳過 {skipped}，AI 分析 {ai_count} 則"
-        )
-
+            log_crawl(db, source=lg["source"], status=lg["status"],
+                      count=lg["count"], new_saved=0, skipped=0)
+        logger.info(f"完成：抓取 {len(articles)}、新文章 {len(fresh)}、新增 {saved}、"
+                    f"去重 {skipped}、AI {ai_count}、翻譯 {tr_count}")
     except Exception as e:
         logger.error(f"存庫失敗：{e}")
     finally:
         db.close()
 
-    elapsed = (datetime.now() - t0).seconds
-    tw_time = datetime.now(TZ_TW).strftime("%H:%M:%S")
-
     return {
         "total":    len(articles),
         "saved":    saved,
-        "skipped":  skipped,
+        "skipped":  skipped + (len(articles) - len(fresh)),
         "ai_count": ai_count,
-        "elapsed":  elapsed,
-        "time":     tw_time,
+        "translated": tr_count,
+        "elapsed":  (datetime.now() - t0).seconds,
+        "time":     datetime.now(TZ_TW).strftime("%H:%M:%S"),
         "logs":     logs,
     }
 
 
-def start_scheduler(interval_minutes: int = 60) -> None:
-    global _sched
-    if _sched and _sched.running:
-        return
-    _sched = BackgroundScheduler(timezone="Asia/Taipei")
-    _sched.add_job(
-        crawl_and_save,
-        trigger            = IntervalTrigger(minutes=interval_minutes),
-        id                 = "news_crawl",
-        replace_existing   = True,
-        misfire_grace_time = 120,
-        kwargs             = {"use_ai": False},   # 排程只抓文章不做AI，保留quota給手動抓取
-    )
-    _sched.start()
-    logger.info(f"排程啟動，每 {interval_minutes} 分鐘抓取一次（AI 分析保留給手動觸發）")
+# ── GitHub Actions 入口 ───────────────────────────────────────────────────────
+def run_job(json_path: str, max_ai: int = 8) -> None:
+    init_db()
+
+    # 1) 載入上次的 news.json，保留歷史並供去重
+    if os.path.exists(json_path):
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            db = SessionLocal()
+            try:
+                n = import_json(db, payload)
+            finally:
+                db.close()
+            logger.info(f"載入舊資料 {n} 則")
+        except Exception as e:
+            logger.error(f"讀取舊 news.json 失敗（當作空資料）：{e}")
+
+    # 2) 抓取 + 分析 + 翻譯 + 補圖
+    result = crawl_and_save(use_ai=True, max_ai_per_run=max_ai,
+                            fetch_og=True, translate=True)
+    logger.info(f"本次結果：{ {k: v for k, v in result.items() if k != 'logs'} }")
+    for lg in result["logs"]:
+        logger.info(f"  來源 {lg['source']}: {lg['status']} ({lg['count']})")
+
+    # 3) 匯出（保留 72 小時）
+    db = SessionLocal()
+    try:
+        total = export_json(db, json_path, keep_hours=72)
+    finally:
+        db.close()
+    logger.info(f"已輸出 {json_path}（{total} 則）")
 
 
-def update_interval(minutes: int) -> None:
-    global _sched
-    if _sched and _sched.running:
-        _sched.reschedule_job(
-            "news_crawl",
-            trigger = IntervalTrigger(minutes=minutes),
-            kwargs  = {"use_ai": False},   # 排程永遠不做AI，quota 保留給手動抓取
-        )
-
-
-def next_run_time() -> str:
-    global _sched
-    if _sched and _sched.running:
-        job = _sched.get_job("news_crawl")
-        if job and job.next_run_time:
-            tw = job.next_run_time.astimezone(TZ_TW)
-            return tw.strftime("%H:%M:%S")
-    return "—"
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    out = sys.argv[1] if len(sys.argv) > 1 else "data_out/news.json"
+    run_job(out, max_ai=int(os.environ.get("MAX_AI", "8")))
