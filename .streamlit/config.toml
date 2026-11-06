@@ -1,9 +1,10 @@
+Config · TOML
 [theme]
-primaryColor         = "#534AB7"
-backgroundColor      = "#FFFFFF"
-secondaryBackgroundColor = "#F7F7F7"
-textColor            = "#1A1A1A"
-font                 = "sans serif"
+base = "light"
+backgroundColor = "#FCF8F0"
+secondaryBackgroundColor = "#F5EEDF"
+textColor = "#2B2418"
+primaryColor = "#B8742A"
 
 [server]
 headless   = true
