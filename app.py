@@ -7,6 +7,7 @@ import html as _html
 import json
 import logging
 import os
+import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -177,8 +178,14 @@ hr{border-color:var(--line)!important;margin:10px 0!important}
 /* 卡片網格 */
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:14px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden;display:flex;flex-direction:column;transition:box-shadow .15s,transform .15s}
-.card:hover{box-shadow:0 6px 18px rgba(80,60,20,.12);transform:translateY(-2px)}
+.card{box-shadow:0 1px 3px rgba(80,60,20,.06)}
+.card:hover{box-shadow:0 8px 22px rgba(80,60,20,.14);transform:translateY(-2px)}
 .card .thumb{height:150px;display:block}
+.strip{height:30px;display:flex;align-items:center;padding:0 13px;font-size:11.5px;font-weight:700;color:rgba(255,255,255,.95);letter-spacing:.5px}
+.grid{align-items:start}
+.seg{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 16px}
+.subhead{font-size:12.5px;color:var(--tx2);margin:2px 0 8px}
+.ph{font-size:20px}
 .card.bull{border-top:3px solid var(--up)} .card.bear{border-top:3px solid var(--dn)}
 .cb{padding:11px 13px 12px;display:flex;flex-direction:column;gap:6px;flex:1}
 .ct{font-size:14.5px;font-weight:700;line-height:1.5;color:var(--tx)!important;text-decoration:none!important;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
@@ -269,7 +276,24 @@ def load_all():
         db.close()
 
 
-df_all = load_all()
+LIFE_CATS = ("運動", "娛樂", "電玩")
+
+
+def clean_images(df):
+    """同一張圖出現 3 次以上＝網站 logo / 預設圖，當作沒圖；明顯是 logo/icon 的網址也清掉"""
+    if df is None or df.empty or "image_url" not in df.columns:
+        return df
+    df = df.copy()
+    img = df["image_url"].fillna("").astype(str)
+    vc = img[img != ""].value_counts()
+    bad = set(vc[vc >= 3].index)
+    low = img.str.lower()
+    mask = img.isin(bad) | low.str.contains(r"logo|favicon|icon|placeholder|default[-_]?(?:image|img)|/ads/", regex=True)
+    df.loc[mask, "image_url"] = ""
+    return df
+
+
+df_all = clean_images(load_all())
 
 # 保險：資料庫是空的（第一次部署 / Actions 還沒跑過）→ 自動抓一次，不讓畫面空白
 if df_all.empty and not st.session_state.get("auto_crawled"):
@@ -277,7 +301,7 @@ if df_all.empty and not st.session_state.get("auto_crawled"):
     with st.spinner("資料庫是空的，正在自動抓取第一批新聞（約 30 秒）…"):
         crawl_and_save(enabled_names=st.session_state["enabled_srcs"], use_ai=False)
     st.cache_data.clear()
-    df_all = load_all()
+    df_all = clean_images(load_all())
 
 
 # ─────────────────────────────────────────────
@@ -340,6 +364,10 @@ SECTOR_GRAD = {
 }
 
 
+CAT_GRAD = {"AI": ("#2E86DE", "#6C5CE7"), "運動": ("#27AE60", "#16A0A8"), "娛樂": ("#D35D8C", "#E8A0BF"),
+            "電玩": ("#6C5CE7", "#A29BFE"), "科技": ("#4A6FA5", "#7C9BC9"), "國際": ("#8C7B63", "#B3A48C")}
+
+
 def _first_sector(row) -> str:
     for s in str(row.get("sectors", "") or "").split(","):
         if s.strip():
@@ -353,7 +381,8 @@ def _css_url(u: str) -> str:
 
 def thumb_html(row, extra_cls="") -> str:
     sec = _first_sector(row)
-    g1, g2 = SECTOR_GRAD.get(sec, ("#B9A988", "#D8C8A6"))
+    cat0 = str(row.get("category", "") or "")
+    g1, g2 = SECTOR_GRAD.get(sec) or CAT_GRAD.get(cat0) or ("#B9A988", "#D8C8A6")
     traw = str(row.get("ai_affected_tickers", "") or row.get("tickers", "") or "")
     first_tk = next((t.strip() for t in traw.split(",") if t.strip()), "")
     ph = first_tk or sec or str(row.get("category", "") or "NEWS")
@@ -362,6 +391,21 @@ def thumb_html(row, extra_cls="") -> str:
                if img.startswith("http") else "")
     return (f'<div class="thumb {extra_cls}" style="background:linear-gradient(135deg,{g1},{g2})">'
             f'<span class="ph">{esc(ph)}</span>{img_tag}</div>')
+
+
+CAT_ICON = {"AI": "🤖", "運動": "⚽", "娛樂": "🎬", "電玩": "🎮", "科技": "💡", "國際": "🌐", "財經": "💹"}
+
+
+def strip_html(row) -> str:
+    """沒有縮圖時用「細色帶 + 標籤」取代大塊空白漸層"""
+    sec = _first_sector(row)
+    cat = str(row.get("category", "") or "")
+    g1, g2 = SECTOR_GRAD.get(sec) or CAT_GRAD.get(cat) or ("#B9A988", "#D8C8A6")
+    traw = str(row.get("ai_affected_tickers", "") or row.get("tickers", "") or "")
+    first_tk = next((t.strip() for t in traw.split(",") if t.strip()), "")
+    label = " · ".join(x for x in (CAT_ICON.get(cat, "") + " " + cat if cat else "", sec, first_tk) if x.strip())
+    return (f'<div class="strip" style="background:linear-gradient(90deg,{g1},{g2})">'
+            f'<span>{esc(label.strip() or "NEWS")}</span></div>')
 
 
 def eff_sent(row):
@@ -420,11 +464,12 @@ def card_html(row) -> str:
     href = esc(url, quote=True) if url else "#"
     summ = str(row.get("ai_summary", "") or "")
     geo = '<span class="bd bd-g">⚑ 地緣</span>' if row.get("is_geo") else ""
+    has_img = str(row.get("image_url", "") or "").startswith("http")
     orig_h = f'<div class="co">{esc(orig)}</div>' if orig else ""
     summ_h = f'<div class="cs">✦ {esc(summ)}</div>' if summ else ""
     return _h(f"""
     <div class="card {cls}">
-      <a href="{href}" target="_blank" rel="noopener">{thumb_html(row)}</a>
+      <a href="{href}" target="_blank" rel="noopener">{thumb_html(row) if has_img else strip_html(row)}</a>
       <div class="cb">
         <a class="ct" href="{href}" target="_blank" rel="noopener">{esc(main)}</a>
         {orig_h}{summ_h}
@@ -447,7 +492,7 @@ def render_grid(df, max_items=60):
 def hero_html(df) -> str:
     d = df.copy()
     d["_rank"] = (d["importance_score"].fillna(0)
-                  + (d["image_url"].fillna("") != "").astype(float) * 1.5
+                  + (d["image_url"].fillna("") != "").astype(float) * 4.0
                   + d["published_at"].apply(lambda x: max(0.0, 2 - age_hours(x) / 6)))
     d = d.sort_values("_rank", ascending=False)
     main = d.iloc[0]
@@ -522,21 +567,14 @@ def get_daily_ai_summary(ai_news_df):
   "key_tickers": ["2330", "NVDA"],
   "summary": "一段客觀總結（60至100字，財經播報員語氣）"
 }}"""
+    from groq_analyzer import groq_chat, parse_json_loose
     for attempt in range(2):
         try:
-            resp = requests.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={"Authorization": f"Bearer {groq_key}", "Content-Type": "application/json"},
-                json={"model": "llama-3.3-70b-versatile",
-                      "messages": [{"role": "user", "content": prompt}],
-                      "max_tokens": 600, "temperature": 0.2}, timeout=20)
-            resp.raise_for_status()
-            raw = resp.json()["choices"][0]["message"]["content"].strip()
-            if "```" in raw:
-                raw = raw.split("```")[1]
-                if raw.startswith("json"):
-                    raw = raw[4:]
-            return json.loads(raw.strip()), ""
+            raw = groq_chat(prompt, groq_key, max_tokens=1500, temperature=0.2, timeout=45)
+            data = parse_json_loose(raw)
+            if isinstance(data, dict):
+                return data, ""
+            return "", "AI 回傳格式不是 JSON 物件，請按重試"
         except requests.exceptions.HTTPError as e:
             status = e.response.status_code if e.response is not None else 0
             if status == 429:
@@ -545,7 +583,16 @@ def get_daily_ai_summary(ai_news_df):
                     time.sleep(5)
                     continue
                 return "", "Groq 速率限制（429），請稍後點「重新生成」"
-            return "", f"Groq HTTP {status}"
+            body = ""
+            try:
+                body = e.response.text[:120]
+            except Exception:
+                pass
+            return "", f"Groq HTTP {status}：{body}"
+        except json.JSONDecodeError:
+            if attempt == 0:
+                continue
+            return "", "AI 回傳內容無法解析，請按重試"
         except Exception as e:
             return "", f"生成失敗：{type(e).__name__}: {e}"
     return "", "多次重試後仍失敗"
@@ -595,7 +642,8 @@ qs = fetch_quotes()
 if qs:
     st.markdown(quotes_html(qs), unsafe_allow_html=True)
 
-tab_home, tab_deep, tab_cfg = st.tabs(["📰 今日新聞", "🔍 深度篩選", "⚙️ 設定"])
+tab_home, tab_ai, tab_life, tab_deep, tab_cfg = st.tabs(
+    ["📰 今日新聞", "🤖 AI 專區", "🎮 生活", "🔍 深度篩選", "⚙️ 設定"])
 
 # ═══════════════════════════════════════════════
 # TAB 1：今日新聞
@@ -604,7 +652,8 @@ with tab_home:
     if df_all.empty:
         st.markdown('<div class="empty">📭 還沒有任何新聞，請按右上角「立即抓取」</div>', unsafe_allow_html=True)
     else:
-        df_r, used_h = recent(df_all)
+        df_fin = df_all[~df_all["category"].isin(LIFE_CATS + ("AI",))]
+        df_r, used_h = recent(df_fin if not df_fin.empty else df_all)
         if used_h > 12:
             st.caption(f"ℹ️ 12 小時內新聞太少，已自動放寬到 {used_h} 小時")
 
@@ -730,6 +779,124 @@ with tab_home:
             if st.button(f"顯示更多（+24）", key="more"):
                 st.session_state["n_show"] += 24
                 st.rerun()
+
+
+# ═══════════════════════════════════════════════
+# TAB：AI 專區（美國 / 中國 / 台灣供應鏈）
+# ═══════════════════════════════════════════════
+AI_SEGMENTS = [
+    ("🧠 AI 晶片／GPU",   ["nvidia", "輝達", "amd", "超微", "gpu", "blackwell", "rubin", "chip", "晶片", "broadcom", "博通"]),
+    ("🏭 晶圓代工／封裝",  ["tsmc", "台積電", "cowos", "hbm", "先進封裝", "foundry", "samsung", "sk hynix", "micron", "美光", "asml"]),
+    ("🖥️ 伺服器／ODM",    ["server", "伺服器", "廣達", "緯創", "鴻海", "foxconn", "supermicro", "dell", "wiwynn", "緯穎"]),
+    ("☁️ 雲端大廠／資料中心", ["microsoft", "google", "amazon", "aws", "meta", "oracle", "data center", "資料中心", "capex", "azure"]),
+    ("💬 模型／應用",      ["openai", "anthropic", "claude", "chatgpt", "gemini", "llama", "grok", "model", "模型", "agent"]),
+    ("🇨🇳 中國 AI",        ["deepseek", "alibaba", "qwen", "huawei", "ascend", "baidu", "tencent", "moonshot", "kimi", "china", "中國", "大陸"]),
+    ("🛡️ 管制／政策",      ["export control", "export", "tariff", "ban", "restriction", "sanction", "出口管制", "關稅", "禁令", "制裁"]),
+    ("⚡ 電力／散熱",      ["power", "electricity", "cooling", "liquid", "散熱", "液冷", "電力", "nuclear", "核電"]),
+]
+CN_SRC = {"GN-中國AI", "SCMP Tech"}
+
+
+def _blob(df):
+    return (df["title"].fillna("") + " " + df["title_zh"].fillna("") + " " + df["summary"].fillna("")).str.lower()
+
+
+with tab_ai:
+    ai_zone = df_all[df_all["category"] == "AI"]
+    tw_chain = df_all[(df_all["category"] != "AI") & df_all["sectors"].fillna("").str.contains("AI|伺服器|半導體", regex=True)]
+    if ai_zone.empty and tw_chain.empty:
+        st.markdown('<div class="empty">🤖 AI 專區還沒有資料。等下一次 GitHub Actions 抓取（新來源會在下一輪出現），'
+                    '或按右上角「立即抓取」。</div>', unsafe_allow_html=True)
+    else:
+        pool = pd.concat([ai_zone, tw_chain]).drop_duplicates(subset=["url"])
+        pool, hrs = recent(pool, hours_steps=(24, 48, 72, 168), min_n=10)
+        region = st.radio("地區", ["🌐 全部", "🇺🇸 美國／全球", "🇨🇳 中國", "🇹🇼 台灣供應鏈"], horizontal=True,
+                          label_visibility="collapsed", key="ai_region")
+        if region == "🇺🇸 美國／全球":
+            view = pool[(pool["category"] == "AI") & ~pool["source"].isin(CN_SRC)]
+        elif region == "🇨🇳 中國":
+            blob = _blob(pool)
+            cn_kw = "deepseek|alibaba|qwen|huawei|ascend|baidu|tencent|moonshot|kimi|china|chinese|中國|大陸"
+            view = pool[pool["source"].isin(CN_SRC) | ((pool["category"] == "AI") & blob.str.contains(cn_kw, regex=True))]
+        elif region == "🇹🇼 台灣供應鏈":
+            view = pool[pool["category"] != "AI"]
+        else:
+            view = pool
+        if view.empty:
+            view = pool
+
+        effs_ai = view.apply(lambda r: eff_sent(r)[0], axis=1)
+        b_n, d_n = int((effs_ai == "bullish").sum()), int((effs_ai == "bearish").sum())
+        st.markdown(_h(f"""
+        <div class="mrow">
+          <div class="m"><div class="m-l">🤖 AI 新聞</div><div class="m-v">{len(view)}</div></div>
+          <div class="m"><div class="m-l">📈 利多</div><div class="m-v up">{b_n}</div></div>
+          <div class="m"><div class="m-l">📉 利空</div><div class="m-v dn">{d_n}</div></div>
+          <div class="m"><div class="m-l">🇺🇸 美國</div><div class="m-v">{int(((pool['category'] == 'AI') & ~pool['source'].isin(CN_SRC)).sum())}</div></div>
+          <div class="m"><div class="m-l">🇨🇳 中國</div><div class="m-v">{int(pool['source'].isin(CN_SRC).sum())}</div></div>
+        </div>"""), unsafe_allow_html=True)
+        if hrs > 24:
+            st.caption(f"ℹ️ 近 24 小時 AI 新聞較少，已放寬到 {hrs} 小時")
+
+        st.markdown('<div class="sec">🔥 AI 頭條</div>', unsafe_allow_html=True)
+        st.markdown(hero_html(view), unsafe_allow_html=True)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown('<div class="sec">🧬 產業鏈熱度（提及篇數）</div>', unsafe_allow_html=True)
+            blob = _blob(pool)
+            segs = []
+            for name, kws in AI_SEGMENTS:
+                pat = "|".join(re.escape(k) for k in kws)
+                m = blob.str.contains(pat, regex=True)
+                n = int(m.sum())
+                if n:
+                    e = pool[m].apply(lambda r: eff_sent(r)[0], axis=1)
+                    segs.append((name, float(n), "#B8742A",
+                                 f"{n} 篇 ↑{int((e == 'bullish').sum())}↓{int((e == 'bearish').sum())}"))
+            segs.sort(key=lambda x: -x[1])
+            st.markdown(f'<div class="seg">{hbars(segs)}</div>' if segs else '<div class="empty">資料不足</div>',
+                        unsafe_allow_html=True)
+            st.caption("↑利多篇數 ↓利空篇數（關鍵字＋AI 判斷）；一篇文章可能同時屬於多個環節")
+        with c2:
+            st.markdown('<div class="sec">🎯 被點名最多的股票</div>', unsafe_allow_html=True)
+            cnt = {}
+            for _, r in pool.iterrows():
+                for t in str(r.get("ai_affected_tickers", "") or r.get("tickers", "") or "").split(","):
+                    t = t.strip()
+                    if t:
+                        cnt[t] = cnt.get(t, 0) + 1
+            top = sorted(cnt.items(), key=lambda x: -x[1])[:8]
+            st.markdown(f'<div class="seg">{hbars([(k, float(v), "#2E86DE", f"{v} 篇") for k, v in top])}</div>'
+                        if top else '<div class="empty">還沒有個股被點名</div>', unsafe_allow_html=True)
+
+        st.markdown('<div class="sec">📋 AI 新聞</div>', unsafe_allow_html=True)
+        n_ai = st.session_state.setdefault("n_ai", 18)
+        render_grid(view.sort_values("published_at", ascending=False), max_items=n_ai)
+        if len(view) > n_ai and st.button("顯示更多（+18）", key="more_ai"):
+            st.session_state["n_ai"] += 18
+            st.rerun()
+
+
+# ═══════════════════════════════════════════════
+# TAB：生活（運動／娛樂／電玩）— 輕量，不做股市判斷
+# ═══════════════════════════════════════════════
+with tab_life:
+    life = df_all[df_all["category"].isin(LIFE_CATS)]
+    if life.empty:
+        st.markdown('<div class="empty">🎮 生活區還沒有資料，等下一次自動抓取就會出現。</div>', unsafe_allow_html=True)
+    else:
+        sub = st.radio("類別", ["全部", "⚽ 運動", "🎬 娛樂", "🎮 電玩"], horizontal=True,
+                       label_visibility="collapsed", key="life_cat")
+        if sub != "全部":
+            life = life[life["category"] == sub.split(" ")[1]]
+        life, lh = recent(life, hours_steps=(24, 48, 72, 168), min_n=6)
+        st.caption(f"共 {len(life)} 則（只保留精華，每個來源 8～12 則）")
+        n_life = st.session_state.setdefault("n_life", 18)
+        render_grid(life.sort_values("published_at", ascending=False), max_items=n_life)
+        if len(life) > n_life and st.button("顯示更多（+18）", key="more_life"):
+            st.session_state["n_life"] += 18
+            st.rerun()
 
 
 # ═══════════════════════════════════════════════
