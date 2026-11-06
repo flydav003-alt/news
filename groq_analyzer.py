@@ -8,6 +8,8 @@ groq_analyzer.py — Groq AI 深度分析模組
 
 import json
 import logging
+import os
+import re
 import time
 from datetime import datetime, timezone
 from typing import Optional
@@ -17,8 +19,10 @@ import requests
 logger = logging.getLogger(__name__)
 
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-MODEL        = "llama-3.3-70b-versatile"
-MAX_TOKENS   = 400
+# [修改] llama-3.3-70b-versatile 已於 2026/8/16 被 Groq 下架（呼叫會 404）。
+# 改用 openai/gpt-oss-120b；之後再換模型只要設環境變數 GROQ_MODEL，不用改程式。
+MODEL        = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
+MAX_TOKENS   = 1200          # gpt-oss 是推理模型，要留空間給思考，不然 content 會是空的
 TEMPERATURE  = 0.1
 
 # ── 全域熔斷器：429 後封鎖整批，冷卻 90 秒後才恢復 ──────────────────────────
@@ -35,6 +39,72 @@ def _set_rate_limited() -> None:
     global _rate_limit_until
     _rate_limit_until = time.time() + COOLDOWN_SECONDS
     logger.warning(f"Groq 429：啟動熔斷，冷卻 {COOLDOWN_SECONDS} 秒後恢復")
+
+
+def groq_chat(prompt: str, api_key: str, max_tokens: int = MAX_TOKENS,
+              temperature: float = TEMPERATURE, timeout: int = 40) -> str:
+    """呼叫 Groq，回傳模型文字。HTTP 錯誤會原樣拋出 requests.HTTPError，由呼叫端處理。"""
+    payload = {
+        "model":       MODEL,
+        "messages":    [{"role": "user", "content": prompt}],
+        "max_tokens":  max_tokens,
+        "temperature": temperature,
+    }
+    if "gpt-oss" in MODEL:
+        payload["reasoning_effort"] = "low"     # 新聞分類不需要長思考，省 token 又快
+    resp = requests.post(
+        GROQ_API_URL,
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json=payload, timeout=timeout,
+    )
+    if not resp.ok:
+        logger.error(f"Groq HTTP {resp.status_code}（model={MODEL}）：{resp.text[:300]}")
+    resp.raise_for_status()
+    msg = resp.json()["choices"][0]["message"]
+    return (msg.get("content") or "").strip()
+
+
+def parse_json_loose(raw: str):
+    """從模型輸出裡撈出第一個 JSON 物件或陣列（容忍 ```json 包裝與前後廢話）"""
+    raw = (raw or "").strip()
+    if not raw:
+        raise json.JSONDecodeError("empty", raw, 0)
+    for opener, closer in (("{", "}"), ("[", "]")):
+        i, j = raw.find(opener), raw.rfind(closer)
+        if i != -1 and j > i:
+            try:
+                return json.loads(raw[i:j + 1])
+            except json.JSONDecodeError:
+                continue
+    return json.loads(raw)
+
+
+def groq_translate_titles(titles: list[str], api_key: str) -> list[str]:
+    """
+    一次翻譯一批英文財經標題成繁體中文（台灣財經用語）。
+    成功回傳與輸入等長的 list；任何失敗回傳空 list（呼叫端改走備援）。
+    """
+    if not titles or _is_rate_limited():
+        return []
+    numbered = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(titles))
+    prompt = (
+        "把下列英文財經新聞標題翻成繁體中文（台灣用語），公司名用台灣通用譯名"
+        "（如 Nvidia→輝達、Tesla→特斯拉），股票代號、數字、單位保持原樣，語氣簡潔像新聞標題。\n"
+        "只輸出一個 JSON 陣列，長度必須恰好是 "
+        f"{len(titles)}，依序對應，不要有任何其他文字。\n\n{numbered}"
+    )
+    try:
+        out = parse_json_loose(groq_chat(prompt, api_key, max_tokens=2500, temperature=0.0, timeout=60))
+        if isinstance(out, list) and len(out) == len(titles) and all(isinstance(x, str) for x in out):
+            time.sleep(2)
+            return [x.strip() for x in out]
+        logger.warning(f"Groq 翻譯回傳格式不符（期望 {len(titles)} 筆）")
+    except requests.exceptions.HTTPError as e:
+        if e.response is not None and e.response.status_code == 429:
+            _set_rate_limited()
+    except Exception as e:
+        logger.warning(f"Groq 翻譯失敗：{type(e).__name__}: {e}")
+    return []
 
 
 # ── 觸發條件判斷 ──────────────────────────────────────────────────────────────
