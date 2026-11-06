@@ -794,7 +794,8 @@ AI_SEGMENTS = [
     ("🛡️ 管制／政策",      ["export control", "export", "tariff", "ban", "restriction", "sanction", "出口管制", "關稅", "禁令", "制裁"]),
     ("⚡ 電力／散熱",      ["power", "electricity", "cooling", "liquid", "散熱", "液冷", "電力", "nuclear", "核電"]),
 ]
-CN_SRC = {"GN-中國AI", "SCMP Tech"}
+CN_SRC = {"GN-中國AI", "SCMP Tech", "GN-大陸AI模型"}
+STOCK_RE = r"stock|shares|\bsell|investor|etf|earnings|market cap|valuation|wall street|nasdaq|s&p|股|美股|財報|市值|估值|漲|跌|買進|賣出|投資人|營收"
 
 
 def _blob(df):
@@ -810,9 +811,12 @@ with tab_ai:
     else:
         pool = pd.concat([ai_zone, tw_chain]).drop_duplicates(subset=["url"])
         pool, hrs = recent(pool, hours_steps=(24, 48, 72, 168), min_n=10)
-        region = st.radio("地區", ["🌐 全部", "🇺🇸 美國／全球", "🇨🇳 中國", "🇹🇼 台灣供應鏈"], horizontal=True,
+        region = st.radio("地區", ["🧪 模型與技術", "🇺🇸 美國／全球", "🇨🇳 中國", "🇹🇼 台灣供應鏈", "🌐 全部"], horizontal=True,
                           label_visibility="collapsed", key="ai_region")
-        if region == "🇺🇸 美國／全球":
+        if region == "🧪 模型與技術":
+            # 只留「產品／模型／技術」：排除標題或摘要偏股價、財報、投資的文章
+            view = pool[(pool["category"] == "AI") & ~_blob(pool).str.contains(STOCK_RE, regex=True)]
+        elif region == "🇺🇸 美國／全球":
             view = pool[(pool["category"] == "AI") & ~pool["source"].isin(CN_SRC)]
         elif region == "🇨🇳 中國":
             blob = _blob(pool)
