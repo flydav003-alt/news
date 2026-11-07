@@ -268,8 +268,6 @@ hr{border-color:var(--line)!important;margin:10px 0!important}
 .post a{color:var(--tx)!important;text-decoration:none!important}
 .post a:hover{color:var(--accent)!important}
 .post .pt{color:var(--tx3);font-size:11.5px;white-space:nowrap;margin-left:auto;padding-left:8px}
-.trend-img{width:100%;max-width:560px;height:auto;display:block;border:1px solid var(--line);border-radius:10px;background:var(--card)}
-.trend-lg{display:flex;gap:12px;font-size:11px;color:var(--tx2);margin:6px 2px 0;flex-wrap:wrap}
 .lg{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}
 .fn-new:empty{display:none}
 .fn-new{display:flex;align-items:center;gap:10px;background:var(--soft);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:8px;padding:6px 12px;font-size:13px;margin:4px 0 10px}
@@ -1131,89 +1129,6 @@ def health_html(rows) -> str:
             f'<th>最近篇數</th><th>最近成功</th></tr>{body}</table></div>')
 
 
-# ── 多空情緒趨勢圖（SVG 轉成 data URI 圖片，顏色跟著目前主題）────────────
-@st.cache_data(ttl=600, show_spinner=False)
-def twii_hourly():
-    try:
-        r = requests.get("https://query1.finance.yahoo.com/v8/finance/chart/%5ETWII?range=5d&interval=60m",
-                         headers=_UA, timeout=8)
-        res = r.json()["chart"]["result"][0]
-        return [(t, c) for t, c in zip(res["timestamp"], res["indicators"]["quote"][0]["close"]) if c is not None]
-    except Exception:
-        return []
-
-
-def trend_chart(df, hours: int = 48):
-    """回傳 (html, 有效篇數, 近 6 小時淨多空)；資料太少回傳 ('', n, 0)"""
-    import base64
-    if df is None or df.empty:
-        return "", 0, 0
-    d = df[~df["category"].isin(LIFE_CATS)]
-    start = datetime.now(TZ_TW).replace(minute=0, second=0, microsecond=0) - timedelta(hours=hours - 1)
-    bull, bear, n = [0] * hours, [0] * hours, 0
-    for r in d.to_dict("records"):
-        try:
-            k = int((r["published_at"].astimezone(TZ_TW).replace(minute=0, second=0, microsecond=0) - start)
-                    .total_seconds() // 3600)
-        except Exception:
-            continue
-        if 0 <= k < hours:
-            n += 1
-            s = eff_sent(r)[0]
-            if s == "bullish":
-                bull[k] += 1
-            elif s == "bearish":
-                bear[k] += 1
-    if n < 10:
-        return "", n, 0
-    W, H, L, R, T, B = 620, 130, 30, 46, 8, 20
-    iw, ih = W - L - R, H - T - B
-    mid, bw = T + ih / 2, (W - L - R) / hours
-    mx = max(max(bull), max(bear), 3)
-    sc = (ih / 2 - 3) / mx
-    c_up, c_dn, c_ln, c_tx, c_ac = _tv["up"], _tv["dn"], _tv["line"], _tv["tx2"], _tv["accent"]
-    p = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}" '
-         f'font-family="sans-serif" font-size="10">']
-    step = 3 if hours <= 24 else 6
-    for i in range(hours):
-        t, x = start + timedelta(hours=i), L + i * bw
-        if t.hour == 0:
-            p.append(f'<line x1="{x:.1f}" y1="{T}" x2="{x:.1f}" y2="{T + ih}" stroke="{c_ln}" stroke-dasharray="3 3"/>')
-        if i % step == 0:
-            lab = f"{t.month}/{t.day} {t.hour:02d}h" if (t.hour == 0 or i == 0) else f"{t.hour:02d}h"
-            p.append(f'<text x="{x + bw / 2:.1f}" y="{H - 5}" text-anchor="middle" fill="{c_tx}">{lab}</text>')
-        if bull[i]:
-            p.append(f'<rect x="{x + bw * .14:.1f}" y="{mid - bull[i] * sc:.1f}" width="{bw * .72:.1f}" '
-                     f'height="{bull[i] * sc:.1f}" fill="{c_up}" opacity=".85"/>')
-        if bear[i]:
-            p.append(f'<rect x="{x + bw * .14:.1f}" y="{mid:.1f}" width="{bw * .72:.1f}" '
-                     f'height="{bear[i] * sc:.1f}" fill="{c_dn}" opacity=".85"/>')
-    p.append(f'<line x1="{L}" y1="{mid:.1f}" x2="{W - R}" y2="{mid:.1f}" stroke="{c_tx}" stroke-width=".8"/>')
-    p.append(f'<text x="{L - 6}" y="{T + 10}" text-anchor="end" fill="{c_tx}">{mx}</text>')
-    p.append(f'<text x="{L - 6}" y="{mid + 4:.1f}" text-anchor="end" fill="{c_tx}">0</text>')
-    p.append(f'<text x="{L - 6}" y="{T + ih}" text-anchor="end" fill="{c_tx}">{mx}</text>')
-    pts = []
-    for ts, cl in twii_hourly():
-        idx = (ts - start.timestamp()) / 3600
-        if 0 <= idx < hours:
-            pts.append((L + (idx + 0.5) * bw, cl))
-    if len(pts) >= 3:
-        lo, hi = min(c for _, c in pts), max(c for _, c in pts)
-        span = (hi - lo) or 1.0
-        ys = [(x, T + 4 + (1 - (c - lo) / span) * (ih - 8)) for x, c in pts]
-        p.append(f'<polyline fill="none" stroke="{c_ac}" stroke-width="2" stroke-linejoin="round" points="'
-                 + " ".join(f"{x:.1f},{y:.1f}" for x, y in ys) + '"/>')
-        p.append(f'<text x="{W - R + 6}" y="{T + 12}" fill="{c_ac}">{hi:,.0f}</text>')
-        p.append(f'<text x="{W - R + 6}" y="{T + ih - 2}" fill="{c_ac}">{lo:,.0f}</text>')
-    p.append("</svg>")
-    b64 = base64.b64encode("".join(p).encode("utf-8")).decode("ascii")
-    net6 = sum(bull[-6:]) - sum(bear[-6:])
-    lg = (f'<div class="trend-lg"><span><i class="lg" style="background:{c_up}"></i>利多篇數／小時（左軸）</span>'
-          f'<span><i class="lg" style="background:{c_dn}"></i>利空篇數（左軸）</span>'
-          f'<span><i class="lg" style="background:{c_ac}"></i>加權指數（右軸，只有開盤時段）</span></div>')
-    return (f'<img class="trend-img" alt="多空情緒趨勢" src="data:image/svg+xml;base64,{b64}">{lg}'), n, net6
-
-
 # ── 籌碼分頁 ──────────────────────────────
 def rank_html(title, items) -> str:
     if not items:
@@ -1403,8 +1318,8 @@ qs = fetch_quotes()
 if qs:
     st.markdown(quotes_html(qs), unsafe_allow_html=True)
 
-tab_home, tab_ai, tab_sports, tab_ent, tab_game, tab_cn, tab_cal, tab_search, tab_fav, tab_cfg = st.tabs(
-    ["📰 今日新聞", "🤖 AI 專區", "⚽ 運動", "🎬 娛樂", "🎮 電玩", "🏮 大陸", "📅 行事曆", "🔎 搜尋", "⭐ 收藏", "⚙️ 設定"])
+tab_home, tab_ai, tab_sports, tab_ent, tab_game, tab_cal, tab_search, tab_cfg = st.tabs(
+    ["📰 今日新聞", "🤖 AI 專區", "⚽ 運動", "🎬 娛樂", "🎮 電玩", "📅 行事曆", "🔎 搜尋", "⚙️ 設定"])
 
 # ═══════════════════════════════════════════════
 # TAB 1：今日新聞
@@ -1503,18 +1418,6 @@ with tab_home:
                     st.session_state.pop("_sum_key", None)
                     st.rerun()
 
-        # ── 多空情緒趨勢 ──
-        st.markdown('<div class="sec" style="margin-top:14px">📉 多空情緒趨勢</div>', unsafe_allow_html=True)
-        _th = st.radio("趨勢區間", [24, 48, 72], index=1, horizontal=True, key="trend_h",
-                       format_func=lambda h: f"近 {h} 小時", label_visibility="collapsed")
-        _tc, _tn, _net6 = trend_chart(df_all, _th)
-        if _tc:
-            _tone = "偏多" if _net6 > 2 else ("偏空" if _net6 < -2 else "多空均衡")
-            st.markdown(_tc, unsafe_allow_html=True)
-            st.caption(f"近 {_th} 小時 {_tn} 則；最近 6 小時利多減利空 {_net6:+d}（{_tone}）")
-        else:
-            st.caption("資料還不夠（需要至少 10 則帶情緒判斷的新聞）才畫得出趨勢圖")
-
         # ── 地緣 ──
         if not geo_df.empty:
             st.markdown('<div class="sec">⚑ 地緣政治警示</div>', unsafe_allow_html=True)
@@ -1574,24 +1477,6 @@ with tab_home:
 
 
 # ═══════════════════════════════════════════════
-# TAB：大陸（category = "大陸"：A股、政策、經濟、產業、中美、港股、兩岸）
-# ═══════════════════════════════════════════════
-with tab_cn:
-    _cn = df_all[df_all["category"] == "大陸"]
-    if _cn.empty:
-        st.markdown('<div class="empty">🏮 還沒有大陸新聞。部署新版 crawler.py 之後，下一次自動抓取就會出現；'
-                    '也可以按右上角「立即抓取」。</div>', unsafe_allow_html=True)
-    else:
-        _cn, _cnh = recent(_cn, hours_steps=(24, 48, 72, 168), min_n=10)
-        _ce = _cn.apply(lambda r: eff_sent(r)[0], axis=1)
-        _nb, _nd = int((_ce == "bullish").sum()), int((_ce == "bearish").sum())
-        _srcs = _cn["source"].value_counts().head(6)
-        st.caption(f"近 {_cnh} 小時共 {len(_cn)} 則（利多 {_nb}／利空 {_nd}）｜主要來源：" +
-                   "、".join(f"{k} {v}" for k, v in _srcs.items()))
-        render_grid(_cn.sort_values("published_at", ascending=False), max_items=200, lazy=18)
-
-
-# ═══════════════════════════════════════════════
 # TAB：籌碼 / 行事曆 / 社群（資料來自 extras.json）
 # ═══════════════════════════════════════════════
 _NO_EXTRAS = ("這一塊的資料還沒產生。請確認 GitHub Actions 已部署新版（extras.py、calendar_manual.json、fetch_news.yml），"
@@ -1644,14 +1529,6 @@ with tab_cal:
 
 
 # ═══════════════════════════════════════════════
-# TAB：收藏（內容由瀏覽器端 JS 依 localStorage 畫出；收藏的是標題/連結快照，不受 72 小時限制）
-# ═══════════════════════════════════════════════
-with tab_fav:
-    st.markdown('<div class="fn-fav-wrap"><div class="fn-fav-note"></div><div class="grid fn-fav"></div></div>',
-                unsafe_allow_html=True)
-
-
-# ═══════════════════════════════════════════════
 # TAB：搜尋新聞（即時查 Google News）
 # ═══════════════════════════════════════════════
 with tab_search:
@@ -1700,6 +1577,8 @@ AI_SEGMENTS = [
     ("⚡ 電力／散熱",      ["power", "electricity", "cooling", "liquid", "散熱", "液冷", "電力", "nuclear", "核電"]),
 ]
 CN_SRC = {"GN-中國AI", "SCMP Tech", "GN-大陸AI模型"}
+CN_AI_RE = (r"\bai\b|人工智慧|人工智能|大模型|大語言|大语言|生成式|算力|晶片|芯片|半導體|半导体|gpu|deepseek|"
+            r"輝達|英偉達|英伟达|華為|华为|昇騰|昇腾|機器人|机器人|智駕|自駕|openai|chatgpt|通義|文心|智譜|月之暗面")
 STOCK_RE = r"stock|shares|\bsell|investor|etf|earnings|market cap|valuation|wall street|nasdaq|s&p|股|美股|財報|市值|估值|漲|跌|買進|賣出|投資人|營收"
 
 
@@ -1710,11 +1589,13 @@ def _blob(df):
 with tab_ai:
     ai_zone = df_all[df_all["category"] == "AI"]
     tw_chain = df_all[(df_all["category"] != "AI") & df_all["sectors"].fillna("").str.contains("AI|伺服器|半導體", regex=True)]
-    if ai_zone.empty and tw_chain.empty:
+    _cn_all = df_all[df_all["category"] == "大陸"]
+    cn_ai = _cn_all[_blob(_cn_all).str.contains(CN_AI_RE, regex=True)] if not _cn_all.empty else _cn_all
+    if ai_zone.empty and tw_chain.empty and cn_ai.empty:
         st.markdown('<div class="empty">🤖 AI 專區還沒有資料。等下一次 GitHub Actions 抓取（新來源會在下一輪出現），'
                     '或按右上角「立即抓取」。</div>', unsafe_allow_html=True)
     else:
-        pool = pd.concat([ai_zone, tw_chain]).drop_duplicates(subset=["url"])
+        pool = pd.concat([ai_zone, tw_chain, cn_ai]).drop_duplicates(subset=["url"])
         pool, hrs = recent(pool, hours_steps=(24, 48, 72, 168), min_n=10)
         region = st.radio("地區", ["🧪 模型與技術", "🇺🇸 美國／全球", "🇨🇳 中國", "🇹🇼 台灣供應鏈", "🌐 全部"], horizontal=True,
                           label_visibility="collapsed", key="ai_region")
@@ -1726,9 +1607,10 @@ with tab_ai:
         elif region == "🇨🇳 中國":
             blob = _blob(pool)
             cn_kw = "deepseek|alibaba|qwen|huawei|ascend|baidu|tencent|moonshot|kimi|china|chinese|中國|大陸"
-            view = pool[pool["source"].isin(CN_SRC) | ((pool["category"] == "AI") & blob.str.contains(cn_kw, regex=True))]
+            view = pool[pool["source"].isin(CN_SRC) | (pool["category"] == "大陸")
+                        | ((pool["category"] == "AI") & blob.str.contains(cn_kw, regex=True))]
         elif region == "🇹🇼 台灣供應鏈":
-            view = pool[pool["category"] != "AI"]
+            view = pool[~pool["category"].isin(["AI", "大陸"])]
         else:
             view = pool
         if view.empty:
@@ -1742,7 +1624,7 @@ with tab_ai:
           <div class="m"><div class="m-l">📈 利多</div><div class="m-v up">{b_n}</div></div>
           <div class="m"><div class="m-l">📉 利空</div><div class="m-v dn">{d_n}</div></div>
           <div class="m"><div class="m-l">🇺🇸 美國</div><div class="m-v">{int(((pool['category'] == 'AI') & ~pool['source'].isin(CN_SRC)).sum())}</div></div>
-          <div class="m"><div class="m-l">🇨🇳 中國</div><div class="m-v">{int(pool['source'].isin(CN_SRC).sum())}</div></div>
+          <div class="m"><div class="m-l">🇨🇳 中國</div><div class="m-v">{int((pool['source'].isin(CN_SRC) | (pool['category'] == '大陸')).sum())}</div></div>
         </div>"""), unsafe_allow_html=True)
         if hrs > 24:
             st.caption(f"ℹ️ 近 24 小時 AI 新聞較少，已放寬到 {hrs} 小時")
@@ -1808,6 +1690,10 @@ with tab_game:
 # TAB 3：設定
 # ═══════════════════════════════════════════════
 with tab_cfg:
+    st.markdown("#### ⭐ 收藏")
+    # 內容由瀏覽器端 JS 依 localStorage 畫出；收藏的是標題/連結快照，不受 72 小時限制
+    st.markdown('<div class="fn-fav-wrap"><div class="fn-fav-note"></div><div class="grid fn-fav"></div></div>',
+                unsafe_allow_html=True)
     st.markdown("#### 🧹 顯示內容")
     st.checkbox("把同一事件的多家報導合併成一張卡片", value=True, key="merge_events")
     st.checkbox("顯示例行「月營收公布」快訊（預設隱藏）", key="show_rev",
