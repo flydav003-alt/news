@@ -218,8 +218,6 @@ hr{border-color:var(--line)!important;margin:10px 0!important}
 .tk{font-size:11px;background:var(--soft);border-radius:4px;padding:1px 6px;font-family:'JetBrains Mono',monospace;color:var(--tx2)}
 .tr{font-size:11.5px;color:var(--accent)!important;text-decoration:none!important}
 .tr:hover{text-decoration:underline!important}
-.bd-w{background:var(--accent);color:#fff}
-.card.wl{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset}
 .fav{margin-left:auto;cursor:pointer;font-size:18px;line-height:1;color:var(--tx3);user-select:none;padding:0 2px}
 .fav:hover{color:var(--accent)}
 .fav.on{color:#E0A020}
@@ -229,7 +227,6 @@ hr{border-color:var(--line)!important;margin:10px 0!important}
 .fav-clear{cursor:pointer;color:var(--tx3);margin-left:10px;text-decoration:underline}
 .sgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}
 .sg{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:10px;padding:10px 13px}
-.sg.wl{box-shadow:0 0 0 1px var(--accent) inset}
 .sg-h{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .sg-tk{font-family:'JetBrains Mono',monospace;font-weight:700;font-size:15px}
 .sg-nm{font-size:13px;color:var(--tx2)}
@@ -331,65 +328,9 @@ div[data-baseweb="select"] svg{{fill:var(--tx)!important}}
 st.markdown(THEME_CSS, unsafe_allow_html=True)
 
 
-# ─────────────────────────────────────────────
-# 自選股：存在網址參數 ?wl=2330,2454（可加書籤）＋ 瀏覽器 localStorage（下面的 JS 負責還原）
-# 比對規則：代號命中新聞的個股標籤，或名稱/代號出現在標題、個股名稱
-# ─────────────────────────────────────────────
-WL_MAX = 30
-
-
-def parse_wl(text: str) -> list:
-    out, seen = [], set()
-    for t in re.split(r"[,，、;；\s]+", text or ""):
-        t = t.strip().upper()
-        if t and t != "-" and t not in seen:
-            seen.add(t)
-            out.append(t)
-    return out[:WL_MAX]
-
-
-def _wl_compile(tokens):
-    pats = []
-    for t in tokens:
-        if re.fullmatch(r"[A-Z0-9.\-]+", t):      # 英數代號：要求前後不是英數，避免 AMD 命中 DAMDX
-            pats.append((t, re.compile(r"(?<![A-Za-z0-9])" + re.escape(t) + r"(?![A-Za-z0-9])", re.I)))
-        else:                                       # 中文名稱：直接子字串
-            pats.append((t, re.compile(re.escape(t), re.I)))
-    return pats
-
-
-_wl_q = st.query_params.get("wl", "")
-if "wl_text" not in st.session_state:
-    st.session_state["wl_text"] = "" if _wl_q in ("", "-") else _wl_q.replace(",", ", ")
-_WL_TOKENS = parse_wl(st.session_state["wl_text"])
-_WL_PATS = _wl_compile(_WL_TOKENS)
-_wl_val = ",".join(_WL_TOKENS)
-if _wl_val:
-    if st.query_params.get("wl") != _wl_val:
-        st.query_params["wl"] = _wl_val
-elif st.session_state.get("_wl_had") and st.query_params.get("wl") != "-":
-    st.query_params["wl"] = "-"                    # 使用者主動清空：用 "-" 告訴瀏覽器端別再還原舊清單
-st.session_state["_wl_had"] = bool(_wl_val)
-
-
 def _row_tickers(row) -> list:
     raw = str(row.get("ai_affected_tickers", "") or row.get("tickers", "") or "")
     return [x.strip() for x in raw.split(",") if x.strip()]
-
-
-def wl_hits(row) -> list:
-    """這則新聞命中了哪些自選股（沒設定自選股就回傳空）"""
-    if not _WL_PATS:
-        return []
-    tks = {t.upper() for t in _row_tickers(row)}
-    names = []
-    try:
-        for it in json.loads(row.get("ticker_details") or "[]"):
-            names.append(str(it.get("name") or ""))
-    except Exception:
-        pass
-    text = " ".join([str(row.get("title", "") or ""), str(row.get("title_zh", "") or ""), " ".join(names)])
-    return [tok for tok, pat in _WL_PATS if tok in tks or pat.search(text)]
 
 
 # ─────────────────────────────────────────────
@@ -754,11 +695,6 @@ def card_html(row, others=None) -> str:
     summ_h = f'<div class="cs">✦ {esc(summ)}</div>' if summ else ""
     _sec = ",".join(x.strip() for x in str(row.get("sectors", "") or "").split(",") if x.strip())
     _tk = ",".join(x.strip() for x in str(row.get("ai_affected_tickers", "") or row.get("tickers", "") or "").split(",") if x.strip())
-    _hits = wl_hits(row)
-    for _o in others:
-        _hits += wl_hits(_o)
-    wl_cls = " wl" if _hits else ""
-    wl_b = '<span class="bd bd-w">★ 自選</span>' if _hits else ""
     try:
         _ts = int(row.get("published_at").timestamp())
     except Exception:
@@ -771,12 +707,12 @@ def card_html(row, others=None) -> str:
               f'data-age="{min(age_hours(row.get("published_at")), 999):.0f}" '
               f'data-imp="{_num(row.get("importance_score")):.1f}"')
     return _h(f"""
-    <div class="card {cls}{wl_cls}" {_attrs}>
+    <div class="card {cls}" {_attrs}>
       <a href="{href}" target="_blank" rel="noopener">{thumb_html(row) if has_img else strip_html(row)}</a>
       <div class="cb">
         <a class="ct" href="{href}" target="_blank" rel="noopener">{esc(main)}</a>
         {orig_h}{summ_h}{more_h}
-        <div class="cm">{badge_html(sent, sv)}{wl_b}{geo}{tickers_chips(row)}</div>
+        <div class="cm">{badge_html(sent, sv)}{geo}{tickers_chips(row)}</div>
         <div class="cm"><span>{esc(str(row.get("source", "")))}</span><span>· {relative_time(row.get("published_at"))}</span>{translate_link(row)}<span class="fav" role="button" title="收藏">☆</span></div>
       </div>
     </div>""")
@@ -918,10 +854,9 @@ def detect_surge(df, top=6):
             if len(heads) >= 2:
                 break
         nm = names.get(t, "")
-        is_wl = bool(_WL_PATS) and any(tok == t.upper() or (nm and pat.search(nm)) for tok, pat in _WL_PATS)
         out.append({"code": t, "name": nm, "n": n, "nsrc": len(srcs), "exp": expected, "ratio": ratio,
-                    "tone": tone, "tcls": tcls, "heads": heads, "wl": is_wl})
-    out.sort(key=lambda z: (z["wl"], z["ratio"], z["n"]), reverse=True)
+                    "tone": tone, "tcls": tcls, "heads": heads})
+    out.sort(key=lambda z: (z["ratio"], z["n"]), reverse=True)
     return out[:top], span
 
 
@@ -930,10 +865,9 @@ def surge_html(items) -> str:
     for it in items:
         li = "".join(f'<li><a href="{esc(u, quote=True)}" target="_blank" rel="noopener">{esc(t)}</a></li>'
                      for t, u in it["heads"])
-        wl_b = '<span class="bd bd-w">★ 自選</span>' if it["wl"] else ""
-        cards += (f'<div class="sg{" wl" if it["wl"] else ""}">'
+        cards += (f'<div class="sg">'
                   f'<div class="sg-h"><span class="sg-tk">{esc(it["code"])}</span>'
-                  f'<span class="sg-nm">{esc(it["name"])}</span>{wl_b}'
+                  f'<span class="sg-nm">{esc(it["name"])}</span>'
                   f'<span class="sg-x">×{it["ratio"]:.1f}</span></div>'
                   f'<div class="sg-m">近 {SURGE_WIN_H} 小時 {it["n"]} 則（平均 {it["exp"]:.1f} 則）· {it["nsrc"]} 家媒體 · '
                   f'<span class="{it["tcls"]}">{it["tone"]}</span></div>'
@@ -1063,13 +997,6 @@ with tab_home:
     if df_all.empty:
         st.markdown('<div class="empty">📭 還沒有任何新聞，請按右上角「立即抓取」</div>', unsafe_allow_html=True)
     else:
-        wl1, wl2 = st.columns([4, 1.3])
-        with wl1:
-            st.text_input("自選股", key="wl_text", label_visibility="collapsed",
-                          placeholder="⭐ 自選股：代號或名稱，逗號分隔（例：2330, 2454, 緯穎, NVDA），按 Enter 套用")
-        with wl2:
-            st.checkbox("只看自選股", key="wl_only")
-
         df_fin = df_all[~df_all["category"].isin(LIFE_CATS + ("AI",))]
         df_r, used_h = recent(df_fin if not df_fin.empty else df_all)
         if used_h > 12:
@@ -1106,18 +1033,6 @@ with tab_home:
             st.caption(f"📈 題材升溫：資料只涵蓋 {_span:.0f} 小時，累積到 {SURGE_MIN_HISTORY_H} 小時以上才會開始偵測")
         else:
             st.caption(f"📈 題材升溫：近 {SURGE_WIN_H} 小時沒有個股的提及量超過平均 {SURGE_RATIO:g} 倍")
-
-        # ── 自選股動態 ──
-        if _WL_TOKENS:
-            _wsrc = df_all[~df_all["category"].isin(LIFE_CATS)]
-            _wsrc = _wsrc[_wsrc["published_at"].apply(age_hours) <= 72].sort_values("published_at", ascending=False)
-            _wdf = _wsrc[_wsrc.apply(lambda r: bool(wl_hits(r)), axis=1)] if not _wsrc.empty else _wsrc
-            st.markdown(f'<div class="sec">⭐ 自選股動態 <span class="fn-reco-chips">{esc("、".join(_WL_TOKENS[:8]))}'
-                        f'{"…" if len(_WL_TOKENS) > 8 else ""}</span></div>', unsafe_allow_html=True)
-            if _wdf.empty:
-                st.caption("近 72 小時沒有提到你的自選股")
-            else:
-                render_grid(_wdf, max_items=6)
 
         # ── 頭條 ──
         st.markdown('<div class="sec">🔥 今日頭條</div>', unsafe_allow_html=True)
@@ -1221,15 +1136,6 @@ with tab_home:
             ddf = ddf[m]
         if sort_f == "重要度":
             ddf = ddf.sort_values(["importance_score", "published_at"], ascending=False)
-
-        if _WL_TOKENS and len(ddf):
-            _m = ddf.apply(lambda r: bool(wl_hits(r)), axis=1)
-            if st.session_state.get("wl_only"):
-                ddf = ddf[_m]
-            else:
-                ddf = pd.concat([ddf[_m], ddf[~_m]])          # 自選股新聞置頂，其餘維持原排序
-        elif st.session_state.get("wl_only"):
-            st.caption("⭐ 請先在上方輸入自選股，「只看自選股」才有作用")
 
         st.caption(f"共 {len(ddf)} 則")
         n_show = st.session_state["n_show"]
@@ -1454,29 +1360,7 @@ _READ_JS = """
   if (P.__fnCleanup) { try { P.__fnCleanup(); } catch(e) {} }
   function jget(k, d){ try { return JSON.parse(P.localStorage.getItem(k) || d); } catch(e) { return JSON.parse(d); } }
   function jset(k, v){ try { P.localStorage.setItem(k, JSON.stringify(v)); } catch(e) {} }
-  // ── 自選股：網址有 ?wl= 就記到 localStorage；網址沒有但 localStorage 有 → 補上並重新載入一次 ──
-  function syncWl(){
-    try {
-      var w = new URL(P.location.href).searchParams.get('wl');
-      if (w === null) return;
-      if (w === '-') P.localStorage.removeItem('finnews_wl');
-      else if (w) P.localStorage.setItem('finnews_wl', w);
-    } catch(e) {}
-  }
-  function restoreWl(){
-    try {
-      var u = new URL(P.location.href);
-      if (u.searchParams.get('wl') !== null) return false;
-      var w = P.localStorage.getItem('finnews_wl'); if (!w) return false;
-      var last = parseInt(P.sessionStorage.getItem('fn_wl_redir') || '0', 10);
-      if (Date.now() - last < 15000) return false;          // 15 秒內只跳一次，避免無限重新載入
-      P.sessionStorage.setItem('fn_wl_redir', String(Date.now()));
-      u.searchParams.set('wl', w); P.location.replace(u.toString());
-      return true;
-    } catch(e) { return false; }
-  }
-  if (restoreWl()) return;
-  syncWl();
+  try { P.localStorage.removeItem('finnews_wl'); } catch(e) {}
   S = new Set(jget(K, '[]'));
   function saveRead(){ jset(K, Array.from(S).slice(-2000)); }
   function mainLink(el){
@@ -1610,8 +1494,30 @@ _READ_JS = """
       m.appendChild(x); b.appendChild(a); b.appendChild(m); c.appendChild(b); box.appendChild(c);
     });
   }
+  // ── 切換分頁：捲到「該分頁內容的最上面」（分頁列是 sticky，所以內容頂端剛好貼在分頁列下方）──
+  function scrollerOf(el){
+    for (var n = el.parentElement; n && n !== D.body; n = n.parentElement) {
+      var oy = P.getComputedStyle(n).overflowY;
+      if ((oy === 'auto' || oy === 'scroll') && n.scrollHeight > n.clientHeight) return n;
+    }
+    return D.scrollingElement || D.documentElement;
+  }
+  function scrollToTabTop(tab){
+    var list = tab.closest('[role="tablist"]');
+    if (!list || list !== D.querySelector('[role="tablist"]')) return;     // 只處理最上面那排主分頁
+    var panel = D.querySelector('[role="tabpanel"]:not([hidden])');
+    var sc = scrollerOf(list);
+    var isDoc = (sc === D.scrollingElement || sc === D.documentElement);
+    var base = isDoc ? 0 : sc.getBoundingClientRect().top;
+    var cur = isDoc ? (P.pageYOffset || sc.scrollTop) : sc.scrollTop;
+    var target = 0;
+    if (panel) target = Math.max(0, panel.getBoundingClientRect().top - base + cur - list.getBoundingClientRect().height);
+    if (cur > target) { if (isDoc) P.scrollTo(0, target); else sc.scrollTop = target; }
+  }
   function onClick(e){
     var tg = e.target, cl = function(sel){ return tg && tg.closest ? tg.closest(sel) : null; };
+    var tabEl = cl('[role="tab"]');
+    if (tabEl) { setTimeout(function(){ scrollToTabTop(tabEl); }, 80); setTimeout(function(){ scrollToTabTop(tabEl); }, 300); }
     var fv = cl('.card .fav');
     if (fv) { e.preventDefault(); e.stopPropagation(); toggleFav(fv.closest('.card')); return; }
     var rm = cl('[data-rm]');
@@ -1640,7 +1546,7 @@ _READ_JS = """
     setTimeout(buildReco, 400);
   }
   var t = null;
-  var obs = new MutationObserver(function(){ clearTimeout(t); t = setTimeout(function(){ markRead(); buildReco(); markFav(); buildFav(); syncWl(); }, 200); });
+  var obs = new MutationObserver(function(){ clearTimeout(t); t = setTimeout(function(){ markRead(); buildReco(); markFav(); buildFav(); }, 200); });
   obs.observe(D.body, {childList: true, subtree: true});
   D.addEventListener('click', onClick, true);
   P.__fnCleanup = function(){ obs.disconnect(); D.removeEventListener('click', onClick, true); };
