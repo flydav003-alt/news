@@ -138,7 +138,7 @@ hr{border-color:var(--line)!important;margin:10px 0!important}
 .mrow{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:6px}
 .m{background:var(--soft);border-radius:10px;padding:8px 14px;min-width:96px}
 .m-l{font-size:11px;color:var(--tx2)} .m-v{font-size:19px;font-weight:700}
-/* 快速篩選：「大陸」（紅）「國際英文」（藍）——尺寸跟上面分頁按鈕差不多，只靠顏色、細框、輕陰影區分，選中時整顆填色。
+/* 快速篩選：「大陸」（紅）「國際」（藍）——尺寸跟上面分頁按鈕差不多，只靠顏色、細框、輕陰影區分，選中時整顆填色。
    標記方式有兩層：① 瀏覽器端 JS 依文字加上 .fn-chip-cn / .fn-chip-en（不怕選項順序改動）；
    ② 沒跑 JS 時用 nth-of-type 當備援（第 2、3 個）。若你改了選項順序，備援的數字要一起改。 */
 .fn-chip-cn,
@@ -1936,11 +1936,11 @@ _READ_JS = """
     });
   }
   // ── 列表 / 卡片密度（存在 localStorage，不需要重新整理）──
-  // ── 快速篩選：依文字標記「大陸」「國際英文」兩顆，讓 CSS 把它們做成醒目的大按鈕 ──
+  // ── 快速篩選：依文字標記「大陸」「國際」兩顆，讓 CSS 把它們做成醒目的大按鈕 ──
   function tagChips(){
     D.querySelectorAll('[role="radiogroup"] label').forEach(function(l){
       var t = l.textContent || '';
-      var cn = t.indexOf('大陸') >= 0 && t.indexOf('🏮') >= 0, en = t.indexOf('國際英文') >= 0;
+      var cn = t.indexOf('大陸') >= 0 && t.indexOf('🏮') >= 0, en = t.indexOf('國際') >= 0;
       if (l.classList.contains('fn-chip-cn') !== cn) l.classList.toggle('fn-chip-cn', cn);
       if (l.classList.contains('fn-chip-en') !== en) l.classList.toggle('fn-chip-en', en);
     });
