@@ -12,7 +12,7 @@ extras.py — 籌碼 / 行事曆 / 社群 資料抓取（由 GitHub Actions 執�
 區塊
   chips     三大法人（大盤＋個股買賣超前 10）、融資融券增減、注意股、處置股
   calendar  只讀 calendar_manual.json（總經、NVDA 財報、休市），只顯示未來 62 天
-  social    Threads（需 token）、PTT 熱門、Reddit、微博熱搜
+  social    PTT 熱門、Reddit、微博熱搜
 """
 
 import calendar as _cal
@@ -629,12 +629,10 @@ def build_calendar(prev: dict, now: datetime) -> dict:
 
 # ─────────────────────────────────────────────
 # 社群（不限股票：看各種事件的討論熱度）
-#   Threads（台灣主流，需官方 API token）→ PTT 熱門文章（依推文數）→ Reddit（美國）→ 微博熱搜（大陸）
+#   PTT 熱門文章（依推文數；雲端 IP 目前被擋）、Reddit（美國）、微博熱搜（大陸）
 # ─────────────────────────────────────────────
 PTT_BOARDS = ["Gossiping", "HatePolitics", "Stock", "Baseball", "NBA"]
 REDDIT_SUBS = [("popular", 12), ("worldnews", 8), ("technology", 8)]
-THREADS_KEYWORDS = [k.strip() for k in os.environ.get(
-    "THREADS_KEYWORDS", "台積電,颱風,地震,選舉,AI,漲價").split(",") if k.strip()]
 
 
 def _feed(url):
@@ -778,6 +776,7 @@ def translate_reddit(red: dict, old: dict) -> None:
             tr = GoogleTranslator(source="auto", target="zh-TW")
             for p in left:
                 try:
+                    time.sleep(0.3)
                     z = tr.translate(p["t"]) or ""
                     if z and z != p["t"]:
                         p["z"] = z
@@ -791,39 +790,10 @@ def translate_reddit(red: dict, old: dict) -> None:
     logger.info(f"Reddit 標題翻譯 {groq_n + g_n}/{len(todo)}（Groq {groq_n}、Google {g_n}）")
 
 
-def fetch_threads(token: str):
-    """Threads 官方 API 關鍵字搜尋（熱門）。Threads 沒有公開的趨勢榜或 RSS。回 (list, 錯誤原因)"""
-    posts, err = [], ""
-    for kw in THREADS_KEYWORDS:
-        j = _json("https://graph.threads.net/v1.0/keyword_search",
-                  {"q": kw, "search_type": "TOP", "access_token": token,
-                   "fields": "id,text,permalink,username,like_count,reply_count,timestamp"}, gap=1.0)
-        if not isinstance(j, dict) or not j.get("data"):
-            err = f"「{kw}」沒有回傳（token 過期、沒有 keyword_search 權限，或額度用完）"
-            continue
-        for it in j["data"][:6]:
-            txt = _tags(it.get("text", ""))
-            if not txt or not it.get("permalink"):
-                continue
-            posts.append({"t": txt[:90], "u": it["permalink"], "a": it.get("username", ""), "kw": kw,
-                          "n": int(it.get("like_count") or 0) + 3 * int(it.get("reply_count") or 0)})
-    posts.sort(key=lambda p: p["n"], reverse=True)
-    return posts[:20], ("" if posts else err)
-
-
 def build_social(prev: dict, now: datetime) -> dict:
     prev = prev or {}
     parts = {}
     out = {"fetched_at": now.isoformat(timespec="seconds")}
-
-    token = os.environ.get("THREADS_ACCESS_TOKEN", "").strip()
-    if token:
-        th, err = fetch_threads(token)
-        out["threads"] = th or prev.get("threads") or []
-        parts["threads"] = "ok" if th else f"error: {err}"
-    else:
-        out["threads"] = prev.get("threads") or []
-        parts["threads"] = "skip: 尚未設定 THREADS_ACCESS_TOKEN（Threads 沒有公開 RSS，必須用官方 API）"
 
     ptt, err = fetch_ptt()
     old_ptt = prev.get("ptt") if isinstance(prev.get("ptt"), list) else []
