@@ -30,7 +30,10 @@ jobs:
           mkdir -p data_out
           if git ls-remote --exit-code --heads origin data >/dev/null 2>&1; then
             git fetch origin data
-            git --work-tree=data_out checkout origin/data -- news.json || true
+            # 逐一取出：其中一個檔案還不存在（例如第一次跑）不會連累其他檔案
+            for f in news.json extras.json health.json; do
+              git --work-tree=data_out checkout origin/data -- "$f" || true
+            done
             git reset -q
           fi
 
@@ -51,13 +54,17 @@ jobs:
           AI_TECH_SLOTS: "2"
         run: python scheduler.py data_out/news.json
 
+      - name: 籌碼 / 行事曆 / 社群 → extras.json（失敗也不影響新聞）
+        continue-on-error: true
+        run: python extras.py data_out/extras.json
+
       - name: 推到 data 分支（只保留 1 個 commit，不會讓 repo 變肥）
         run: |
           cd data_out
           git init -q -b data
           git config user.name "news-bot"
           git config user.email "news-bot@users.noreply.github.com"
-          git add news.json
+          git add -A
           git commit -q -m "news $(date -u +%Y-%m-%dT%H:%MZ)"
           git remote add origin "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
           git push -f origin data
