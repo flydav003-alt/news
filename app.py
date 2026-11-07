@@ -1,7533 +1,2044 @@
-import hashlib
-import json
-import os
-import random
-import re
-import shutil
-import sys
-import time
-import uuid
-import ctypes
-import threading
-import urllib.parse
-import urllib.request
-import zipfile
-import subprocess
-import tempfile
-from collections import deque
-from dataclasses import dataclass, asdict, field, fields
-from pathlib import Path
-from types import SimpleNamespace
-
-# PyInstaller puts Qt in a private directory.  Register it before importing
-# PySide so Windows can resolve QtCore.pyd and Qt6Core.dll dependencies.
-if getattr(sys, "frozen", False):
-    _bundle = Path(sys._MEIPASS)
-    os.add_dll_directory(str(_bundle))
-    os.add_dll_directory(str(_bundle / "PySide6"))
-    os.add_dll_directory(str(_bundle / "shiboken6"))
-
-import keyboard
-import numpy as np
-import sounddevice as sd
-import av
-from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, QUrl, Qt, Signal, QObject, QTimer
-from PySide6.QtGui import (
-    QAction, QBrush, QColor, QFont, QFontMetrics, QIcon, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap,
-    QPolygonF, QDesktopServices,
-)
-from PySide6.QtWidgets import (
-    QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout,
-    QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
-    QInputDialog, QMessageBox, QPushButton, QSlider, QSpinBox, QDoubleSpinBox, QStackedWidget, QVBoxLayout,
-    QWidget, QScrollArea, QMenu, QStyle, QStyledItemDelegate, QSizePolicy,
-)
-
-APP_NAME = "EchoDeck"
-MIC_OFF_LABEL = "（不使用麥克風）"
-BUILD_TAG = "v2.4"
-FORMATS = {".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac", ".wma", ".opus", ".webm"}
-CONFIG_PATH = Path(os.getenv("APPDATA", str(Path.home()))) / APP_NAME / "settings.json"
-
-
-# Games commonly read the physical keyboard scan-code stream rather than the
-# virtual-key stream used by high-level automation libraries.  SendInput with
-# KEYEVENTF_SCANCODE is therefore used for normal keyboard PTT keys (such as
-# K/V/F8). Mouse buttons retain the keyboard-library fallback below.
-class _KEYBDINPUT(ctypes.Structure):
-    _fields_ = [("wVk", ctypes.c_ushort), ("wScan", ctypes.c_ushort),
-                ("dwFlags", ctypes.c_ulong), ("time", ctypes.c_ulong),
-                ("dwExtraInfo", ctypes.c_void_p)]
-
-
-class _MOUSEINPUT(ctypes.Structure):
-    _fields_ = [("dx", ctypes.c_long), ("dy", ctypes.c_long),
-                ("mouseData", ctypes.c_ulong), ("dwFlags", ctypes.c_ulong),
-                ("time", ctypes.c_ulong), ("dwExtraInfo", ctypes.c_void_p)]
-
-
-# The union must contain the largest member (MOUSEINPUT) or sizeof(INPUT) is
-# 32 instead of 40 on 64-bit Windows and SendInput rejects every call.
-class _INPUT_UNION(ctypes.Union):
-    _fields_ = [("ki", _KEYBDINPUT), ("mi", _MOUSEINPUT)]
-
-
-class _INPUT(ctypes.Structure):
-    _fields_ = [("type", ctypes.c_ulong), ("union", _INPUT_UNION)]
-
-
-def send_scan_code(key: str, is_key_up: bool) -> bool:
-    """Send a hardware-style keyboard event; returns False for unsupported names."""
-    key = key.strip().lower()
-    # A single printable character is the reliable path for game PTT keys.
-    if len(key) != 1:
-        return False
-    vk = ctypes.windll.user32.VkKeyScanW(ord(key)) & 0xFF
-    scan = ctypes.windll.user32.MapVirtualKeyW(vk, 0)
-    if not scan:
-        return False
-    flags = 0x0008 | (0x0002 if is_key_up else 0)  # SCANCODE | KEYUP
-    event = _INPUT(1, _INPUT_UNION(_KEYBDINPUT(0, scan, flags, 0, None)))
-    return bool(ctypes.windll.user32.SendInput(1, ctypes.byref(event), ctypes.sizeof(event)))
-
-
-_MOUSE_FLAGS = {  # name: (down, up, mouseData)
-    "left": (0x0002, 0x0004, 0), "right": (0x0008, 0x0010, 0),
-    "middle": (0x0020, 0x0040, 0), "x1": (0x0080, 0x0100, 1), "x2": (0x0080, 0x0100, 2),
-}
-
-
-def send_mouse_click(button: str, hold: float = 0.03) -> None:
-    """Press, hold for `hold` seconds, release. Games poll input once per frame,
-    so a zero-length press (down+up in the same instant) is usually ignored."""
-    down, up, data = _MOUSE_FLAGS.get(button, _MOUSE_FLAGS["left"])
-    for flag, wait in ((down, hold), (up, 0)):
-        event = _INPUT(0, _INPUT_UNION(mi=_MOUSEINPUT(0, 0, data, flag, 0, None)))
-        ctypes.windll.user32.SendInput(1, ctypes.byref(event), ctypes.sizeof(event))
-        if wait:
-            time.sleep(wait)
-
-
-_MODIFIER_VKS = (0x10, 0x11, 0x12, 0x5B, 0x5C)  # Shift, Ctrl, Alt, left/right Win
-
-
-def wait_for_modifiers_released(timeout: float = 0.8) -> bool:
-    """Wait (briefly) until the user has physically let go of Shift/Ctrl/Alt/Win.
-
-    A global hotkey such as Alt+1 fires while Alt is still held. If the PTT key
-    were injected right then, the game would see Alt+K instead of K and ignore
-    it. Returns True when no modifier is held any more."""
-    try:
-        down = lambda: any(ctypes.windll.user32.GetAsyncKeyState(vk) & 0x8000 for vk in _MODIFIER_VKS)
-        deadline = time.perf_counter() + timeout
-        while down() and time.perf_counter() < deadline:
-            time.sleep(0.01)
-        return not down()
-    except Exception:
-        return True
-
-
-def hotkey_log(message: str) -> None:
-    """Tiny diagnostic log: %APPDATA%\\EchoDeck\\hotkey.log (kept under ~100 KB)."""
-    try:
-        path = CONFIG_PATH.parent / "hotkey.log"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if path.exists() and path.stat().st_size > 100_000:
-            path.write_text("", encoding="utf-8")
-        with path.open("a", encoding="utf-8") as f:
-            f.write(time.strftime("%H:%M:%S ") + message + "\n")
-    except Exception:
-        pass
-
-
-def vk_is_down(vk: int) -> bool:
-    try:
-        return bool(ctypes.windll.user32.GetAsyncKeyState(vk) & 0x8000)
-    except Exception:
-        return False
-
-
-def modifiers_held() -> bool:
-    return any(vk_is_down(vk) for vk in _MODIFIER_VKS)
-
-
-_NAMED_VKS = {
-    "ctrl": (0x11,), "left ctrl": (0xA2,), "right ctrl": (0xA3,),
-    "alt": (0x12,), "left alt": (0xA4,), "right alt": (0xA5,), "alt gr": (0xA5,),
-    "shift": (0x10,), "left shift": (0xA0,), "right shift": (0xA1,),
-    "windows": (0x5B, 0x5C), "left windows": (0x5B,), "right windows": (0x5C,),
-    "space": (0x20,), "enter": (0x0D,), "tab": (0x09,), "esc": (0x1B,), "backspace": (0x08,),
-    "delete": (0x2E,), "insert": (0x2D,), "home": (0x24,), "end": (0x23,),
-    "page up": (0x21,), "page down": (0x22,), "up": (0x26,), "down": (0x28,),
-    "left": (0x25,), "right": (0x27,), "caps lock": (0x14,), "num lock": (0x90,),
-    "scroll lock": (0x91,), "print screen": (0x2C,), "pause": (0x13,),
-    "+": (0xBB, 0x6B), "plus": (0xBB, 0x6B), "-": (0xBD, 0x6D), "minus": (0xBD, 0x6D),
-}
-
-
-def hotkey_vks(names):
-    """['ctrl','alt','space'] -> [(0x11,), (0x12,), (0x20,)] for GetAsyncKeyState
-    polling, or None if any key cannot be mapped (caller falls back to the
-    keyboard library for that hotkey)."""
-    result = []
-    for name in names:
-        name = name.strip().lower()
-        if name in _NAMED_VKS:
-            result.append(_NAMED_VKS[name])
-        elif len(name) > 1 and name[0] == "f" and name[1:].isdigit() and 1 <= int(name[1:]) <= 24:
-            result.append((0x6F + int(name[1:]),))
-        elif len(name) == 1:
-            try:
-                vk = ctypes.windll.user32.VkKeyScanW(ord(name)) & 0xFF
-            except Exception:
-                return None
-            if vk in (0, 0xFF):
-                return None
-            result.append((vk,))
-        else:
-            return None
-    return result or None
-
-
-def key_is_down(name: str):
-    """Does Windows currently see this single-character key as held?
-    Returns None when it cannot be told (multi-character names, API error)."""
-    name = (name or "").strip().lower()
-    if len(name) != 1:
-        return None
-    try:
-        vk = ctypes.windll.user32.VkKeyScanW(ord(name)) & 0xFF
-        return bool(ctypes.windll.user32.GetAsyncKeyState(vk) & 0x8000)
-    except Exception:
-        return None
-
-
-def send_mouse_button(button: str, is_down: bool) -> None:
-    """Press or release a mouse button without the paired half, so it can be
-    held down across an arbitrary duration (used for the PTT key and the
-    hold-key feature, both of which press now and release later)."""
-    down, up, data = _MOUSE_FLAGS.get(button, _MOUSE_FLAGS["left"])
-    event = _INPUT(0, _INPUT_UNION(mi=_MOUSEINPUT(0, 0, data, down if is_down else up, 0, None)))
-    ctypes.windll.user32.SendInput(1, ctypes.byref(event), ctypes.sizeof(event))
-
-
-def send_key_state(name: str, is_down: bool) -> bool:
-    """Hold or release a keyboard key, preferring the scan-code path (see
-    send_scan_code). Returns True if the scan-code path handled it."""
-    # send_scan_code's 2nd argument means "key UP", the opposite of is_down.
-    if send_scan_code(name, not is_down):
-        return True
-    if is_down:
-        keyboard.press(name)
-    else:
-        keyboard.release(name)
-    return False
-
-
-def target_kind_name(value, default="key:v"):
-    """Split a 'key:x' / 'mouse:x' stored target into (kind, name), falling
-    back to treating a legacy plain key name (no prefix) as a keyboard key."""
-    value = value or default
-    kind, sep, name = value.partition(":")
-    if not sep:
-        return "key", value
-    return kind, name
-
-
-def send_key_tap(name: str, hold: float = 0.03) -> None:
-    if send_scan_code(name, False):
-        time.sleep(hold)
-        send_scan_code(name, True)
-    else:
-        keyboard.press(name)
-        time.sleep(hold)
-        keyboard.release(name)
-
-
-MODIFIERS = ["ctrl", "alt", "shift", "windows"]
-KEY_DISPLAY = {"windows": "Win", "+": "+"}
-MOUSE_BUTTONS = [
-    (Qt.MouseButton.LeftButton, "left", "滑鼠左鍵"),
-    (Qt.MouseButton.RightButton, "right", "滑鼠右鍵"),
-    (Qt.MouseButton.MiddleButton, "middle", "滑鼠中鍵"),
-    (Qt.MouseButton.BackButton, "x1", "滑鼠側鍵 1（後退）"),
-    (Qt.MouseButton.ForwardButton, "x2", "滑鼠側鍵 2（前進）"),
-]
-
-
-def hotkey_names(text):
-    """'ctrl+alt+plus' -> ['ctrl', 'alt', '+'] (the + key is stored as 'plus')."""
-    text = (text or "").strip().lower()
-    if not text:
-        return []
-    if text == "+":
-        return ["+"]
-    text = text.replace("++", "+plus")
-    return ["+" if p == "plus" else p for p in (s.strip() for s in text.split("+")) if p]
-
-
-def hotkey_text(names):
-    return "+".join("plus" if n == "+" else n for n in names)
-
-
-def key_label(name):
-    return KEY_DISPLAY.get(name, name.capitalize() if len(name) > 1 else name.upper())
-
-
-def hotkey_display(text):
-    return " + ".join(key_label(n) for n in hotkey_names(text))
-
-
-def target_display(value):
-    kind, _, name = (value or "").partition(":")
-    if kind == "mouse":
-        for _btn, key, label in MOUSE_BUTTONS:
-            if key == name:
-                return label
-    if kind == "key" and name:
-        return "鍵盤：" + key_label(name)
-    return "尚未選擇"
-
-
-def _listen_style():
-    return T.get("LISTEN_QSS", "border-color: #ff9bb0; background: #2a2036;")
-
-
-# ---- vector icons (drawn in code, so no image files need to be shipped) ----
-def restyle(widget):
-    """Re-apply the stylesheet after objectName / property changes."""
-    widget.style().unpolish(widget)
-    widget.style().polish(widget)
-    widget.update()
-
-
-def app_icon_pixmap(size=256):
-    pix = QPixmap(size, size)
-    pix.fill(Qt.GlobalColor.transparent)
-    p = QPainter(pix)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    s = float(size)
-    bg = QLinearGradient(0, 0, s, s)
-    bg.setColorAt(0.0, QColor("#9a8cff"))
-    bg.setColorAt(1.0, QColor("#4a3fc2"))
-    p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(QBrush(bg))
-    p.drawRoundedRect(QRectF(0, 0, s, s), s * 0.23, s * 0.23)
-    # five "echo" sound bars; the outer ones fade like an echo
-    heights = [0.26, 0.48, 0.72, 0.48, 0.26]
-    alphas = [150, 215, 255, 215, 150]
-    bar_w, gap = s * 0.095, s * 0.058
-    total = 5 * bar_w + 4 * gap
-    x = (s - total) / 2
-    for h, a in zip(heights, alphas):
-        bar_h = s * h
-        color = QColor(255, 255, 255, a)
-        p.setBrush(QBrush(color))
-        p.drawRoundedRect(QRectF(x, (s - bar_h) / 2, bar_w, bar_h), bar_w / 2, bar_w / 2)
-        x += bar_w + gap
-    p.end()
-    return pix
-
-
-def make_app_icon():
-    icon = QIcon()
-    for size in (16, 24, 32, 48, 64, 128, 256):
-        icon.addPixmap(app_icon_pixmap(size))
-    return icon
-
-
-def _nav_pixmap(kind, color, size=44):
-    pix = QPixmap(size, size)
-    pix.fill(Qt.GlobalColor.transparent)
-    p = QPainter(pix)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    p.scale(size / 48.0, size / 48.0)
-    c = QColor(color)
-    pen = QPen(c, 3.4)
-    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-    p.setPen(pen)
-    p.setBrush(Qt.BrushStyle.NoBrush)
-    if kind == "music":
-        p.setBrush(QBrush(c))
-        p.drawEllipse(QPointF(15, 35), 6.5, 5.2)
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawLine(QPointF(21, 34), QPointF(21, 11))
-        path = QPainterPath(QPointF(21, 11))
-        path.cubicTo(28, 13, 34, 16, 33, 25)
-        p.drawPath(path)
-    elif kind == "keys":
-        p.drawRoundedRect(QRectF(5, 12, 38, 24), 5, 5)
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QBrush(c))
-        for row_y in (18, 24.5):
-            for key_x in (10, 17.5, 25, 32.5):
-                p.drawRoundedRect(QRectF(key_x, row_y, 5, 3.4), 1, 1)
-        p.drawRoundedRect(QRectF(15, 30, 18, 3), 1.2, 1.2)
-    elif kind == "mouse":
-        p.setBrush(QBrush(c))
-        pen.setWidthF(2.2)
-        p.setPen(pen)
-        arrow = QPainterPath(QPointF(13, 8))
-        for x, y in [(13, 35), (20, 29), (25, 40), (30, 38), (25, 27), (34, 27)]:
-            arrow.lineTo(x, y)
-        arrow.closeSubpath()
-        p.drawPath(arrow)
-    elif kind == "pulse":
-        path = QPainterPath(QPointF(4, 26))
-        for x, y in [(15, 26), (20, 12), (28, 38), (33, 26), (44, 26)]:
-            path.lineTo(x, y)
-        p.drawPath(path)
-    elif kind == "radio":
-        p.drawRoundedRect(QRectF(5, 18, 38, 23), 6, 6)
-        p.drawLine(QPointF(30, 18), QPointF(39, 6))
-        p.drawEllipse(QPointF(16.5, 29.5), 5.2, 5.2)
-        p.drawLine(QPointF(27, 26), QPointF(37, 26))
-        p.drawLine(QPointF(27, 33), QPointF(37, 33))
-    elif kind == "play":
-        p.drawRoundedRect(QRectF(5, 11, 38, 26), 9, 9)
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QBrush(c))
-        p.drawPolygon(QPolygonF([QPointF(20, 18), QPointF(20, 30), QPointF(30.5, 24)]))
-    elif kind == "gear":
-        import math
-        p.drawEllipse(QPointF(24, 24), 11, 11)
-        p.drawEllipse(QPointF(24, 24), 4.2, 4.2)
-        for i in range(8):
-            a = math.radians(i * 45)
-            p.drawLine(QPointF(24 + 11 * math.cos(a), 24 + 11 * math.sin(a)),
-                       QPointF(24 + 17 * math.cos(a), 24 + 17 * math.sin(a)))
-    p.end()
-    return pix
-
-
-def nav_icon(kind):
-    icon = QIcon()
-    icon.addPixmap(_nav_pixmap(kind, T.get("NAV_OFF", "#8d92b0")), QIcon.Mode.Normal, QIcon.State.Off)
-    icon.addPixmap(_nav_pixmap(kind, T.get("NAV_ON", "#ffffff")), QIcon.Mode.Normal, QIcon.State.On)
-    return icon
-
-
-class HotkeyEdit(QPushButton):
-    """Click once -> 'press keys...'; press a combo -> shown live; release -> saved."""
-    changed = Signal(str)
-    capture_state = Signal(bool)
-    _key_event = Signal(str, bool)
-
-    def __init__(self, value=""):
-        super().__init__()
-        self.setObjectName("hotkeyEdit")
-        self.value = value
-        self.listening = False
-        self._hook = None
-        self._pressed = set()
-        self._seq = []
-        self._key_event.connect(self._on_key)
-        self.clicked.connect(self._toggle)
-        self._refresh()
-
-    def set_value(self, value):
-        self.value = value
-        self._refresh()
-
-    def clear_value(self):
-        self._stop_listening()
-        self.value = ""
-        self._refresh()
-        self.changed.emit("")
-        self.capture_state.emit(False)
-
-    def _refresh(self):
-        if self.listening:
-            live = " + ".join(key_label(n) for n in self._seq)
-            self.setText(live + " …" if live else "請按下按鍵…（可組合，例如 Ctrl + Alt + P）")
-            self.setStyleSheet(_listen_style())
-        else:
-            self.setText(hotkey_display(self.value) or "未設定（點一下設定）")
-            self.setStyleSheet("")
-
-    def _toggle(self):
-        if self.listening:
-            self._stop_listening(); self._refresh(); self.capture_state.emit(False)
-            return
-        self.listening = True
-        self._pressed.clear(); self._seq.clear()
-        self.capture_state.emit(True)
-        self._hook = keyboard.hook(lambda e: self._key_event.emit(e.name or "", e.event_type == "down"))
-        self._refresh()
-
-    def _stop_listening(self):
-        if self._hook is not None:
-            try:
-                keyboard.unhook(self._hook)
-            except Exception:
-                pass
-            self._hook = None
-        self.listening = False
-
-    def _on_key(self, name, down):
-        if not self.listening or not name:
-            return
-        if down:
-            if name not in self._pressed:
-                self._pressed.add(name)
-                if name not in self._seq:
-                    self._seq.append(name)
-            self._refresh()
-        else:
-            self._pressed.discard(name)
-            if not self._pressed and self._seq:
-                order = sorted(self._seq, key=lambda n: (MODIFIERS.index(n) if n in MODIFIERS else len(MODIFIERS),
-                                                         self._seq.index(n)))
-                self._stop_listening()
-                self.value = hotkey_text(order)
-                self._refresh()
-                self.changed.emit(self.value)
-                self.capture_state.emit(False)
-
-    # While listening, Space/Enter/Tab must be recorded, not "click" the button.
-    def keyPressEvent(self, event):
-        if self.listening:
-            event.accept()
-        else:
-            super().keyPressEvent(event)
-
-    def keyReleaseEvent(self, event):
-        if self.listening:
-            event.accept()
-        else:
-            super().keyReleaseEvent(event)
-
-    def focusNextPrevChild(self, nxt):
-        return False if self.listening else super().focusNextPrevChild(nxt)
-
-    def focusOutEvent(self, event):
-        if self.listening:
-            self._stop_listening(); self._refresh(); self.capture_state.emit(False)
-        super().focusOutEvent(event)
-
-
-class ClickTargetEdit(QPushButton):
-    """Click once to arm; the next keyboard key OR mouse button pressed is chosen."""
-    changed = Signal(str)
-    capture_state = Signal(bool)
-    _key_event = Signal(str)
-
-    def __init__(self, value="mouse:left"):
-        super().__init__()
-        self.setObjectName("hotkeyEdit")
-        self.value = value
-        self.listening = False
-        self._hook = None
-        self._key_event.connect(self._on_key)
-        self._refresh()
-
-    def _refresh(self):
-        if self.listening:
-            self.setText("請按下要連點的「鍵盤按鍵」或「滑鼠按鍵」…")
-            self.setStyleSheet(_listen_style())
-        else:
-            self.setText(target_display(self.value))
-            self.setStyleSheet("")
-
-    def _start(self):
-        self.listening = True
-        self.capture_state.emit(True)
-        self._hook = keyboard.hook(lambda e: self._key_event.emit(e.name or "") if e.event_type == "down" else None)
-        self.grabMouse()  # any mouse button pressed inside the EchoDeck window is captured
-        self._refresh()
-
-    def _stop(self):
-        if self._hook is not None:
-            try:
-                keyboard.unhook(self._hook)
-            except Exception:
-                pass
-            self._hook = None
-        self.releaseMouse()
-        self.listening = False
-
-    def _finish(self, value):
-        self._stop()
-        self.value = value
-        self._refresh()
-        self.changed.emit(value)
-        self.capture_state.emit(False)
-
-    def _on_key(self, name):
-        if self.listening and name:
-            self._finish("key:" + name)
-
-    def mousePressEvent(self, event):
-        if not self.listening:
-            self._start()
-        else:
-            for button, key, _label in MOUSE_BUTTONS:
-                if event.button() == button:
-                    self._finish("mouse:" + key)
-                    break
-        event.accept()
-
-    def mouseReleaseEvent(self, event):
-        event.accept()
-
-    def keyPressEvent(self, event):
-        event.accept() if self.listening else super().keyPressEvent(event)
-
-    def keyReleaseEvent(self, event):
-        event.accept() if self.listening else super().keyReleaseEvent(event)
-
-    def focusNextPrevChild(self, nxt):
-        return False if self.listening else super().focusNextPrevChild(nxt)
-
-    def focusOutEvent(self, event):
-        if self.listening:
-            self._stop(); self._refresh(); self.capture_state.emit(False)
-        super().focusOutEvent(event)
-
-
-class MouseHotkeyEdit(ClickTargetEdit):
-    """Click once to arm, then press a mouse MIDDLE or SIDE button inside the
-    EchoDeck window. Left/right are refused: they would fire on every click."""
-    ALLOWED = ("middle", "x1", "x2")
-
-    def _refresh(self):
-        if self.listening:
-            self.setText("請在此視窗內按下滑鼠「中鍵」或「側鍵」…")
-            self.setStyleSheet(_listen_style())
-        else:
-            self.setText(target_display(self.value) if self.value else "未設定（點一下設定）")
-            self.setStyleSheet("")
-
-    def _start(self):
-        self.listening = True  # mouse only: no keyboard hook
-        self.capture_state.emit(True)
-        self.grabMouse()
-        self._refresh()
-
-    def _on_key(self, name):
-        pass
-
-    def clear_value(self):
-        self._stop()
-        self.value = ""
-        self._refresh()
-        self.changed.emit("")
-        self.capture_state.emit(False)
-
-    def mousePressEvent(self, event):
-        if not self.listening:
-            self._start()
-        else:
-            for button, key, _label in MOUSE_BUTTONS:
-                if event.button() == button:
-                    if key in self.ALLOWED:
-                        self._finish("mouse:" + key)
-                    else:
-                        self.setText("左鍵／右鍵不能當快捷鍵，請改按中鍵或側鍵…")
-                    break
-        event.accept()
-
-
-class AutoClicker:
-    MIN_INTERVAL = 0.02  # seconds (max ~50 clicks/sec)
-
-    def __init__(self):
-        self.target = "mouse:left"
-        self.interval = 0.1
-        self._stop_event = None
-        self._thread = None
-
-    @property
-    def running(self):
-        return self._thread is not None and self._thread.is_alive() and not self._stop_event.is_set()
-
-    def start(self):
-        if self.running:
-            return
-        self._stop_event = threading.Event()
-        self._thread = threading.Thread(target=self._loop, args=(self._stop_event,), daemon=True)
-        self._thread.start()
-
-    def stop(self):
-        if self._stop_event is not None:
-            self._stop_event.set()
-
-    def _loop(self, stop_event):
-        try:  # 1 ms timer resolution; default Windows timer is ~15.6 ms
-            ctypes.windll.winmm.timeBeginPeriod(1)
-        except Exception:
-            pass
-        try:
-            next_time = time.perf_counter()
-            while not stop_event.is_set():
-                interval = max(self.MIN_INTERVAL, float(self.interval))
-                self._click_once(min(0.03, interval * 0.4))
-                next_time += interval
-                delay = next_time - time.perf_counter()
-                if delay < 0:  # fell behind: do not burst-click to catch up
-                    next_time, delay = time.perf_counter(), 0
-                if stop_event.wait(delay):
-                    break
-        finally:
-            try:
-                ctypes.windll.winmm.timeEndPeriod(1)
-            except Exception:
-                pass
-
-    def _click_once(self, hold=0.03):
-        kind, _, name = self.target.partition(":")
-        try:
-            if kind == "mouse":
-                send_mouse_click(name, hold)
-            elif kind == "key" and name:
-                send_key_tap(name, hold)
-        except Exception:
-            pass
-
-
-class HoldAction:
-    """Holds a keyboard key or mouse button down (not repeated clicking) until
-    stopped, optionally for a fixed duration. Same target format as AutoClicker."""
-
-    def __init__(self):
-        self.target = "key:v"
-        self.active = False
-        self._scan_code_down = False
-
-    @property
-    def running(self):
-        return self.active
-
-    def start(self):
-        if self.active:
-            return
-        kind, name = target_kind_name(self.target)
-        try:
-            if kind == "mouse":
-                send_mouse_button(name, True)
-            elif name:
-                self._scan_code_down = send_key_state(name, True)
-        except Exception:
-            pass
-        self.active = True
-
-    def stop(self):
-        if not self.active:
-            return
-        kind, name = target_kind_name(self.target)
-        try:
-            if kind == "mouse":
-                send_mouse_button(name, False)
-            elif name:
-                send_key_state(name, False)
-        except Exception:
-            pass
-        self.active = False
-
-
-HOTKEY_ROWS = [
-    ("play_hotkey", "播放選取歌曲", "播放目前在音樂庫選好的歌曲"),
-    ("random_hotkey", "隨機播放", "從資料夾隨機挑一首並開始區域發話"),
-    ("next_hotkey", "下一首", "依資料夾順序播放下一首"),
-    ("stop_hotkey", "停止全部音效", "立刻停止全部音效並放開遊戲 PTT"),
-    ("pause_hotkey", "暫停／繼續", "暫停目前音效（放開 PTT）；再按一次從原位置繼續"),
-    ("loop_hotkey", "單曲循環開／關", "開啟後，目前歌曲播完會自動從頭重播"),
-    ("volume_up_hotkey", "音量加大", "每按一次 +5%（上限 200%），按住會慢速連續調整"),
-    ("volume_down_hotkey", "音量減小", "每按一次 −5%，按住會慢速連續調整"),
-    ("mic_hotkey", "麥克風開／關", "開啟／關閉麥克風混音"),
-]
-
-
-@dataclass
-class Settings:
-    music_folder: str = ""
-    output_device: str = ""
-    ptt_key: str = "v"
-    auto_ptt: bool = True
-    ptt_delay_ms: int = 180
-    release_delay_ms: int = 100
-    shuffle: bool = True
-    continue_playback: bool = False
-    volume: int = 85
-    monitor_enabled: bool = True
-    monitor_device: str = ""
-    microphone_device: str = ""
-    microphone_enabled: bool = False
-    mute_mic_while_sound: bool = True
-    music_volume: int = 85
-    microphone_volume: int = 100
-    mic_hotkey: str = "ctrl+alt+m"
-    stop_hotkey: str = "ctrl+alt+backspace"
-    play_hotkey: str = "ctrl+alt+space"
-    random_hotkey: str = "ctrl+alt+r"
-    next_hotkey: str = "ctrl+alt+n"
-    loop_hotkey: str = "ctrl+alt+l"
-    normalize_audio: bool = True
-    theme: str = "tokyo"  # see THEMES
-    autoplay_mode: str = "off"  # off, random, sequential, loop
-    pause_hotkey: str = "ctrl+alt+p"
-    volume_up_hotkey: str = "ctrl+alt+up"
-    volume_down_hotkey: str = "ctrl+alt+down"
-    clicker_target: str = "mouse:left"
-    clicker_interval: float = 0.1
-    clicker_duration: int = 60  # auto-stop after N seconds; 0 = no limit
-    clicker_hotkey: str = "ctrl+alt+c"  # keyboard hotkey: press once to start, again to stop
-    clicker_mouse_hotkey: str = ""  # optional mouse hotkey: "mouse:middle" / "mouse:x1" / "mouse:x2"
-    clicker_delay: float = 3.0  # seconds to wait before clicking starts (0.5 - 3.0)
-    clicker_presets: list = field(default_factory=list)  # [{name, target, interval, duration, delay}]
-    hold_target: str = "key:v"
-    hold_duration: int = 5  # auto-release after N seconds; 0 = until stopped manually
-    hold_delay: float = 3.0  # seconds to wait before the hold starts (0.5 - 3.0)
-    hold_hotkey: str = "ctrl+alt+h"  # keyboard hotkey: press once to start, again to stop
-    hold_mouse_hotkey: str = ""  # optional mouse hotkey: "mouse:middle" / "mouse:x1" / "mouse:x2"
-    # Full file paths are stored directly, so these lists never depend on a folder.
-    music_folders: list = field(default_factory=list)  # every folder merged into one library
-    favorites: list = field(default_factory=list)      # full paths of favourite songs
-    last_view_mode: str = "all"   # remembers whether the 全部/最愛 tab was active on exit
-    last_track: str = ""          # full path of the song that was selected/playing on exit (全部 tab)
-    last_fav_track: str = ""      # same, but remembered separately for the 最愛 tab
-    # ---- online sources ----
-    radio_favorites: list = field(default_factory=list)  # [{name, url, urls, cc, tags, custom}]
-    radio_country: str = ""       # "" = 全球, otherwise an ISO country code such as "TW"
-    radio_genre: str = "ambient"  # Radio Browser tag; "" = 不限
-    radio_view: str = "all"       # "all" or "fav"
-    yt_favorites: list = field(default_factory=list)     # [{id, title, url, channel, duration, file}]
-    yt_after: str = "next"        # what to do when a YouTube song ends: stop / next / loop
-    yt_cookies_browser: str = ""  # "", "chrome", "edge", "firefox" (only needed when YouTube asks for a login)
-    tools_dir: str = ""           # where yt-dlp.exe / deno.exe live; "" = default (%APPDATA%\\EchoDeck\\tools)
-    viz_style: str = "bars"       # playing visualiser: off / bars / mirror / wave / circle
-    viz_size: str = "normal"      # in-page visualiser size: normal / large / fill
-    viz_ambient: str = "soft"     # whole-window bass glow: off / soft / strong
-    viz_glow: int = 60            # bass glow strength 0-100
-    viz_flow: bool = True         # colours drift slowly
-    playlists: list = field(default_factory=list)       # [{id, name, tracks: [full paths]}]
-    last_pl_tracks: dict = field(default_factory=dict)  # playlist id -> last selected song
-    yt_fav_dir: str = ""          # where favourite YouTube songs are saved; "" = default (%APPDATA%\\EchoDeck\\YouTube最愛)
-
-
-PEAK_CACHE_PATH = CONFIG_PATH.parent / "peaks.json"
-_peak_cache = None
-_peak_lock = threading.Lock()
-
-
-def peak_cache_key(path):
-    if "://" in str(path):      # network sources have no stable file identity
-        return None
-    try:
-        st = Path(path).stat()
-        return f"{path}|{st.st_size}|{st.st_mtime_ns}"
-    except OSError:
-        return None
-
-
-def peak_cache_get(key):
-    """Peak level found by an earlier full playback of the same file (0 = unknown)."""
-    global _peak_cache
-    if not key:
-        return 0.0
-    with _peak_lock:
-        if _peak_cache is None:
-            try:
-                _peak_cache = json.loads(PEAK_CACHE_PATH.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                _peak_cache = {}
-        return float(_peak_cache.get(key, 0.0))
-
-
-def peak_cache_put(key, peak):
-    if not key:
-        return
-    with _peak_lock:
-        if _peak_cache is None:
-            return
-        _peak_cache[key] = round(float(peak), 5)
-        for old in list(_peak_cache)[:max(0, len(_peak_cache) - 5000)]:
-            del _peak_cache[old]
-        try:
-            PEAK_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-            PEAK_CACHE_PATH.write_text(json.dumps(_peak_cache), encoding="utf-8")
-        except OSError:
-            pass
-
-
-# ---- online sources: web radio + YouTube --------------------------------------
-UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) EchoDeck/2.4"
-APP_DIR = CONFIG_PATH.parent
-TOOLS_DIR_DEFAULT = APP_DIR / "tools"
-_TOOLS_CUSTOM = [""]                                     # folder chosen in 設定 ("" = use the default)
-
-
-def tools_dir():
-    return Path(_TOOLS_CUSTOM[0]) if _TOOLS_CUSTOM[0] else TOOLS_DIR_DEFAULT
-
-
-def ytdlp_exe():
-    return tools_dir() / "yt-dlp.exe"                    # downloaded on first use (see yt_tools_dialog)
-
-
-def deno_exe():
-    return tools_dir() / "deno.exe"
-YTDLP_URL = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
-DENO_URL = "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip"
-
-RADIO_COUNTRIES = [("全球", ""), ("台灣", "TW"), ("日本", "JP"), ("韓國", "KR"), ("美國", "US"),
-                   ("英國", "GB"), ("德國", "DE"), ("法國", "FR"), ("加拿大", "CA"), ("澳洲", "AU")]
-RADIO_GENRES = [("純音樂", "instrumental"), ("氛圍", "ambient"), ("Lofi", "lofi"), ("古典", "classical"),
-                ("爵士", "jazz"), ("鋼琴", "piano"), ("放鬆", "chillout"), ("冥想", "meditation"),
-                ("電子", "electronic"), ("不限", "")]
-COUNTRY_NAMES = {code: name for name, code in RADIO_COUNTRIES if code}
-COUNTRY_NAMES.update({"HK": "香港", "CN": "中國", "SG": "新加坡", "NL": "荷蘭", "IT": "義大利", "ES": "西班牙",
-                      "CH": "瑞士", "AT": "奧地利", "RU": "俄羅斯", "BR": "巴西", "SE": "瑞典", "BE": "比利時",
-                      "NZ": "紐西蘭", "TH": "泰國", "PL": "波蘭", "CZ": "捷克"})
-GENRE_NAMES = {value: name for name, value in RADIO_GENRES if value}
-GENRE_NAMES.update({"downtempo": "Downtempo", "lounge": "Lounge", "soundtrack": "影視原聲", "mellow": "Mellow"})
-# Stations tagged like this are almost always talking, so they are hidden when browsing by genre.
-TALK_TAGS = {"talk", "talk radio", "news", "news talk", "sports", "sport", "podcast", "politics", "comedy",
-             "religion", "christian", "gospel", "preaching", "call-in", "public radio", "interview"}
-
-
-def _soma(slug, name, tags):
-    return {"name": f"SomaFM {name}", "cc": "US", "tags": tags, "bitrate": 128, "curated": True,
-            "urls": [f"https://ice.somafm.com/{slug}", f"https://somafm.com/{slug}.pls"]}
-
-
-# A short hand-picked list that needs no network lookup. Every entry is a station that is
-# (nearly) free of presenters. Taiwan / Japan / Korea stations come from the live search.
-CURATED_STATIONS = [
-    _soma("groovesalad", "Groove Salad", ["ambient", "downtempo", "chillout"]),
-    _soma("dronezone", "Drone Zone", ["ambient", "meditation"]),
-    _soma("deepspaceone", "Deep Space One", ["ambient", "meditation"]),
-    _soma("spacestation", "Space Station", ["electronic", "ambient"]),
-    _soma("lush", "Lush", ["chillout", "downtempo"]),
-    _soma("fluid", "Fluid", ["instrumental", "chillout"]),
-    _soma("sonicuniverse", "Sonic Universe", ["jazz", "instrumental"]),
-    _soma("secretagent", "Secret Agent", ["lounge", "soundtrack", "chillout"]),
-    _soma("illstreet", "Illinois Street Lounge", ["jazz", "lounge"]),
-    _soma("n5md", "n5MD", ["ambient", "electronic"]),
-    _soma("synphaera", "Synphaera", ["ambient", "electronic"]),
-    {"name": "Radio Swiss Classic", "cc": "CH", "tags": ["classical", "instrumental"], "bitrate": 128,
-     "curated": True, "urls": ["https://stream.srg-ssr.ch/m/rsc_de/mp3_128"]},
-    {"name": "Radio Swiss Jazz", "cc": "CH", "tags": ["jazz", "instrumental"], "bitrate": 128,
-     "curated": True, "urls": ["https://stream.srg-ssr.ch/m/rsj/mp3_128"]},
-    {"name": "FIP Jazz", "cc": "FR", "tags": ["jazz"], "bitrate": 128, "curated": True,
-     "urls": ["https://icecast.radiofrance.fr/fipjazz-midfi.mp3"]},
-    {"name": "FIP Groove", "cc": "FR", "tags": ["chillout", "electronic"], "bitrate": 128, "curated": True,
-     "urls": ["https://icecast.radiofrance.fr/fipgroove-midfi.mp3"]},
-    {"name": "Radio Paradise Mellow Mix", "cc": "US", "tags": ["chillout", "mellow"], "bitrate": 128,
-     "curated": True, "urls": ["https://stream.radioparadise.com/mellow-128"]},
-]
-
-YT_SUGGESTIONS = [
-    ("Lofi 純音樂", "lofi hip hop instrumental no lyrics"), ("鋼琴放鬆", "relaxing piano music no talking"),
-    ("爵士器樂", "jazz instrumental music"), ("氛圍 Ambient", "ambient music long mix"),
-    ("讀書專注", "study focus music no lyrics"), ("古典音樂", "classical music playlist"),
-    ("24/7 直播", "lofi 24/7 live radio"),
-]
-
-
-def fmt_duration(seconds):
-    try:
-        seconds = int(seconds)
-    except (TypeError, ValueError):
-        return ""
-    if seconds <= 0:
-        return ""
-    h, rest = divmod(seconds, 3600)
-    m, s = divmod(rest, 60)
-    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
-
-
-def _http_get(url, timeout=10, limit=None):
-    req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "*/*"})
-    with urllib.request.urlopen(req, timeout=timeout) as response:
-        return response.read(limit) if limit else response.read()
-
-
-def resolve_playlist_url(url):
-    """.pls / .m3u / .asx are tiny text files that point at the real stream; FFmpeg cannot open them."""
-    low = url.lower().split("?")[0]
-    if not low.endswith((".pls", ".m3u", ".asx")):
-        return [url]
-    try:
-        text = _http_get(url, 8, 65536).decode("utf-8", "replace")
-        found = re.findall(r"https?://[^\s\"'<>]+", text)
-        return found[:3] or [url]
-    except Exception:
-        return [url]
-
-
-# -- Radio Browser (community station directory) --
-_RB_FALLBACK = ["https://de1.api.radio-browser.info", "https://de2.api.radio-browser.info",
-                "https://fi1.api.radio-browser.info", "https://nl1.api.radio-browser.info",
-                "https://at1.api.radio-browser.info"]
-_rb_servers = None
-
-
-def radio_servers():
-    global _rb_servers
-    if _rb_servers is None:
-        names = []
-        try:
-            data = json.loads(_http_get("https://all.api.radio-browser.info/json/servers", 6).decode("utf-8"))
-            names = [f"https://{d['name']}" for d in data if isinstance(d, dict) and d.get("name")]
-        except Exception:
-            pass
-        random.shuffle(names)
-        _rb_servers = names + [s for s in _RB_FALLBACK if s not in names]
-    return _rb_servers
-
-
-def radio_search(params, limit=150):
-    query = urllib.parse.urlencode({"hidebroken": "true", "order": "votes", "reverse": "true",
-                                    "limit": str(limit), **params})
-    last = None
-    for base in radio_servers()[:4]:
-        try:
-            data = json.loads(_http_get(f"{base}/json/stations/search?{query}", 10).decode("utf-8"))
-            return [s for s in data if isinstance(s, dict)]
-        except Exception as exc:
-            last = exc
-    raise RuntimeError(f"連不上電台資料庫（{last}）")
-
-
-def station_from_rb(s):
-    url = (s.get("url_resolved") or s.get("url") or "").strip()
-    if not url.lower().startswith(("http://", "https://")):
-        return None
-    tags = [t.strip().lower() for t in (s.get("tags") or "").split(",") if t.strip()]
-    try:
-        bitrate = int(s.get("bitrate") or 0)
-    except (TypeError, ValueError):
-        bitrate = 0
-    return {"name": (s.get("name") or "").strip() or "（未命名電台）", "urls": [url],
-            "cc": (s.get("countrycode") or "").upper(), "tags": tags[:6], "bitrate": bitrate,
-            "codec": (s.get("codec") or "").upper()}
-
-
-def radio_query(text, cc, tag):
-    params = {}
-    if text:
-        params["name"] = text
-    elif tag:
-        params["tag"] = tag
-    if cc:
-        params["countrycode"] = cc
-    if not params:              # 全球 + 不限：給一個合理的預設
-        params["tag"] = "ambient"
-    seen, out = set(), []
-    for raw in radio_search(params):
-        st = station_from_rb(raw)
-        if st is None:
-            continue
-        if not text and set(st["tags"]) & TALK_TAGS:
-            continue
-        key = re.sub(r"\W+", "", st["name"].lower())
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(st)
-        if len(out) >= 60:
-            break
-    return out
-
-
-def curated_matches(text, cc, tag):
-    text = text.strip().lower()
-    out = []
-    for s in CURATED_STATIONS:
-        if text:
-            ok = text in s["name"].lower() and (not cc or s["cc"] == cc)
-        else:
-            ok = (not cc or s["cc"] == cc) and (not tag or tag in s["tags"])
-        if ok:
-            out.append(s)
-    return out
-
-
-# -- yt-dlp (YouTube). The official yt-dlp.exe is downloaded once and run as a separate program:
-#    it brings its own Python + every dependency, so nothing has to be bundled into EchoDeck.exe
-#    and updating it is just downloading a new file. --
-_ytdlp_ver = [None]
-
-
-def ytdlp_path():
-    if ytdlp_exe().is_file():
-        return str(ytdlp_exe())
-    return shutil.which("yt-dlp") or shutil.which("yt-dlp.exe") or ""
-
-
-def ytdlp_available():
-    return bool(ytdlp_path())
-
-
-def _run_hidden(args, timeout):
-    kwargs = {"stdin": subprocess.DEVNULL, "stdout": subprocess.PIPE, "stderr": subprocess.PIPE}
-    if sys.platform == "win32":
-        kwargs["creationflags"] = 0x08000000        # CREATE_NO_WINDOW: no console flash
-    proc = subprocess.run(args, timeout=timeout, **kwargs)
-    return (proc.returncode, proc.stdout.decode("utf-8", "replace"), proc.stderr.decode("utf-8", "replace"))
-
-
-def ytdlp_version(refresh=False):
-    """Version string (needs a process start, so it is cached; call from a worker thread)."""
-    if _ytdlp_ver[0] is None or refresh:
-        exe = ytdlp_path()
-        ver = ""
-        if exe:
-            try:
-                code, out, _err = _run_hidden([exe, "--version"], 30)
-                ver = out.strip() if code == 0 else ""
-            except Exception:
-                ver = ""
-        _ytdlp_ver[0] = ver
-    return _ytdlp_ver[0]
-
-
-def find_js_runtime():
-    """YouTube needs a JavaScript runtime (Deno preferred) for yt-dlp to read the video page."""
-    if deno_exe().is_file():
-        return "deno", str(deno_exe())
-    for name in ("deno", "node", "bun"):
-        path = shutil.which(name)
-        if path:
-            return name, path
-    return None
-
-
-def _ytdlp_args(browser=""):
-    args = ["--ignore-config", "--no-warnings", "--no-colors", "--socket-timeout", "15", "--retries", "2"]
-    runtime = find_js_runtime()
-    if runtime:
-        args += ["--js-runtimes", f"{runtime[0]}:{runtime[1]}"]
-    if browser:
-        args += ["--cookies-from-browser", browser]
-    return args
-
-
-def _ytdlp_json(args, browser="", timeout=90):
-    exe = ytdlp_path()
-    if not exe:
-        raise RuntimeError("尚未安裝 yt-dlp。請按「🔧 YouTube 元件」→「下載」。")
-    try:
-        code, out, err = _run_hidden([exe] + _ytdlp_args(browser) + args, timeout)
-    except subprocess.TimeoutExpired:
-        raise RuntimeError("YouTube 回應太慢（逾時），請稍後再試。")
-    except OSError as exc:
-        raise RuntimeError(f"無法執行 yt-dlp：{exc}")
-    if code != 0 or not out.strip():
-        raise RuntimeError(_yt_friendly_error(err))
-    try:
-        return json.loads(out)
-    except ValueError:
-        raise RuntimeError("yt-dlp 回傳了無法解讀的內容，請試著更新 yt-dlp。")
-
-
-def _yt_friendly_error(message):
-    whole = re.sub(r"\x1b\[[0-9;]*m", "", str(message or "")).strip()
-    lines = [ln.strip() for ln in whole.splitlines() if ln.strip()]
-    errors = [ln for ln in lines if ln.startswith("ERROR")]
-    text = (errors or lines or [""])[-1].replace("ERROR:", "").strip()
-    low = whole.lower()
-    if "sign in to confirm" in low or "not a bot" in low:
-        return "YouTube 要求驗證。請到「🔧 YouTube 元件」→「Cookies 來源」選你平常登入 YouTube 的瀏覽器。"
-    if "js runtime" in low or "javascript" in low or "challenge" in low:
-        return "缺少 JavaScript 執行環境。請到「🔧 YouTube 元件」安裝 Deno，必要時再更新 yt-dlp。"
-    if any(k in low for k in ("private video", "unavailable", "removed", "not available", "blocked")):
-        return "這部影片無法播放（私人、已移除或地區限制）。"
-    if any(k in low for k in ("urlopen error", "timed out", "getaddrinfo", "unable to download", "unable to connect",
-                              "proxy", "connection", "network")):
-        return "連不上 YouTube，請檢查網路。"
-    return (text or "未知錯誤")[:160]
-
-
-def yt_resolve_audio(page_url, browser=""):
-    """Video page URL -> direct audio stream URL (+ headers) that FFmpeg can open."""
-    info = _ytdlp_json(["-J", "--no-playlist", "-f", "bestaudio/best", page_url], browser)
-    if info.get("entries"):
-        info = next((e for e in info["entries"] if e), None)
-    if not info:
-        raise RuntimeError("找不到這個影片。")
-    url = info.get("url")
-    if not url:
-        for fmt in reversed(info.get("formats") or []):
-            if fmt.get("url") and fmt.get("acodec") not in (None, "none"):
-                url = fmt["url"]
-                info["http_headers"] = fmt.get("http_headers") or info.get("http_headers")
-                break
-    if not url:
-        raise RuntimeError("解析不到音訊串流（可能需要更新 yt-dlp 或安裝 Deno）。")
-    return {"url": url, "headers": dict(info.get("http_headers") or {}), "live": bool(info.get("is_live")),
-            "title": info.get("title") or "", "channel": info.get("channel") or info.get("uploader") or "",
-            "duration": info.get("duration")}
-
-
-_YT_ID = re.compile(r"(?:v=|youtu\.be/|/shorts/|/embed/|/live/)([\w-]{11})")
-
-
-def yt_list(text, browser=""):
-    """Keyword search, playlist, or single link -> list of entries (cheap 'flat' extraction)."""
-    text = text.strip()
-    is_link = bool(re.match(r"^(https?://|www\.|youtu\.be/|(music\.)?youtube\.com/)", text, re.I))
-    if is_link:
-        if not re.match(r"^https?://", text, re.I):
-            text = "https://" + text
-        is_playlist = bool(re.search(r"[?&]list=|/playlist", text)) and not re.search(r"[?&]v=|youtu\.be/", text)
-        if not is_playlist:             # one video: no need to fetch anything before playing
-            match = _YT_ID.search(text)
-            vid = match.group(1) if match else ""
-            return {"autoplay": True, "entries": [{
-                "id": vid, "title": text, "url": f"https://www.youtube.com/watch?v={vid}" if vid else text,
-                "channel": "", "duration": None, "live": False}]}
-        target = text
-    else:
-        target = f"ytsearch20:{text}"
-    args = ["-J", "--flat-playlist", "--playlist-end", "30", target]
-    info = _ytdlp_json(args, browser)
-    raw = [e for e in ((info or {}).get("entries") or []) if e]
-    entries = []
-    for e in raw:
-        vid = e.get("id") or ""
-        url = e.get("url") or e.get("webpage_url") or ""
-        if not url.startswith("http"):
-            url = f"https://www.youtube.com/watch?v={vid or url}"
-        entries.append({"id": vid, "title": e.get("title") or "（未命名）", "url": url,
-                        "channel": e.get("channel") or e.get("uploader") or "",
-                        "duration": e.get("duration"), "live": e.get("live_status") == "is_live"})
-    if not entries:
-        raise RuntimeError("沒有找到結果。")
-    return {"autoplay": is_link, "entries": entries}
-
-
-YT_FAV_DIR_DEFAULT = APP_DIR / "YouTube最愛"   # default place where favourite songs are saved as real files
-_YT_FAV_CUSTOM = [""]                           # folder chosen in 設定 ("" = use the default)
-
-
-def app_home_dir():
-    """Folder that holds EchoDeck.exe (or this script when run from source)."""
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
-    return Path(__file__).resolve().parent
-
-
-def yt_fav_dir():
-    custom = _YT_FAV_CUSTOM[0]
-    return Path(custom) if custom else YT_FAV_DIR_DEFAULT
-
-
-def yt_fav_dirs():
-    """Every folder EchoDeck may have saved favourites in (current + default)."""
-    return [yt_fav_dir(), YT_FAV_DIR_DEFAULT]
-YT_TMP = APP_DIR / "yt-tmp"               # scratch space while a favourite downloads
-
-
-def yt_safe_filename(title, limit=80):
-    name = re.sub(r'[\\/:*?"<>|\x00-\x1f]', " ", str(title or "")).strip(" .")
-    name = re.sub(r"\s+", " ", name)[:limit].strip(" .")
-    return name or "YouTube 音樂"
-
-
-def yt_fav_file(entry):
-    """Path of the downloaded file of a favourite, or "" when there is none (any more)."""
-    path = (entry or {}).get("file") or ""
-    return path if path and os.path.isfile(path) else ""
-
-
-def finalize_audio(src, dest_base):
-    """Downloaded audio -> final file. WebM/Opus is re-wrapped (no re-encoding) into a real .opus file;
-    anything else keeps its own container."""
-    src = Path(src)
-    if src.suffix.lower() in (".webm", ".opus", ".ogg"):
-        dest = dest_base.with_suffix(".opus")
-        try:
-            with av.open(str(src)) as inp:
-                audio = inp.streams.audio[0]
-                if audio.codec_context.name != "opus":
-                    raise ValueError("not opus")
-                with av.open(str(dest), "w", format="ogg") as out:
-                    template = out.add_stream_from_template(audio)
-                    for packet in inp.demux(audio):
-                        if packet.dts is None:
-                            continue
-                        packet.stream = template
-                        out.mux(packet)
-            return dest
-        except Exception:
-            dest.unlink(missing_ok=True)
-    dest = dest_base.with_suffix(src.suffix.lower() if src.suffix.lower() in FORMATS else ".webm")
-    shutil.move(str(src), str(dest))
-    return dest
-
-
-class YtFavJob:
-    """Downloads one favourite with yt-dlp into YouTube最愛 on a background thread."""
-
-    def __init__(self, entry, browser, on_done):
-        self.entry, self.key, self.browser, self.on_done = entry, entry.get("id") or entry.get("url"), browser, on_done
-        self.cancelled = False
-        self.proc = None
-        threading.Thread(target=self._run, daemon=True).start()
-
-    def cancel(self):
-        self.cancelled = True
-        try:
-            if self.proc is not None and self.proc.poll() is None:
-                self.proc.kill()
-        except Exception:
-            pass
-
-    def _run(self):
-        err = ""
-        tmp = YT_TMP / hashlib.md5(str(self.key).encode("utf-8")).hexdigest()[:12]
-        try:
-            exe = ytdlp_path()
-            if not exe:
-                raise RuntimeError("尚未安裝 yt-dlp，請先到「🔧 YouTube 元件」下載。")
-            shutil.rmtree(tmp, ignore_errors=True)
-            tmp.mkdir(parents=True, exist_ok=True)
-            log = tempfile.TemporaryFile()
-            args = [exe] + _ytdlp_args(self.browser) + ["--no-playlist", "--quiet", "--no-progress", "--fixup", "never",
-                    "-f", "bestaudio[ext=webm]/bestaudio/best", "-o", str(tmp / "audio.%(ext)s"),
-                    self.entry["url"]]
-            kwargs = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": log}
-            if sys.platform == "win32":
-                kwargs["creationflags"] = 0x08000000
-            self.proc = subprocess.Popen(args, **kwargs)
-            code = self.proc.wait()
-            if self.cancelled:
-                return
-            if code != 0:
-                log.seek(0)
-                raise RuntimeError(_yt_friendly_error(log.read().decode("utf-8", "replace")))
-            files = [f for f in tmp.glob("audio.*") if f.suffix not in (".part", ".ytdl")]
-            if not files:
-                raise RuntimeError("沒有下載到檔案")
-            fav_dir = yt_fav_dir()
-            fav_dir.mkdir(parents=True, exist_ok=True)
-            base = fav_dir / yt_safe_filename(self.entry.get("title"))
-            if any(base.with_suffix(ext).exists() for ext in (".opus", ".webm", ".m4a")):
-                base = fav_dir / f"{base.name} ({str(self.key)[-6:]})"
-            final = finalize_audio(files[0], base)
-            if self.cancelled:
-                final.unlink(missing_ok=True)
-                return
-            self.entry["file"] = str(final)
-        except Exception as exc:
-            err = str(exc) or exc.__class__.__name__
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
-        if not self.cancelled:
-            self.on_done(self.key, err)
-
-
-class YtPipe:
-    """File-like object over `yt-dlp -o -`. YouTube often refuses (HTTP 403) when FFmpeg opens a direct
-    googlevideo link, but yt-dlp's own downloader gets through; so yt-dlp downloads and FFmpeg reads
-    the bytes from its output. Not seekable (like a radio), but the song's length is known."""
-
-    def __init__(self, page_url, browser=""):
-        exe = ytdlp_path()
-        if not exe:
-            raise RuntimeError("尚未安裝 yt-dlp。")
-        self.err = tempfile.TemporaryFile()
-        args = [exe] + _ytdlp_args(browser) + ["--no-playlist", "--quiet", "--no-part", "--no-progress",
-                                                "-f", "bestaudio[ext=webm]/bestaudio/best", "-o", "-", page_url]
-        kwargs = {"stdin": subprocess.DEVNULL, "stdout": subprocess.PIPE, "stderr": self.err}
-        if sys.platform == "win32":
-            kwargs["creationflags"] = 0x08000000
-        self.proc = subprocess.Popen(args, **kwargs)
-
-    def read(self, size=-1):
-        return self.proc.stdout.read1(size if size and size > 0 else 65536)
-
-    def error_text(self):
-        try:
-            self.err.seek(0)
-            return self.err.read().decode("utf-8", "replace")
-        except Exception:
-            return ""
-
-    def close(self):
-        try:
-            if self.proc.poll() is None:
-                self.proc.kill()
-            self.proc.stdout.close()
-        except Exception:
-            pass
-        try:
-            self.err.close()
-        except Exception:
-            pass
-
-
-def _download(url, dest):
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    part = dest.with_suffix(dest.suffix + ".part")
-    req = urllib.request.Request(url, headers={"User-Agent": UA})
-    with urllib.request.urlopen(req, timeout=30) as response, open(part, "wb") as out:
-        shutil.copyfileobj(response, out, 1 << 16)
-    return part
-
-
-def update_ytdlp():
-    part = _download(YTDLP_URL, ytdlp_exe())
-    try:
-        with open(part, "rb") as f:
-            if f.read(2) != b"MZ":                      # a Windows program starts with "MZ"
-                raise RuntimeError("下載到的檔案不是有效的 yt-dlp.exe")
-        os.replace(part, ytdlp_exe())
-    finally:
-        if part.exists():
-            part.unlink()
-    ytdlp_version(refresh=True)
-
-
-def install_deno():
-    part = _download(DENO_URL, tools_dir() / "deno.zip")
-    try:
-        with zipfile.ZipFile(part) as z:
-            name = next((n for n in z.namelist() if n.lower().endswith("deno.exe")), None)
-            if name is None:
-                raise RuntimeError("下載到的檔案裡沒有 deno.exe")
-            with z.open(name) as src, open(deno_exe(), "wb") as out:
-                shutil.copyfileobj(src, out)
-    finally:
-        if part.exists():
-            part.unlink()
-
-
-class TrackStreamer:
-    """Decodes one file on a background thread, a few seconds ahead of playback.
-
-    Memory stays at a few MB whatever the file length (a 1 h song used to be
-    decoded whole: ~1.4 GB plus temporary copies). Samples are 48 kHz stereo
-    float32. FFmpeg (PyAV) does the decoding AND the high-quality resampling /
-    channel mixing, so mp3/m4a/aac/wma/flac/ogg/wav/opus all work.
-
-    Blocks are stored with an absolute frame index so the virtual-cable output
-    and the local monitor can read the same song at slightly different
-    positions, exactly like before."""
-    RATE = 48000
-    MAX_AHEAD = RATE * 3        # never decode more than 3 s ahead of the output
-    KEEP_BEHIND = RATE // 2     # keep 0.5 s so the monitor stream may lag a little
-    PREBUFFER = RATE // 4       # play_file() returns once this much is ready
-    MIN_BLOCK = 4096            # coalesce tiny decoder frames into bigger blocks
-    NEVER = 1 << 60
-    FADE_IN = RATE // 4         # soften the hard onset of a new song
-
-    def __init__(self, path, normalize=True, live=False, headers=None, duration=0, opener=None):
-        self.path = str(path)
-        self.is_url = "://" in self.path
-        self.opener = opener                      # () -> file-like source (YtPipe); such a source cannot seek
-        self._source = None
-        self.nosee = opener is not None
-        self.live = bool(live)                    # radio / live stream: endless, no seek, auto-reconnect
-        self.headers = headers or {}
-        self.normalize = normalize
-        self.status = ""                          # shown in the UI, e.g. while reconnecting
-        self.meta_title = ""                      # ICY "now playing" text of a radio stream (best effort)
-        self.max_ahead = self.RATE * (8 if self.live else 3)
-        self.prebuffer = self.RATE * 3 // 2 if self.live else self.PREBUFFER
-        self.container = None
-        self._open()                              # raises on unreadable files / unreachable URLs
-        self.cond = threading.Condition()
-        self.blocks = deque()                     # (start_frame, float32[n, 2])
-        self.pos = 0                              # next frame the output will play
-        self.mon_pos = 0                          # next frame the monitor will play
-        self.end = 0                              # frame index after the last decoded block
-        self.eof = False
-        self.finished = False
-        self.closing = False
-        self.error = ""
-        self.gen = 0
-        self.ready = threading.Event()
-        self._seek = None
-        self._moved = False
-        self._pending, self._pending_frames = [], 0
-        self._dpos = 0                            # decoder-thread only: timeline index of next sample
-        self._target = 0
-        self._sync = False
-        self.cache_key = peak_cache_key(self.path)
-        self.peak = peak_cache_get(self.cache_key)
-        self._gain = self._gain_for(self.peak)
-        self._played = False
-        self.total_est = self._estimate_total()
-        if not self.total_est and duration and not self.live:
-            self.total_est = int(float(duration) * self.RATE)
-        self.thread = threading.Thread(target=self._run, daemon=True)
-
-    def start(self):
-        self.thread.start()
-
-    # ------------------------------------------------------------- public API
-    def total(self):
-        with self.cond:
-            if self.live:
-                return 0
-            return self.end if self.eof else max(self.total_est, self.end)
-
-    def read(self, frames):
-        """Output stream: take up to `frames` samples (zero padded) and advance."""
-        with self.cond:
-            self.pos = max(self.pos, self._first_start())
-            out, got = self._gather(self.pos, frames)
-            self._fade_in(out, self.pos, got)
-            self.pos += got
-            if self.eof and self.pos >= self.end:
-                self.finished = True
-            self._trim()
-            self.cond.notify_all()
-            return out, got
-
-    def read_monitor(self, frames):
-        with self.cond:
-            if self.mon_pos < self._first_start():
-                self.mon_pos = self._first_start()
-            out, got = self._gather(self.mon_pos, frames)
-            self._fade_in(out, self.mon_pos, got)
-            self.mon_pos += got
-            return out, got
-
-    def seek(self, frame):
-        if self.live or self.nosee:
-            return
-        with self.cond:
-            if self.eof or self.total_est:
-                frame = min(frame, self.total() - 1)
-            frame = max(0, frame)
-            self.gen += 1
-            self.blocks.clear()
-            self.pos = self.mon_pos = self.end = frame
-            self.eof = self.finished = False
-            self._seek = frame
-            self.cond.notify_all()
-
-    def close(self):
-        with self.cond:
-            self.closing = True
-            self.cond.notify_all()
-
-    # --------------------------------------------------------------- internals
-    def _first_start(self):
-        return self.blocks[0][0] if self.blocks else self.end
-
-    def _trim(self):
-        limit = self.pos - self.KEEP_BEHIND
-        while self.blocks and self.blocks[0][0] + len(self.blocks[0][1]) <= limit:
-            self.blocks.popleft()
-
-    def _fade_in(self, out, index, got):
-        if got and index < self.FADE_IN:
-            n = min(got, self.FADE_IN - index)
-            out[:n] *= (np.arange(index, index + n, dtype=np.float32) / self.FADE_IN)[:, None]
-
-    def _gather(self, index, frames):
-        out = np.zeros((frames, 2), dtype=np.float32)
-        got = 0
-        for start, arr in self.blocks:
-            cur = index + got
-            if start + len(arr) <= cur:
-                continue
-            if start > cur:
-                break
-            offset = cur - start
-            n = min(len(arr) - offset, frames - got)
-            out[got:got + n] = arr[offset:offset + n]
-            got += n
-            if got >= frames:
-                break
-        return out, got
-
-    def _open(self):
-        if self.opener is not None:
-            self._source = self.opener()
-            self.container = av.open(self._source, timeout=(12.0, 12.0))
-        elif self.is_url:
-            options = {"reconnect": "1", "reconnect_streamed": "1", "reconnect_delay_max": "5",
-                       "user_agent": self.headers.get("User-Agent") or UA}
-            extra = "".join(f"{k}: {v}\r\n" for k, v in self.headers.items()
-                            if k.lower() not in ("user-agent", "host", "accept-encoding"))
-            if extra:
-                options["headers"] = extra
-            self.container = av.open(self.path, options=options, timeout=(12.0, 12.0))
-        else:
-            self.container = av.open(self.path)
-        try:
-            self.stream = self.container.streams.audio[0]
-        except IndexError:
-            self.container.close()
-            raise ValueError("這個檔案裡沒有音訊")
-
-    def _reconnect(self):
-        """Live streams drop now and then: reopen with a growing pause. False = gave up."""
-        delay = 0.5
-        for attempt in range(1, 11):
-            if self.closing:
-                return False
-            self.status = f"連線中斷，重新連線中…（{attempt}）"
-            try:
-                self.container.close()
-            except Exception:
-                pass
-            deadline = time.monotonic() + delay
-            while time.monotonic() < deadline:
-                if self.closing:
-                    return False
-                time.sleep(0.1)
-            try:
-                self._open()
-                self.status = ""
-                return True
-            except Exception:
-                delay = min(delay * 2, 8.0)
-        self.status = ""
-        return False
-
-    def _poll_meta(self):
-        try:
-            meta = self.container.metadata or {}
-            title = (meta.get("StreamTitle") or meta.get("icy-title") or "").strip()
-            if title:
-                self.meta_title = title
-        except Exception:
-            pass
-
-    def _estimate_total(self):
-        if self.live:
-            return 0
-        seconds = None
-        try:
-            if self.stream.duration is not None and self.stream.time_base:
-                seconds = float(self.stream.duration * self.stream.time_base)
-            elif self.container.duration:
-                seconds = self.container.duration / av.time_base
-            elif self.stream.bit_rate:
-                seconds = Path(self.path).stat().st_size * 8 / self.stream.bit_rate
-        except Exception:
-            seconds = None
-        return int((seconds or 0) * self.RATE)
-
-    def _gain_for(self, peak):
-        return min(1.0, 0.80 / peak) if (self.normalize and peak > 0) else 1.0
-
-    def _apply_gain(self, arr):
-        """Peak normalisation without scanning the whole file first: the gain
-        follows the loudest peak decoded so far (it can only go down, smoothly),
-        and a finished play is remembered so the next play is exact."""
-        if not len(arr):
-            return arr
-        peak = float(np.max(np.abs(arr)))
-        if peak > self.peak:
-            self.peak = peak
-        target = self._gain_for(self.peak)
-        if target != self._gain:
-            gain = np.full((len(arr), 1), target, dtype=np.float32)
-            if self._played:
-                # short ramp (<= 5 ms) so a gain change cannot click; the very
-                # first block has nothing before it, so it gets the gain at once
-                n = min(len(arr), 240)
-                gain[:n, 0] = np.linspace(self._gain, target, n, dtype=np.float32)
-            self._gain = target
-            self._played = True
-            return arr * gain
-        self._played = True
-        return arr * np.float32(target) if target != 1.0 else arr
-
-    def _flush_pending(self, gen, force=False):
-        if not self._pending or (self._pending_frames < self.MIN_BLOCK and not force):
-            return True
-        arr = self._pending[0] if len(self._pending) == 1 else np.concatenate(self._pending)
-        self._pending, self._pending_frames = [], 0
-        # drop everything before the requested seek position
-        if self._dpos + len(arr) <= self._target:
-            self._dpos += len(arr)
-            return True
-        if self._dpos < self._target:
-            arr = arr[self._target - self._dpos:]
-            self._dpos = self._target
-        arr = self._apply_gain(arr)
-        with self.cond:
-            if gen != self.gen or self.closing:
-                return False
-            self.blocks.append((self._dpos, arr))
-            self.end = self._dpos + len(arr)
-            if self.end - self.pos >= self.prebuffer:
-                self.ready.set()
-            self.cond.notify_all()
-        self._dpos += len(arr)
-        return True
-
-    def _convert(self, resampler, frame):
-        """AudioFrame -> list of float32[n, 2] blocks at 48 kHz stereo."""
-        out = resampler.resample(frame)
-        if out is None:
-            return []
-        if not isinstance(out, (list, tuple)):
-            out = [out]
-        return [f.to_ndarray().reshape(-1, 2) for f in out]
-
-    def _new_resampler(self):
-        return av.AudioResampler(format="flt", layout="stereo", rate=self.RATE)
-
-    def _run(self):
-        resampler, packets, bad = None, None, 0
-        try:
-            while True:
-                with self.cond:
-                    while True:
-                        if self.closing:
-                            return
-                        if self._seek is not None:
-                            break
-                        if self.eof:
-                            self.cond.wait(0.1)
-                        elif self.end - self.pos < self.max_ahead:
-                            break
-                        else:
-                            self.cond.wait(0.05)
-                    seek, self._seek = self._seek, None
-                    gen = self.gen
-                if seek is not None or packets is None:
-                    self._pending, self._pending_frames = [], 0
-                    if self.live:                  # (re)connect: the timeline just keeps counting
-                        self._target = self._dpos = max(self.end, self._dpos)
-                    else:
-                        self._target = seek or 0
-                        self._dpos = self._target
-                    if seek is not None:
-                        self._moved = True
-                        self.container.seek(int((seek / self.RATE) / self.stream.time_base),
-                                            stream=self.stream, backward=True, any_frame=False)
-                        self._sync = True
-                    packets = self.container.demux(self.stream)
-                    resampler = self._new_resampler()
-                try:
-                    try:
-                        packet = next(packets)
-                    except StopIteration:
-                        raise
-                    except Exception:
-                        if not self.live:
-                            raise
-                        raise StopIteration          # network error on a live stream = dropped connection
-                except StopIteration:
-                    if self.live:                  # a radio never ends: the connection dropped
-                        if self._reconnect():
-                            packets = None
-                            continue
-                        raise RuntimeError("電台連線中斷，無法重新連線")
-                    for block in self._convert(resampler, None):
-                        self._pending.append(block)
-                    self._flush_pending(gen, force=True)
-                    with self.cond:
-                        if gen == self.gen:
-                            self.eof = True
-                            self.ready.set()
-                            self.cond.notify_all()
-                    if not self._moved:
-                        peak_cache_put(self.cache_key, self.peak)
-                    continue
-                try:
-                    decoded = packet.decode()
-                    bad = 0
-                except Exception as exc:       # skip a damaged packet, keep playing
-                    decoded = []
-                    bad += 1
-                    if bad > 200:
-                        if self.live and self._reconnect():
-                            packets, bad = None, 0
-                            continue
-                        raise RuntimeError(f"解碼持續失敗：{exc}")
-                if self.live:
-                    self._poll_meta()
-                if self.end - self.pos > self.RATE // 2:
-                    time.sleep(0.003)       # already 0.5 s ahead: yield the GIL to the audio callback
-                for frame in decoded:
-                    if self._sync:
-                        t = frame.time
-                        self._dpos = int(round(t * self.RATE)) if t is not None else self._target
-                        self._sync = False
-                    for block in self._convert(resampler, frame):
-                        self._pending.append(block)
-                        self._pending_frames += len(block)
-                    if not self._flush_pending(gen):
-                        break
-        except Exception as exc:
-            self.error = str(exc) or exc.__class__.__name__
-            with self.cond:
-                self.eof = True
-                self.ready.set()
-                self.cond.notify_all()
-        finally:
-            try:
-                self.container.close()
-            except Exception:
-                pass
-            if self._source is not None:
-                self._source.close()
-
-
-class AudioMixer:
-    """One virtual-cable output stream, with bounded microphone buffering.
-
-    The input callback only appends small PCM blocks. The output callback is
-    the sole writer to the virtual output, combines effect + mic, and clips
-    the result. Dropping oldest blocks keeps latency bounded under load.
-    """
-    RATE = 48000
-    CHANNELS = 2
-    MAX_MIC_FRAMES = int(48000 * 0.12)  # keep mic latency under ~120 ms
-    GATE_RAMP = 480  # 10 ms fade so muting/unmuting does not click
-    STOP_FADE = 480  # 10 ms fade so a stop is instant but click-free
-
-    def __init__(self, on_error):
-        self.on_error = on_error
-        self.output_stream = None
-        self.input_stream = None
-        self.monitor_stream = None
-        self.mic_chunks = deque()
-        self.mic_frames = 0
-        self.mic_lock = threading.Lock()
-        self.mic_hold = False  # app forces mic mute (PTT lead-in / release tail)
-        self.mic_gate = 0.0
-        self.stopping = False
-        self.mic_in_peak = 0.0
-        self.mic_out_peak = 0.0
-        self.underflows = 0
-        self._viz_tail = np.zeros(2048, dtype=np.float32)   # last ~43 ms of the song, mono (for the visualiser)
-        self.lock = threading.RLock()
-        self.streamer = None
-        self.manual_stop = False
-        self.mic_enabled = False
-        self.mute_mic_while_sound = True
-        self.music_gain = .85
-        self.mic_gain = 1.0
-        self.paused = False
-
-    @staticmethod
-    def devices(kind):
-        try:
-            return [d['name'] for d in sd.query_devices()
-                    if d['max_' + kind + '_channels'] > 0]
-        except Exception:
-            return []
-
-    @staticmethod
-    def _device_id(name, kind):
-        for index, device in enumerate(sd.query_devices()):
-            if device['name'] == name and device['max_' + kind + '_channels'] > 0:
-                return index
-        raise ValueError(f"找不到音訊裝置：{name}")
-
-    def configure_output(self, output_name, monitor_name, monitor_enabled):
-        self._close_stream('output_stream')
-        self._close_stream('monitor_stream')
-        try:
-            output_id = self._device_id(output_name, 'output')
-            self.output_stream = sd.OutputStream(device=output_id, samplerate=self.RATE,
-                channels=self.CHANNELS, dtype='float32', latency=0.08, callback=self._output_callback)
-            self.output_stream.start()
-            if monitor_enabled and monitor_name and monitor_name != output_name:
-                monitor_id = self._device_id(monitor_name, 'output')
-                self.monitor_stream = sd.OutputStream(device=monitor_id, samplerate=self.RATE,
-                    channels=self.CHANNELS, dtype='float32', latency=0.08, callback=self._monitor_callback)
-                self.monitor_stream.start()
-        except Exception as exc:
-            self._close_stream('output_stream')
-            self._close_stream('monitor_stream')
-            self.on_error(f"無法開啟音樂／虛擬聲卡輸出：{exc}")
-
-    def configure_microphone(self, input_name):
-        self._close_stream('input_stream')
-        self._clear_mic()
-        if not input_name:
-            return
-        try:
-            input_id = self._device_id(input_name, 'input')
-            # Keeping capture at 48k makes input/output PCM compatible. If a
-            # device does not support it, PortAudio fails cleanly and the UI
-            # reports the error instead of crashing.
-            self.input_stream = sd.InputStream(device=input_id, samplerate=self.RATE,
-                channels=1, dtype='float32', callback=self._input_callback)
-            self.input_stream.start()
-        except Exception as exc:
-            self._close_stream('input_stream')
-            self.on_error(f"無法開啟麥克風：{exc}")
-
-    def _clear_mic(self):
-        with self.mic_lock:
-            self.mic_chunks.clear()
-            self.mic_frames = 0
-
-    def _input_callback(self, indata, _frames, _time, _status):
-        block = np.repeat(indata, self.CHANNELS, axis=1)
-        self.mic_in_peak = max(self.mic_in_peak, float(np.max(np.abs(indata))))
-        with self.mic_lock:
-            self.mic_chunks.append(block)
-            self.mic_frames += len(block)
-            # Bound latency: drop the oldest audio, never let it pile up.
-            while self.mic_frames > self.MAX_MIC_FRAMES and len(self.mic_chunks) > 1:
-                self.mic_frames -= len(self.mic_chunks.popleft())
-
-    def _take_song(self, frames):
-        with self.lock:
-            st = self.streamer
-            if st is None:
-                return np.zeros((frames, self.CHANNELS), dtype=np.float32), False
-            if self.paused and not self.stopping:
-                return np.zeros((frames, self.CHANNELS), dtype=np.float32), not st.finished
-            piece, got = st.read(frames)
-            if self.stopping:
-                if got:
-                    self._fade_out(piece[:got])
-                st.finished = True
-                st.close()
-            # "playing" stays true during a brief decoder underrun (silence), so
-            # the mic does not un-mute and PTT is not released mid-song.
-            return piece, (not st.finished) or got > 0
-
-    def _fade_out(self, piece):
-        n = min(len(piece), self.STOP_FADE)
-        if n:
-            piece[:n] *= np.linspace(1.0, 0.0, n, dtype=np.float32)[:, None]
-        piece[n:] = 0
-        return piece
-
-    def _take_mic(self, frames):
-        result = np.zeros((frames, self.CHANNELS), dtype=np.float32)
-        written = 0
-        with self.mic_lock:
-            while written < frames and self.mic_chunks:
-                chunk = self.mic_chunks[0]
-                count = min(frames - written, len(chunk))
-                result[written:written + count] = chunk[:count]
-                written += count
-                self.mic_frames -= count
-                if count == len(chunk):
-                    self.mic_chunks.popleft()
-                else:
-                    self.mic_chunks[0] = chunk[count:]
-        return result
-
-    def _tap(self, block):
-        """Keep the newest samples for the visualiser (cheap; must never disturb the audio)."""
-        try:
-            n = len(block)
-            if n == 0:
-                return
-            mono = (block[:, 0] + block[:, 1]) * 0.5 if block.shape[1] > 1 else block[:, 0]
-            buf = self._viz_tail
-            if n >= len(buf):
-                buf[:] = mono[-len(buf):]
-            else:
-                buf[:-n] = buf[n:]
-                buf[-n:] = mono
-        except Exception:
-            pass
-
-    def viz_samples(self):
-        return self._viz_tail.copy()
-
-    def _output_callback(self, outdata, frames, _time, status):
-        if status.output_underflow:
-            self.underflows += 1
-        effect, effect_playing = self._take_song(frames)
-        self._tap(effect)
-        mix = effect * self.music_gain
-        muted = (not self.mic_enabled) or (
-            self.mute_mic_while_sound and (effect_playing or self.mic_hold))
-        # Always drain the mic buffer, even when muted.  Otherwise old voice
-        # piles up and is replayed the moment the effect ends.
-        mic = self._take_mic(frames)
-        target = 0.0 if muted else 1.0
-        if self.mic_gate != 0.0 or target != 0.0:
-            gate = np.full(frames, target, dtype=np.float32)
-            if self.mic_gate != target:
-                n = min(frames, self.GATE_RAMP)
-                gate[:n] = np.linspace(self.mic_gate, target, n, dtype=np.float32)
-            self.mic_gate = target
-            sent = mic * (gate * self.mic_gain)[:, None]
-            self.mic_out_peak = max(self.mic_out_peak, float(np.max(np.abs(sent))))
-            mix += sent
-        if muted:
-            self._clear_mic()
-        # Explicit clipping prevents wraparound/distortion if users set 200%.
-        np.clip(mix, -1.0, 1.0, out=outdata)
-
-    def _monitor_callback(self, outdata, frames, _time, status):
-        if status.output_underflow:
-            self.underflows += 1
-        # Local monitor intentionally excludes microphone to avoid echo.
-        effect, _playing = self._take_monitor(frames)
-        if self.output_stream is None:          # no virtual cable open: feed the visualiser from the monitor
-            self._tap(effect)
-        np.clip(effect * self.music_gain, -1.0, 1.0, out=outdata)
-
-    def _take_monitor(self, frames):
-        # The monitor reads the same song at its own position, so it never
-        # consumes the virtual-cable stream.
-        with self.lock:
-            st = self.streamer
-            if st is None or (self.paused and not self.stopping):
-                return np.zeros((frames, self.CHANNELS), dtype=np.float32), st is not None
-            piece, got = st.read_monitor(frames)
-            if self.stopping:
-                if got:
-                    self._fade_out(piece[:got])
-                st.mon_pos = st.NEVER
-            return piece, got > 0
-
-    def release_song_if_finished(self):
-        """Drop the finished song's decoder once every stream has played it out."""
-        with self.lock:
-            st = self.streamer
-            if st is None or self.paused or not st.finished:
-                return
-            if self.monitor_stream is not None and st.mon_pos < st.end:
-                return
-            self.streamer = None
-        st.close()
-
-    def open_stream(self, path, normalize=True, live=False, headers=None, duration=0, opener=None):
-        """Open + pre-buffer a song or network stream. BLOCKS (a URL can take seconds):
-        call it from a worker thread. Returns a started streamer or raises RuntimeError."""
-        try:
-            st = TrackStreamer(path, normalize, live=live, headers=headers, duration=duration, opener=opener)
-        except Exception as exc:
-            raise RuntimeError(str(exc) or exc.__class__.__name__)
-        st.start()
-        # first moments decoded: a local file needs a few ms, a network stream seconds, yt-dlp's pipe longer
-        st.ready.wait(45.0 if opener is not None else 15.0 if st.is_url else 3.0)
-        if st.error and st.end == 0:
-            message = st.error
-            st.close()
-            raise RuntimeError(message)
-        if st.is_url and st.end == 0:
-            st.close()
-            raise RuntimeError("串流沒有回應（逾時）")
-        return st
-
-    def install(self, st):
-        """Make an opened streamer the current song (the old one is closed)."""
-        with self.lock:
-            old, self.streamer = self.streamer, st
-            self.manual_stop = self.stopping = self.paused = False
-        if old is not None:
-            old.close()
-
-    def play_file(self, path, normalize=True):
-        try:
-            st = self.open_stream(path, normalize)
-        except Exception as exc:
-            self.on_error(f"無法讀取音效檔：{exc}")
-            return False
-        self.install(st)
-        return True
-
-    def stop_effect(self):
-        # Streams finish with a 10 ms fade on their next callback, then go
-        # silent.  If a stream is not running, jump straight to the end.
-        with self.lock:
-            self.manual_stop = True
-            self.stopping = True
-            self.paused = False
-            st = self.streamer
-            if st is not None:
-                if self.output_stream is None:
-                    st.finished = True
-                    st.close()
-                if self.monitor_stream is None:
-                    st.mon_pos = st.NEVER
-
-    def seek(self, percent):
-        with self.lock:
-            st = self.streamer
-            if st is None:
-                return
-            st.seek(int(st.total() * max(0, min(100, percent)) / 100))
-            self.stopping = False
-
-    def progress(self):
-        with self.lock:
-            st = self.streamer
-            total = st.total() if st is not None else 0
-            if not total:
-                return 0
-            return int(min(st.pos, total) * 100 / total)
-
-    def times(self):
-        """Elapsed / total playback time in seconds (0, 0) when nothing is loaded."""
-        with self.lock:
-            st = self.streamer
-            total = st.total() if st is not None else 0
-            if st is not None and st.live:
-                return st.pos / self.RATE, 0.0
-            if not total:
-                return 0.0, 0.0
-            return min(st.pos, total) / self.RATE, total / self.RATE
-
-    def can_seek(self):
-        with self.lock:
-            st = self.streamer
-            return st is not None and not st.live and not st.nosee
-
-    def stream_info(self):
-        """(is_live, status text, now-playing text) of the current stream."""
-        with self.lock:
-            st = self.streamer
-            if st is None:
-                return False, "", ""
-            return st.live, st.status, st.meta_title
-
-    def effect_playing(self):
-        with self.lock:
-            st = self.streamer
-            return st is not None and not st.finished
-
-    def _close_stream(self, attribute):
-        stream = getattr(self, attribute)
-        if stream:
-            try:
-                stream.stop(); stream.close()
-            except Exception:
-                pass
-        setattr(self, attribute, None)
-
-    def close(self):
-        st, self.streamer = self.streamer, None
-        if st is not None:
-            st.close()
-        for attribute in ('input_stream', 'output_stream', 'monitor_stream'):
-            self._close_stream(attribute)
-
-
-# ---- library list rows -------------------------------------------
-_UR = int(Qt.ItemDataRole.UserRole)
-ROLE_PATH, ROLE_NAME, ROLE_SEARCH, ROLE_NUM = _UR, _UR + 1, _UR + 2, _UR + 3
-ROLE_FAV, ROLE_MISSING, ROLE_PLAYING, ROLE_SUB = _UR + 4, _UR + 5, _UR + 6, _UR + 7
-ROLE_DATA = _UR + 8          # the full station / video dict of an online row
-
-
-def path_key(path) -> str:
-    """Case/slash-insensitive identity of a file path (Windows paths are case-insensitive)."""
-    return os.path.normcase(os.path.normpath(str(path)))
-
-
-class TrackDelegate(QStyledItemDelegate):
-    """Paints one song row: number, ★, title and the folder tag.
-
-    Missing files are drawn grey with a 「檔案遺失」 tag; the playing row gets an
-    accent bar. The ★ geometry is shared by painting and hit-testing.
-    """
-
-    @staticmethod
-    def star_rect(r):
-        return QRect(r.left() + 48, r.top(), 28, r.height())
-
-    def sizeHint(self, option, index):
-        return QSize(option.rect.width(), 46)
-
-    def paint(self, painter, option, index):
-        painter.save()
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        r = option.rect.adjusted(2, 1, -2, -1)
-        selected = bool(option.state & QStyle.StateFlag.State_Selected)
-        hover = bool(option.state & QStyle.StateFlag.State_MouseOver)
-        playing = bool(index.data(ROLE_PLAYING))
-        missing = bool(index.data(ROLE_MISSING))
-        fav = bool(index.data(ROLE_FAV))
-        bg = T["SEL"] if selected else T["ACC_SOFT"] if playing else T["RAISED"] if hover else None
-        if bg:
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(bg))
-            painter.drawRoundedRect(r, 9, 9)
-        if playing:
-            painter.setBrush(QColor(T["ACC_BAR"]))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawRoundedRect(QRect(r.left() + 3, r.top() + r.height() // 2 - 9, 3, 18), 1.5, 1.5)
-
-        align = Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
-        small = QFont(option.font)
-        small.setPixelSize(12)
-        title_font = QFont(option.font)
-        title_font.setBold(playing)
-
-        painter.setFont(small)
-        painter.setPen(QColor(T["ACC_TEXT"] if playing else T["DISABLED"] if missing else T["FAINT"]))
-        painter.drawText(QRect(r.left() + 14, r.top(), 32, r.height()), align,
-                         "♪" if playing else (index.data(ROLE_NUM) or ""))
-
-        star_font = QFont(option.font)
-        star_font.setPixelSize(16)
-        painter.setFont(star_font)
-        if fav:
-            painter.setPen(QColor(T["STAR_MISSING"] if missing else T["STAR"]))
-            painter.drawText(self.star_rect(r), Qt.AlignmentFlag.AlignCenter, "★")
-        elif hover or selected:
-            painter.setPen(QColor(T["SEL_LINE"]))
-            painter.drawText(self.star_rect(r), Qt.AlignmentFlag.AlignCenter, "☆")
-        left = r.left() + 80
-
-        right = r.right() - 12
-        tag = "檔案遺失" if missing else (index.data(ROLE_SUB) or "")
-        if tag:
-            painter.setFont(small)
-            fm = QFontMetrics(small)
-            online = index.data(ROLE_DATA) is not None
-            width = min(fm.horizontalAdvance(tag) + 2, max(80, int(r.width() * (0.42 if online else 0.32))))
-            painter.setPen(QColor(T["TAG_MISSING"] if missing else T["FAINT"]))
-            painter.drawText(QRect(right - width, r.top(), width, r.height()),
-                             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
-                             fm.elidedText(tag, Qt.TextElideMode.ElideRight if online else Qt.TextElideMode.ElideLeft, width))
-            right -= width + 12
-
-        painter.setFont(title_font)
-        painter.setPen(QColor(T["TEXT_MISSING_SEL"] if missing and selected else T["DISABLED"] if missing
-                              else T["ACC_TEXT"] if playing else T["STRONG"] if selected else T["TEXT2"]))
-        title_rect = QRect(left, r.top(), max(10, right - left), r.height())
-        painter.drawText(title_rect, align, QFontMetrics(title_font).elidedText(
-            index.data(ROLE_NAME) or "", Qt.TextElideMode.ElideRight, title_rect.width()))
-        painter.restore()
-
-
-class ElideLabel(QLabel):
-    """Single-line label that shortens long text with … instead of widening its parent."""
-
-    def __init__(self, text=""):
-        super().__init__()
-        self._full = text
-        self.setMinimumWidth(0)
-        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self._refit()
-
-    def setText(self, text):
-        self._full = text or ""
-        self.setToolTip(self._full)
-        self._refit()
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._refit()
-
-    def _refit(self):
-        QLabel.setText(self, self.fontMetrics().elidedText(self._full, Qt.TextElideMode.ElideRight, max(10, self.width())))
-
-
-class SeekSlider(QSlider):
-    """Slider that jumps to where you click (then keeps dragging if you hold)."""
-    seek_requested = Signal(int)
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton and self.width() > 0:
-            value = QStyle.sliderValueFromPosition(self.minimum(), self.maximum(), int(event.position().x()), self.width())
-            self.setValue(value)
-            self.seek_requested.emit(value)
-        super().mousePressEvent(event)
-
-
-class TrackListWidget(QListWidget):
-    """Song list whose ★ zone is clickable (a fast double-click never starts playback)."""
-    star_clicked = Signal(object)
-    order_changed = Signal()  # emitted after the user drags a row to a new position
-
-    def __init__(self):
-        super().__init__()
-        self.setItemDelegate(TrackDelegate(self))
-        self.setMouseTracking(True)
-        self.viewport().setMouseTracking(True)
-        self.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
-
-    def _star_hit(self, event):
-        if event.button() != Qt.MouseButton.LeftButton:
-            return None
-        pos = event.position().toPoint()
-        item = self.itemAt(pos)
-        if item is not None and TrackDelegate.star_rect(self.visualItemRect(item).adjusted(2, 1, -2, -1)).contains(pos):
-            return item
-        return None
-
-    def mousePressEvent(self, event):
-        item = self._star_hit(event)
-        if item is not None:
-            self.star_clicked.emit(item)
-            return
-        super().mousePressEvent(event)
-
-    def mouseDoubleClickEvent(self, event):
-        item = self._star_hit(event)
-        if item is not None:
-            self.star_clicked.emit(item)
-            return
-        super().mouseDoubleClickEvent(event)
-
-    def set_reorderable(self, enabled):
-        """Turn drag-to-reorder on/off (on only for the unfiltered 最愛 list)."""
-        mode = QListWidget.DragDropMode.InternalMove if enabled else QListWidget.DragDropMode.NoDragDrop
-        self.setDragDropMode(mode)
-        self.setDefaultDropAction(Qt.DropAction.MoveAction)
-        self.setDragEnabled(enabled)
-        self.setAcceptDrops(enabled)
-        self.setDropIndicatorShown(enabled)
-
-    def dropEvent(self, event):
-        super().dropEvent(event)
-        self.order_changed.emit()
-
-
-class Backdrop(QWidget):
-    """Central widget: paints the active theme's artwork behind every panel."""
-
-    def __init__(self):
-        super().__init__()
-        self._key = None
-        self._pm = None
-        self._amb_level = 0.0      # 0 = off, .55 = soft, 1 = strong
-        self._amb_bass = 0.0
-        self._amb_pulse = 0.0
-
-    def set_ambient_level(self, level):
-        self._amb_level = float(level)
-        if level <= 0:
-            self._amb_bass = self._amb_pulse = 0.0
-        self.update()
-
-    def feed_ambient(self, bass, pulse):
-        """Bass level / kick pulse (0..1) from the music; repaint only when it visibly changed."""
-        changed = abs(bass - self._amb_bass) > .02 or abs(pulse - self._amb_pulse) > .03 \
-            or ((bass == 0 and pulse == 0) and (self._amb_bass or self._amb_pulse))
-        self._amb_bass, self._amb_pulse = bass, pulse
-        if changed:
-            self.update()
-
-    def paintEvent(self, _event):
-        size = self.size()
-        key = (CURRENT_THEME[0], size.width(), size.height())
-        if self._key != key:
-            art = get_art(CURRENT_THEME[0]).scaled(size, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                                                   Qt.TransformationMode.SmoothTransformation)
-            self._pm = art.copy((art.width() - size.width()) // 2, (art.height() - size.height()) // 2,
-                                size.width(), size.height())
-            self._key = key
-        painter = QPainter(self)
-        painter.drawPixmap(0, 0, self._pm)
-        amount = self._amb_level * (self._amb_bass * .45 + self._amb_pulse * .6)
-        if amount > .01:                          # soft glow bleeding through the glass panels
-            w, h = size.width(), size.height()
-            strength = min(1.0, amount)
-            g = QRadialGradient(QPointF(w * .5, h * 1.04), max(w, h) * .78)
-            c0 = QColor(T["ACC_BAR"]); c0.setAlpha(int(150 * strength))
-            c1 = QColor(T["ACC_BAR"]); c1.setAlpha(0)
-            g.setColorAt(0, c0); g.setColorAt(1, c1)
-            painter.fillRect(self.rect(), QBrush(g))
-            g2 = QRadialGradient(QPointF(w * .92, -h * .05), max(w, h) * .5)
-            d0 = QColor(T["ACC_HI"]); d0.setAlpha(int(90 * strength))
-            d1 = QColor(T["ACC_HI"]); d1.setAlpha(0)
-            g2.setColorAt(0, d0); g2.setColorAt(1, d1)
-            painter.fillRect(self.rect(), QBrush(g2))
-
-
-class VisualizerWidget(QWidget):
-    """Spectrum display in the active theme's colours: bars / mirror / wave / circle, with a bass glow
-    and slowly flowing colours. Click it to open the big full-screen view."""
-    expand_requested = Signal()
-    N = 2048
-    TILT_DB = 15.0          # high notes are naturally quieter; lift them so the right side moves too
-
-    def __init__(self, source, bars=44, big=False, expandable=True):
-        super().__init__()
-        self._source = source
-        self.BARS = bars
-        self.big = big
-        self.style_name = "bars"
-        self.glow = .6          # 0..1 strength of the bass glow
-        self.flow = True        # colours drift slowly around the accent hue
-        self._expandable = expandable
-        self.size_mode = "normal"   # normal / large / fill (only for the in-page widgets)
-        self._vals = np.zeros(bars)
-        self._peaks = np.zeros(bars)
-        self._win = np.hanning(self.N).astype(np.float32)
-        freqs = np.fft.rfftfreq(self.N, 1.0 / 48000)
-        edges = np.geomspace(45, 15000, bars + 1)
-        self._bands = []
-        for i in range(bars):
-            lo = int(np.searchsorted(freqs, edges[i]))
-            hi = max(int(np.searchsorted(freqs, edges[i + 1])), lo + 1)
-            self._bands.append((lo, hi))
-        self._tilt = np.linspace(0, self.TILT_DB, bars)
-        self._idle = True
-        self._avg = 0.0         # slow average of the bass level (beat detection baseline)
-        self._bass = 0.0        # smoothed bass level 0..1
-        self._pulse = 0.0       # short kick-drum pulse 0..1
-        self._phase = 0.0       # colour-flow position 0..1
-        self._timer = QTimer(self)
-        self._timer.setInterval(33)
-        self._timer.timeout.connect(self._tick)
-        if expandable:
-            self.setCursor(Qt.CursorShape.PointingHandCursor)
-            self.setToolTip("播放中視覺化　點一下放大（樣式在「設定 → 外觀」）")
-        self._apply_height()
-
-    def sizeHint(self):
-        return QSize(240, getattr(self, "_pref", 92))
-
-    def minimumSizeHint(self):
-        return QSize(120, 60)
-
-    def _apply_height(self):
-        """Preferred height by style/size mode, but it may shrink (never forces the window taller)."""
-        if self.big:
-            self.setMinimumHeight(240)
-            return
-        circle = self.style_name == "circle"
-        base = 150 if circle else 92
-        large = 260 if circle else 180
-        self.setMinimumHeight(60)
-        if self.size_mode == "large":
-            self._pref = large
-            self.setMaximumHeight(large)
-            self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
-        elif self.size_mode == "fill":
-            self._pref = base
-            self.setMaximumHeight(16777215)
-            self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
-        else:
-            self._pref = base
-            self.setMaximumHeight(base)
-            self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
-        self.updateGeometry()
-
-    def set_size_mode(self, mode):
-        self.size_mode = mode if mode in ("normal", "large", "fill") else "normal"
-        self._apply_height()
-        self.update()
-
-    def set_style(self, name):
-        self.style_name = name if name in ("bars", "mirror", "wave", "circle") else "bars"
-        self._apply_height()
-        self.setVisible(name != "off")
-        self.update()
-
-    def set_options(self, glow, flow):
-        self.glow = max(0.0, min(1.0, float(glow)))
-        self.flow = bool(flow)
-        self.update()
-
-    def mouseReleaseEvent(self, event):
-        if self._expandable and event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.position().toPoint()):
-            self.expand_requested.emit()
-        super().mouseReleaseEvent(event)
-
-    def showEvent(self, event):
-        self._timer.start()
-        super().showEvent(event)
-
-    def hideEvent(self, event):
-        self._timer.stop()
-        super().hideEvent(event)
-
-    def _tick(self):
-        try:
-            x = self._source()
-        except Exception:
-            return
-        silent = float(np.max(np.abs(x))) < 1e-4
-        if silent and self._idle and not self._vals.any() and self._pulse < .01 and self._bass < .01:
-            return                                           # nothing playing and nothing left to fade out
-        if silent:
-            norm = np.zeros(self.BARS)
-        else:
-            spec = np.abs(np.fft.rfft(x * self._win)) / (self.N / 4)
-            level = np.array([spec[lo:hi].max() for lo, hi in self._bands])
-            db = 20 * np.log10(level + 1e-7) + self._tilt
-            norm = np.clip((db + 72.0) / 62.0, 0.0, 1.0)
-            norm = np.convolve(np.pad(norm, 1, mode="edge"), [.2, .6, .2], mode="valid")
-        v = self._vals
-        self._vals = np.where(norm > v, v + (norm - v) * .6, v + (norm - v) * .14)
-        self._vals[self._vals < .004] = 0.0
-        self._peaks = np.maximum(self._peaks - .014, self._vals)
-        # bass level, kick pulse and colour flow
-        k = max(3, self.BARS // 8)
-        bass = float(norm[:k].mean())
-        self._avg = self._avg * .96 + bass * .04
-        kick = max(0.0, bass - self._avg * 1.08)
-        self._pulse = max(self._pulse * .86, min(1.0, kick * 3.4))
-        self._bass += (bass - self._bass) * .35
-        if self._bass < .004:
-            self._bass = 0.0
-        self._phase = (self._phase + .0011 + .0012 * self._bass) % 1.0       # one slow cycle roughly every 25-30 s
-        self._idle = silent
-        self.update()
-
-    def _col(self, token, frac=.5, alpha=255):
-        """Theme colour; with colour-flow on its hue drifts over time and along the spectrum."""
-        c = QColor(T[token])
-        if self.flow:
-            h, sat, light, _a = c.getHslF()
-            if h >= 0:
-                # drift gently back and forth around the theme colour (about +-36 degrees), never a rainbow
-                shift = .10 * math.sin(self._phase * 2 * math.pi) + (frac - .5) * .09
-                c = QColor.fromHslF((h + shift) % 1.0, sat, light)
-        c.setAlpha(alpha)
-        return c
-
-    def _paint_glow(self, p, cx, cy, radius):
-        amount = self.glow * (self._bass * .5 + self._pulse * .75)
-        if amount < .02 or radius <= 1:
-            return
-        g = QRadialGradient(QPointF(cx, cy), radius)
-        g.setColorAt(0, self._col("ACC_BAR", .5, int(255 * min(.85, amount))))
-        g.setColorAt(1, self._col("ACC_BAR", .5, 0))
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QBrush(g))
-        p.drawEllipse(QPointF(cx, cy), radius, radius)
-
-    def paintEvent(self, _event):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        w, h = self.width(), self.height()
-        base = QColor(T["BASE"])
-        base.setAlpha(110)
-        frame = QRectF(.5, .5, w - 1, h - 1)
-        if not self.big:                       # the full-screen view floats straight on the theme backdrop
-            p.setPen(QPen(QColor(T["LINE"]), 1))
-            p.setBrush(base)
-            p.drawRoundedRect(frame, 14, 14)
-            clip = QPainterPath()
-            clip.addRoundedRect(frame, 14, 14)
-            p.setClipPath(clip)
-        pad = 24 if self.big else 14
-        area = QRectF(pad, pad * .7, w - pad * 2, h - pad * 1.4)
-        if self.style_name == "circle":
-            self._paint_circle(p, w, h)
-        else:
-            self._paint_glow(p, w / 2, h, max(w, h) * .62)
-            if self.style_name == "wave":
-                self._paint_wave(p, area)
-            else:
-                self._paint_bars(p, area, self.style_name == "mirror")
-
-    def _paint_bars(self, p, area, mirror):
-        n = self.BARS
-        vals = self._vals
-        gap = 4.0 if self.big else 3.0
-        bw = max(2.0, (area.width() - gap * (n - 1)) / n)
-        half = area.height() / 2
-        p.setPen(Qt.PenStyle.NoPen)
-        for i in range(n):
-            frac = i / max(1, n - 1)
-            x = area.left() + i * (bw + gap)
-            v = vals[i]
-            top_col, bot_col = self._col("ACC_BAR", frac), self._col("ACC_LO", frac)
-            if mirror:
-                bh = max(2.0, v * half)
-                rect = QRectF(x, area.center().y() - bh, bw, bh * 2)
-                g = QLinearGradient(0, rect.top(), 0, rect.bottom())
-                c_out, c_mid = QColor(top_col), QColor(bot_col)
-                c_out.setAlpha(230 if v > 0 else 70)
-                c_mid.setAlpha(120 if v > 0 else 40)
-                g.setColorAt(0, c_out); g.setColorAt(.5, c_mid); g.setColorAt(1, c_out)
-                p.setBrush(QBrush(g))
-                p.drawRoundedRect(rect, bw / 2, bw / 2)
-            else:
-                bh = max(3.0, v * area.height())
-                rect = QRectF(x, area.bottom() - bh, bw, bh)
-                g = QLinearGradient(0, rect.top(), 0, area.bottom())
-                if v <= 0:
-                    top_col.setAlpha(80); bot_col.setAlpha(80)
-                g.setColorAt(0, top_col); g.setColorAt(1, bot_col)
-                p.setBrush(QBrush(g))
-                p.drawRoundedRect(rect, min(bw / 2, 3), min(bw / 2, 3))
-                pk = self._peaks[i]
-                if pk > .06:
-                    p.setBrush(self._col("FOCUS_HI", frac, 170))
-                    p.drawRoundedRect(QRectF(x, area.bottom() - pk * area.height() - 4, bw, 2.2), 1, 1)
-
-    def _paint_wave(self, p, area):
-        n = self.BARS
-        vals = self._vals
-        pts = [QPointF(area.left() + area.width() * i / (n - 1), area.bottom() - max(.03, vals[i]) * area.height())
-               for i in range(n)]
-        path = QPainterPath(QPointF(area.left(), area.bottom()))
-        path.lineTo(pts[0])
-        for a, b in zip(pts, pts[1:]):
-            path.quadTo(a, QPointF((a.x() + b.x()) / 2, (a.y() + b.y()) / 2))
-        path.lineTo(pts[-1])
-        path.lineTo(QPointF(area.right(), area.bottom()))
-        path.closeSubpath()
-        g = QLinearGradient(0, area.top(), 0, area.bottom())
-        g.setColorAt(0, self._col("ACC_BAR", .5, 190))
-        g.setColorAt(1, self._col("ACC_LO", .5, 25))
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QBrush(g))
-        p.drawPath(path)
-        line = QPainterPath(pts[0])
-        for a, b in zip(pts, pts[1:]):
-            line.quadTo(a, QPointF((a.x() + b.x()) / 2, (a.y() + b.y()) / 2))
-        lg = QLinearGradient(area.left(), 0, area.right(), 0)
-        for stop in (0, .25, .5, .75, 1):
-            lg.setColorAt(stop, self._col("FOCUS_HI", stop))
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.setPen(QPen(QBrush(lg), 2.0 if self.big else 1.8))
-        p.drawPath(line)
-
-    def _paint_circle(self, p, w, h):
-        cx, cy = w / 2, h / 2
-        radius = min(w, h) / 2 - (14 if self.big else 8)
-        r0 = radius * (.40 + .035 * self._bass + .07 * self._pulse)
-        span = radius - r0 - 3
-        self._paint_glow(p, cx, cy, radius * 1.25)
-        n = self.BARS
-        n2 = n * 2
-        bw = max(2.0, 2 * math.pi * r0 / n2 * .55)
-        vals = self._vals
-        for k in range(n2):
-            idx = k if k < n else n2 - 1 - k          # left/right mirrored; low notes at the bottom
-            v = vals[idx]
-            ang = math.pi / 2 + (k + .5) * 2 * math.pi / n2
-            ca, sa = math.cos(ang), math.sin(ang)
-            ln = 3 + v * span
-            pen = QPen(self._col("ACC_BAR", idx / max(1, n - 1), int(110 + 145 * min(1.0, v * 1.4))), bw)
-            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-            p.setPen(pen)
-            p.drawLine(QPointF(cx + r0 * ca, cy + r0 * sa), QPointF(cx + (r0 + ln) * ca, cy + (r0 + ln) * sa))
-        disc = QRadialGradient(QPointF(cx, cy), r0)
-        disc.setColorAt(0, self._col("ACC_BAR", .5, int(28 + 90 * self._pulse)))
-        disc.setColorAt(1, self._col("ACC_BAR", .5, 8))
-        p.setPen(QPen(self._col("ACC_BAR", .5, int(120 + 100 * self._pulse)), 1.6))
-        p.setBrush(QBrush(disc))
-        p.drawEllipse(QPointF(cx, cy), r0 * .94, r0 * .94)
-
-
-class VizWindow(Backdrop):
-    """Full-screen visualiser: the theme backdrop, a big visualiser and the current song's name."""
-    closed = Signal()
-
-    def __init__(self, source, info_source, style, glow, flow):
-        super().__init__()
-        self._info = info_source
-        self.setWindowTitle("EchoDeck 視覺化")
-        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(56, 36, 56, 30)
-        lay.setSpacing(14)
-        top = QHBoxLayout()
-        names = QVBoxLayout()
-        names.setSpacing(2)
-        self.title = ElideLabel("")
-        self.title.setObjectName("title")
-        self.sub = ElideLabel("")
-        self.sub.setObjectName("subtitle")
-        names.addWidget(self.title)
-        names.addWidget(self.sub)
-        top.addLayout(names, 1)
-        self.time = QLabel("")
-        self.time.setObjectName("subtitle")
-        top.addWidget(self.time, 0, Qt.AlignmentFlag.AlignTop)
-        close = QPushButton("✕")
-        close.setFixedSize(40, 40)
-        close.setCursor(Qt.CursorShape.PointingHandCursor)
-        close.setToolTip("離開（Esc）")
-        close.clicked.connect(self.close)
-        top.addWidget(close, 0, Qt.AlignmentFlag.AlignTop)
-        lay.addLayout(top)
-        self.viz = VisualizerWidget(source, bars=72, big=True, expandable=False)
-        self.viz.set_style(style if style != "off" else "circle")
-        self.viz.set_options(glow, flow)
-        lay.addWidget(self.viz, 1)
-        hint = QLabel("按 Esc、雙擊畫面或右上角 ✕ 離開")
-        hint.setObjectName("hint")
-        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lay.addWidget(hint)
-        self._timer = QTimer(self)
-        self._timer.setInterval(400)
-        self._timer.timeout.connect(self._refresh)
-        self._timer.start()
-        self._refresh()
-
-    def _refresh(self):
-        title, sub, elapsed = self._info()
-        self.title.setText(title)
-        self.sub.setText(sub)
-        self.time.setText(elapsed)
-
-    def keyPressEvent(self, event):
-        if event.key() == Qt.Key.Key_Escape:
-            self.close()
-            return
-        super().keyPressEvent(event)
-
-    def mouseDoubleClickEvent(self, event):
-        self.close()
-
-    def closeEvent(self, event):
-        self._timer.stop()
-        self.closed.emit()
-        super().closeEvent(event)
-
-
-class Signals(QObject):
-    play_requested = Signal()
-    stop_requested = Signal()
-    random_requested = Signal()
-    audio_error = Signal(str)
-    mic_requested = Signal()
-    next_requested = Signal()
-    pause_requested = Signal()
-    loop_requested = Signal()
-    hold_requested = Signal()
-    clicker_requested = Signal()
-    volume_up_requested = Signal()
-    volume_down_requested = Signal()
-    scan_done = Signal(int, object, object, int)
-    stream_ready = Signal(int, object, str)    # token, opened streamer (None on failure), error text
-    radio_results = Signal(int, object, str)   # token, stations, error text
-    yt_results = Signal(int, object, str)      # token, {autoplay, entries}, error text
-    tool_done = Signal(str, str)               # which component, error text ("" = ok)
-
-
-class EchoDeck(QMainWindow):
-    def __init__(self):
-        super().__init__()
-        self.settings = self.load_settings()
-        self.tracks: list[Path] = []
-        self.history: list[Path] = []
-        self._shuffle_played: set = set()  # path keys already played in the current shuffle round
-        self.view_mode = self.settings.last_view_mode if self.settings.last_view_mode in ("all", "fav") else "all"
-        if self.settings.last_view_mode.startswith("pl:") and self._pl_of_view(self.settings.last_view_mode) is not None:
-            self.view_mode = self.settings.last_view_mode
-        self._restored_last_track = False  # guard so restore-on-launch only runs once
-        self._track_info: dict = {}
-        self._playing_key = None
-        self._pause_ui_state = None
-        self.current_source = None          # the radio station / YouTube video that is playing
-        self._pending_src = None
-        self._panels = []                   # now-playing panels of the online pages
-        self._volume_mirrors = []
-        self._radio_token = 0
-        self._radio_loaded = False
-        self._yt_token = 0
-        self._yt_queue = []
-        self._yt_tool_busy = False
-        self._yt_dialog = None
-        self._yt_jobs = {}                  # favourites that are downloading right now
-        self._yt_pipe_only = False        # set once YouTube refuses direct links on this PC
-        self._scan_token = 0
-        self._scanning = False
-        self.current_track: Path | None = None
-        self.current_track_index = -1
-        self.ptt_down = False
-        self.ptt_uses_scan_code = False
-        self.hotkeys = []
-        self.signals = Signals()
-        self.signals.play_requested.connect(self.play_selected)
-        self.signals.stop_requested.connect(self.stop)
-        self.signals.random_requested.connect(self.play_random)
-        self.signals.audio_error.connect(self.show_audio_error)
-        self.signals.scan_done.connect(self._on_scan_done)
-        self.signals.stream_ready.connect(self._on_stream_ready)
-        self.signals.radio_results.connect(self._on_radio_results)
-        self.signals.yt_results.connect(self._on_yt_results)
-        self.signals.tool_done.connect(self._on_tool_done)
-        self.signals.mic_requested.connect(self.toggle_microphone)
-        self.signals.next_requested.connect(self.play_next_in_order)
-        self.signals.pause_requested.connect(self.toggle_pause)
-        self.signals.loop_requested.connect(self.toggle_loop)
-        self.signals.hold_requested.connect(self.toggle_hold)
-        self.signals.clicker_requested.connect(self.toggle_clicker)
-        self.signals.volume_up_requested.connect(lambda: self.adjust_volume(5))
-        self.signals.volume_down_requested.connect(lambda: self.adjust_volume(-5))
-        self.hotkey_edits = {}
-        self.clicker = AutoClicker()
-        self._clicker_pending = False
-        self._clicker_token = 0
-        self._clicker_deadline = QTimer(self)
-        self._clicker_deadline.setSingleShot(True)
-        self._clicker_deadline.timeout.connect(self.stop_clicker)
-        self.clicker.target = self.settings.clicker_target
-        self.clicker.interval = max(AutoClicker.MIN_INTERVAL, self.settings.clicker_interval)
-        self.hold_action = HoldAction()
-        self.hold_action.target = self.settings.hold_target
-        self._hold_pending = False
-        self._hold_token = 0
-        self._capturing = False
-        self._mouse_hotkey_down = {}
-        self._mouse_hotkey_timer = QTimer(self)
-        self._mouse_hotkey_timer.setInterval(15)
-        self._mouse_hotkey_timer.timeout.connect(self._poll_mouse_hotkey)
-        self._hold_deadline = QTimer(self)
-        self._hold_deadline.setSingleShot(True)
-        self._hold_deadline.timeout.connect(self.stop_hold)
-        self._extra_viz = []                 # visualisers of the radio / YouTube pages
-        self._viz_window = None
-        self.mixer = AudioMixer(lambda message: self.signals.audio_error.emit(message))
-        self.effect_was_playing = False
-        self._starting = False
-        self._play_token = 0
-        self.effect_timer = QTimer(self)
-        self.effect_timer.timeout.connect(self.poll_effect_state)
-        self.effect_timer.start(150)
-
-        self.setWindowTitle(f"{APP_NAME} — Game Voice Music  [{BUILD_TAG}]")
-        self.setMinimumSize(1120, 720)
-        self.setAcceptDrops(True)  # drop a folder onto the window to add it to the library
-        self.resize(1280, 800)
-        self.build_ui()
-        shutil.rmtree(YT_TMP, ignore_errors=True)       # leftovers of an interrupted favourite download
-        self.refresh_devices()
-        self.apply_microphone()
-        self.refresh_folder_list()
-        self.scan_folders()
-        self.install_hotkeys()
-
-    # ---- layout helpers -------------------------------------------------
-    def page_header(self, title, subtitle):
-        col = QVBoxLayout()
-        col.setSpacing(4)
-        col.addWidget(QLabel(title, objectName="title"))
-        sub = QLabel(subtitle)
-        sub.setObjectName("subtitle")
-        sub.setWordWrap(True)
-        col.addWidget(sub)
-        return col
-
-    def page_shell(self, title, subtitle):
-        """A scrollable page with the shared header. Returns (page, box)."""
-        page = QWidget()
-        outer = QVBoxLayout(page)
-        outer.setContentsMargins(0, 0, 0, 0)
-        area = QScrollArea()
-        area.setWidgetResizable(True)
-        area.setFrameShape(QFrame.Shape.NoFrame)
-        content = QWidget()
-        area.setWidget(content)
-        outer.addWidget(area)
-        box = QVBoxLayout(content)
-        box.setContentsMargins(10, 4, 14, 14)
-        box.setSpacing(16)
-        box.addLayout(self.page_header(title, subtitle))
-        box.addSpacing(4)
-        return page, box
-
-    def section_card(self, title, desc=""):
-        """A titled card with a grid inside. Returns (card, grid)."""
-        card = QFrame()
-        card.setObjectName("settingsCard")
-        v = QVBoxLayout(card)
-        v.setContentsMargins(26, 22, 26, 24)
-        v.setSpacing(6)
-        v.addWidget(QLabel(title, objectName="sectionTitle"))
-        if desc:
-            note = QLabel(desc)
-            note.setObjectName("hint")
-            note.setWordWrap(True)
-            v.addWidget(note)
-        v.addSpacing(8)
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(20)
-        grid.setVerticalSpacing(14)
-        grid.setColumnMinimumWidth(0, 150)
-        grid.setColumnStretch(1, 1)
-        v.addLayout(grid)
-        return card, grid
-
-    def slider_with_value(self, slider, suffix="%"):
-        """Slider + live value badge in one widget; returns (widget, badge)."""
-        wrap = QWidget()
-        wrap.setObjectName("row")
-        row = QHBoxLayout(wrap)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(12)
-        badge = QLabel(f"{slider.value()}{suffix}")
-        badge.setObjectName("valueBadge")
-        badge.setMinimumWidth(58)
-        badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        slider.valueChanged.connect(lambda v, b=badge, s=suffix: b.setText(f"{v}{s}"))
-        row.addWidget(slider, 1)
-        row.addWidget(badge)
-        return wrap, badge
-
-    def _on_page_changed(self, index):
-        if index == 5 and not self._radio_loaded:
-            self._radio_loaded = True
-            self.radio_reload()           # first visit: fetch stations (no network at startup)
-
-    def _sync_nav(self, index):
-        button = self.nav_buttons.get(index)
-        if button is not None:
-            button.setChecked(True)
-
-    def build_ui(self):
-        root = Backdrop()
-        self.backdrop = root
-        self.setCentralWidget(root)
-        self._amb_win = np.hanning(2048).astype(np.float32)
-        self._amb_avg = self._amb_bass = self._amb_pulse = 0.0
-        root.set_ambient_level(self._ambient_level())
-        self._amb_timer = QTimer(self)
-        self._amb_timer.setInterval(50)                 # about 20 updates per second
-        self._amb_timer.timeout.connect(self._ambient_tick)
-        self._amb_timer.start()
-        layout = QHBoxLayout(root)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(18)
-
-        nav = QFrame()
-        nav.setObjectName("nav")
-        nav.setFixedWidth(236)
-        n = QVBoxLayout(nav)
-        n.setContentsMargins(16, 20, 16, 16)
-        n.setSpacing(4)
-        brand_row = QHBoxLayout()
-        brand_row.setContentsMargins(6, 0, 0, 0)
-        brand_row.setSpacing(12)
-        logo = QLabel()
-        logo.setPixmap(app_icon_pixmap(44))
-        logo.setFixedSize(44, 44)
-        brand_col = QVBoxLayout()
-        brand_col.setSpacing(0)
-        brand_col.addWidget(QLabel("EchoDeck", objectName="brand"))
-        brand_col.addWidget(QLabel("Game Voice Music", objectName="brandSub"))
-        brand_row.addWidget(logo)
-        brand_row.addLayout(brand_col, 1)
-        n.addLayout(brand_row)
-        n.addSpacing(24)
-        group = QButtonGroup(self)
-        group.setExclusive(True)
-        self.nav_buttons = {}
-        self.nav_kinds = {}
-        for label, kind, page in [("音樂庫", "music", 0), ("網路電台", "radio", 5), ("YouTube", "play", 6),
-                                  ("快捷音效板", "keys", 1), ("連點器", "mouse", 4), ("診斷", "pulse", 2),
-                                  ("設定", "gear", 3)]:
-            button = QPushButton(label)
-            button.setObjectName("navButton")
-            button.setCheckable(True)
-            button.setIcon(nav_icon(kind))
-            button.setIconSize(QSize(22, 22))
-            button.setCursor(Qt.CursorShape.PointingHandCursor)
-            group.addButton(button)
-            button.clicked.connect(lambda _, p=page: self.pages.setCurrentIndex(p))
-            self.nav_buttons[page] = button
-            self.nav_kinds[page] = kind
-            n.addWidget(button)
-        n.addStretch()
-        note = QLabel("音樂與 Mic 共用輸出\nMic 預設完全關閉")
-        note.setObjectName("privacyNote")
-        n.addWidget(note)
-        layout.addWidget(nav)
-
-        self.pages = QStackedWidget()
-        self.pages.addWidget(self.library_page())
-        self.pages.addWidget(self.quick_page())
-        self.pages.addWidget(self.diagnostics_page())
-        self.pages.addWidget(self.settings_page())
-        self.pages.addWidget(self.clicker_page())
-        self.pages.addWidget(self.radio_page())       # index 5
-        self.pages.addWidget(self.youtube_page())     # index 6
-        self.pages.currentChanged.connect(self._sync_nav)
-        self.pages.currentChanged.connect(self._on_page_changed)
-        self._diag_timer = QTimer(self)
-        self._diag_timer.setInterval(500)
-        self._diag_timer.timeout.connect(self.refresh_diagnostics)
-        self.pages.currentChanged.connect(lambda i: self._diag_timer.start() if i == 2 else self._diag_timer.stop())
-        self.nav_buttons[0].setChecked(True)
-        layout.addWidget(self.pages, 1)
-
-    def library_page(self):
-        page = QWidget()
-        outer = QVBoxLayout(page)
-        outer.setContentsMargins(10, 4, 10, 4)
-        outer.setSpacing(12)
-        header = QHBoxLayout()
-        title_wrap = QVBoxLayout()
-        title_wrap.setSpacing(4)
-        title_wrap.addWidget(QLabel("你的音樂庫", objectName="title"))
-        self.subtitle = QLabel("選一首歌開始；EchoDeck 會自動替你開啟遊戲區域發話。")
-        self.subtitle.setObjectName("subtitle")
-        title_wrap.addWidget(self.subtitle)
-        header.addLayout(title_wrap)
-        header.addStretch()
-        self.folder_button = QPushButton("📁  加入音樂資料夾")
-        self.folder_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.folder_button.clicked.connect(self.add_folder)
-        header.addWidget(self.folder_button, 0, Qt.AlignmentFlag.AlignTop)
-        self.folder_manage_button = QPushButton("🗂️  管理資料夾")
-        self.folder_manage_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.folder_manage_button.setToolTip("查看目前已加入的資料夾，可直接在這裡移除")
-        self.folder_manage_button.clicked.connect(self.show_folder_manage_menu)
-        header.addWidget(self.folder_manage_button, 0, Qt.AlignmentFlag.AlignTop)
-        self.status = QLabel("● 待命中")
-        self.status.setObjectName("statusIdle")
-        header.addWidget(self.status, 0, Qt.AlignmentFlag.AlignTop)
-        outer.addLayout(header)
-        self.hotkey_note = QLabel()
-        self.hotkey_note.setObjectName("tipBar")
-        self.hotkey_note.setWordWrap(True)
-        outer.addWidget(self.hotkey_note)
-        self.refresh_hotkey_hint()
-        self.meter = QLabel("")
-        self.meter.setObjectName("hint")
-        outer.addWidget(self.meter)
-        tools = QHBoxLayout()
-        tools.setSpacing(12)
-        seg = QHBoxLayout()
-        seg.setSpacing(0)
-        self.seg_all = QPushButton("全部")
-        self.seg_all.setObjectName("segL")
-        self.seg_fav = QPushButton("★  最愛")
-        self.seg_fav.setObjectName("segM")
-        self.seg_list = QPushButton("📋  我的清單  ▾")
-        self.seg_list.setObjectName("segR")
-        self.seg_list.setToolTip("自訂清單：自己命名、自己排順序（點開可新增、切換、改名、刪除）")
-        seg_group = QButtonGroup(self)
-        seg_group.setExclusive(True)
-        for button, mode in ((self.seg_all, "all"), (self.seg_fav, "fav"), (self.seg_list, "list")):
-            button.setCheckable(True)
-            button.setCursor(Qt.CursorShape.PointingHandCursor)
-            seg_group.addButton(button)
-            if mode == "list":
-                button.clicked.connect(self.show_playlist_menu)
-            else:
-                button.clicked.connect(lambda _=False, m=mode: self.set_view_mode(m))
-            seg.addWidget(button)
-        if self.view_mode == "fav":
-            self.seg_fav.setChecked(True)
-        elif self._pl_of_view() is not None:
-            self.seg_list.setChecked(True)
-        else:
-            self.seg_all.setChecked(True)
-        tools.addLayout(seg)
-        self.search_box = QLineEdit()
-        self.search_box.setPlaceholderText("🔍  搜尋歌曲或資料夾…")
-        self.search_box.setClearButtonEnabled(True)
-        self.search_box.textChanged.connect(self.filter_tracks)
-        tools.addWidget(self.search_box, 1)
-        self.autoplay_combo = QComboBox()
-        self.autoplay_combo.addItem("播完後：停止", "off")
-        self.autoplay_combo.addItem("播完後：隨機播放", "random")
-        self.autoplay_combo.addItem("播完後：依順序播放", "sequential")
-        self.autoplay_combo.addItem("單曲循環播放", "loop")
-        saved_mode = self.autoplay_combo.findData(self.settings.autoplay_mode)
-        self.autoplay_combo.setCurrentIndex(max(0, saved_mode))
-        self.autoplay_combo.currentIndexChanged.connect(self.autoplay_changed)
-        self.autoplay_combo.setMinimumWidth(190)
-        tools.addWidget(self.autoplay_combo)
-        self.loop_button = QPushButton("🔁  單曲循環")
-        self.loop_button.setCheckable(True)
-        self.loop_button.setChecked(self.settings.autoplay_mode == "loop")
-        self.loop_button.setToolTip("開啟後，目前歌曲播完會自動從頭重播（快捷鍵也可切換）")
-        self.loop_button.toggled.connect(self.loop_button_toggled)
-        self._set_loop_button_style()
-        tools.addWidget(self.loop_button)
-        outer.addLayout(tools)
-
-        body = QHBoxLayout()
-        body.setSpacing(16)
-        self.track_list = TrackListWidget()
-        self.track_list.setObjectName("trackList")
-        self.track_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.track_list.customContextMenuRequested.connect(self.library_menu)
-        self.track_list.itemDoubleClicked.connect(lambda _: self.play_selected())
-        self.track_list.currentItemChanged.connect(self.update_selection_details)
-        self.track_list.star_clicked.connect(lambda item: self.toggle_favorite(Path(item.data(ROLE_PATH))))
-        self.track_list.order_changed.connect(self.fav_order_changed)
-        self.list_empty = QLabel()
-        self.list_empty.setObjectName("emptyState")
-        self.list_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.list_empty.setWordWrap(True)
-        self.list_stack = QStackedWidget()
-        self.list_stack.setObjectName("row")
-        self.list_stack.addWidget(self.track_list)
-        self.list_stack.addWidget(self.list_empty)
-        self.list_stack.setMinimumWidth(320)
-        body.addWidget(self.list_stack, 1)
-
-        panel = QFrame()
-        panel.setObjectName("nowPanel")
-        panel.setMinimumWidth(380)
-        p = QVBoxLayout(panel)
-        p.setContentsMargins(18, 16, 18, 16)
-        p.setSpacing(8)
-
-        # ---- pinned now-playing card: title, seekable progress, volume ----
-        card = QFrame()
-        card.setObjectName("nowCard")
-        k = QVBoxLayout(card)
-        k.setContentsMargins(20, 12, 20, 14)
-        k.setSpacing(4)
-        card.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
-        top = QHBoxLayout()
-        top.addWidget(QLabel("♪  正在播放", objectName="eyebrowAccent"))
-        top.addStretch()
-        self.time_label = QLabel("00:00 / 00:00")
-        self.time_label.setObjectName("hint")
-        top.addWidget(self.time_label)
-        k.addLayout(top)
-        self.card_title = ElideLabel("尚未播放")
-        self.card_title.setObjectName("cardTitle")
-        k.addWidget(self.card_title)
-        self.card_sub = ElideLabel("")
-        self.card_sub.setObjectName("muted")
-        k.addWidget(self.card_sub)
-        k.addSpacing(2)
-        self.progress = SeekSlider(Qt.Orientation.Horizontal)
-        self.progress.setObjectName("cardSeek")
-        self.progress.setRange(0, 1000)
-        self.progress.setFixedHeight(20)
-        self.progress.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.progress.setToolTip("點一下或拖曳可跳到指定位置")
-        self.progress.seek_requested.connect(lambda v: self.mixer.seek(v / 10))
-        self.progress.sliderReleased.connect(lambda: self.mixer.seek(self.progress.value() / 10))
-        k.addWidget(self.progress)
-        p.addWidget(card)
-        self.viz = VisualizerWidget(lambda: self.mixer.viz_samples())
-        self.viz.set_options(self.settings.viz_glow / 100, self.settings.viz_flow)
-        self.viz.set_style(self.settings.viz_style)
-        self.viz.expand_requested.connect(self.open_viz_fullscreen)
-        self.viz.set_size_mode(self.settings.viz_size)
-        p.addWidget(self.viz, 10)
-
-        # ---- volume (below the card) ----
-        vol_row = QHBoxLayout()
-        vol_row.setSpacing(10)
-        vol_row.addWidget(QLabel("🔊"))
-        self.volume = QSlider(Qt.Orientation.Horizontal)
-        self.volume.setRange(0, 200)
-        self.volume.setValue(self.settings.music_volume)
-        self.volume.setToolTip("音效音量（0–200%）")
-        self.volume.valueChanged.connect(self.change_volume)
-        vol_widget, self.volume_badge = self.slider_with_value(self.volume)
-        vol_row.addWidget(vol_widget, 1)
-        vol_row.setContentsMargins(4, 0, 4, 0)
-        p.addLayout(vol_row)
-
-        # ---- selected song ----
-        sel_box = QVBoxLayout()
-        sel_box.setSpacing(2)
-        sel_box.addWidget(QLabel("目前選取", objectName="eyebrow"))
-        self.now_title = ElideLabel("尚未選擇音樂")
-        self.now_title.setObjectName("nowTitle")
-        sel_box.addWidget(self.now_title)
-        self.now_path = ElideLabel("請先在設定選取音樂資料夾")
-        self.now_path.setObjectName("nowPath")
-        sel_box.addWidget(self.now_path)
-        p.addLayout(sel_box)
-        p.addStretch(1)
-
-        # ---- transport ----
-        self.play_button = QPushButton("▶  預覽播放（桌面）")
-        self.play_button.setObjectName("primary")
-        self.play_button.setFixedHeight(44)
-        self.play_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.play_button.clicked.connect(self.play_selected)
-        p.addWidget(self.play_button)
-        pair = QHBoxLayout()
-        pair.setSpacing(12)
-        self.random_button = QPushButton("⤨  隨機一首")
-        self.random_button.setFixedHeight(38)
-        self.random_button.setToolTip("從目前清單（全部／最愛）隨機挑一首播放")
-        self.random_button.clicked.connect(self.play_random)
-        pair.addWidget(self.random_button)
-        self.next_button = QPushButton("⏭  下一首")
-        self.next_button.setFixedHeight(38)
-        self.next_button.setToolTip("依目前清單（全部／最愛）順序播放下一首")
-        self.next_button.clicked.connect(self.play_next_in_order)
-        pair.addWidget(self.next_button)
-        p.addLayout(pair)
-        stop_row = QHBoxLayout()
-        stop_row.setSpacing(12)
-        self.pause_button = QPushButton("⏸  暫停")
-        self.pause_button.setObjectName("pauseBtn")
-        self.pause_button.setFixedHeight(40)
-        self.pause_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.pause_button.setToolTip("暫停／繼續目前播放（快捷鍵也可使用）")
-        self.pause_button.setEnabled(False)
-        self.pause_button.clicked.connect(self.toggle_pause)
-        stop_row.addWidget(self.pause_button, 1)
-        self.stop_button = QPushButton("■  停止並關閉發話")
-        self.stop_button.setObjectName("danger")
-        self.stop_button.setFixedHeight(40)
-        self.stop_button.setToolTip("停止播放並放開遊戲發話鍵")
-        self.stop_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.stop_button.clicked.connect(lambda: self.stop())
-        stop_row.addWidget(self.stop_button, 1)
-        p.addLayout(stop_row)
-        body.addWidget(panel, 1)
-        outer.addLayout(body, 1)
-        return page
-
-    # ---- track list helpers ----
-    def _apply_playing_mark(self):
-        for row in range(self.track_list.count()):
-            item = self.track_list.item(row)
-            item.setData(ROLE_PLAYING, bool(self._playing_key) and path_key(item.data(ROLE_PATH)) == self._playing_key)
-        self.track_list.viewport().update()
-
-    def mark_playing(self, track):
-        """Show a ♪ marker on the track that is currently playing."""
-        self._playing_key = path_key(track) if track is not None else None
-        if not hasattr(self, "track_list"):
-            return
-        self._apply_playing_mark()
-        if track is not None:
-            self.set_now(Path(track).stem, Path(track).parent.name or str(Path(track).parent))
-        else:
-            self.set_now("尚未播放", "")
-        if track is not None:
-            for row in range(self.track_list.count()):
-                item = self.track_list.item(row)
-                if item.data(ROLE_PLAYING):
-                    self.track_list.scrollToItem(item)
-                    break
-
-    def _select_in_list(self, track):
-        key = path_key(track)
-        for row in range(self.track_list.count()):
-            if path_key(self.track_list.item(row).data(ROLE_PATH)) == key:
-                self.track_list.setCurrentRow(row)
-                return
-
-    def _flag_missing(self, track):
-        key = path_key(track)
-        for row in range(self.track_list.count()):
-            item = self.track_list.item(row)
-            if path_key(item.data(ROLE_PATH)) == key:
-                item.setData(ROLE_MISSING, True)
-        self.track_list.viewport().update()
-        self.subtitle.setText(f"找不到檔案：{Path(track).name}（已跳過）")
-
-    # ---- library: scan / view / favourites ----
-    def scan_folders(self):
-        """Scan all folders on a worker thread so the window never freezes."""
-        self._scan_token += 1
-        token = self._scan_token
-        folders = list(self.settings.music_folders)
-        self._scanning = True
-        if folders:
-            self.subtitle.setText("正在掃描音樂資料夾…（可以先使用其他功能）")
-        if self.track_list.count() == 0:
-            self.rebuild_track_list()
-        threading.Thread(target=self._scan_worker, args=(token, folders), daemon=True).start()
-
-    def _scan_worker(self, token, folders):
-        found, info, live = {}, {}, 0
-        try:
-            for base in (Path(f) for f in folders):
-                if not base.is_dir():
-                    continue
-                live += 1
-                try:
-                    for p in base.rglob("*"):
-                        if not (p.is_file() and p.suffix.lower() in FORMATS):
-                            continue
-                        key = path_key(p)
-                        if key in found:
-                            continue
-                        found[key] = p
-                        rel = p.relative_to(base)
-                        root_name = base.name or str(base)
-                        sub = str(rel.parent) if rel.parent != Path(".") else root_name
-                        info[key] = (sub, f"{rel} {root_name}".lower())
-                except OSError:
-                    continue
-        finally:
-            tracks = sorted(found.values(), key=lambda p: p.name.lower())
-            self.signals.scan_done.emit(token, tracks, info, live)
-
-    def _on_scan_done(self, token, tracks, info, live):
-        if token != self._scan_token:
-            return  # a newer scan was started; ignore this stale result
-        self._scanning = False
-        self.tracks = tracks
-        self._track_info = info
-        self.rebuild_track_list()
-        if not self._restored_last_track:
-            self._restored_last_track = True
-            self._restore_last_selection(self._last_track_for_view())
-        if self.settings.music_folders:
-            self.subtitle.setText(
-                f"已找到 {len(tracks)} 首音樂（{live} 個資料夾）。雙擊播放；右鍵可加入最愛。")
-
-    # ---- custom playlists (自訂清單) ----
-    def _pl_of_view(self, mode=None):
-        mode = mode or self.view_mode
-        if isinstance(mode, str) and mode.startswith("pl:"):
-            return next((pl for pl in self.settings.playlists if pl["id"] == mode[3:]), None)
-        return None
-
-    def _playlist_by_id(self, pid):
-        return next((pl for pl in self.settings.playlists if pl["id"] == pid), None)
-
-    def _next_playlist_name(self):
-        used = {pl["name"] for pl in self.settings.playlists}
-        n = 1
-        while f"清單{n}" in used:
-            n += 1
-        return f"清單{n}"
-
-    def _ask_playlist_name(self, title, default):
-        """Ask for a playlist name; returns a clean unique name or '' when cancelled/invalid."""
-        while True:
-            text, ok = QInputDialog.getText(self, title, "清單名稱：", QLineEdit.EchoMode.Normal, default)
-            name = text.strip()[:40]
-            if not ok:
-                return ""
-            if not name:
-                QMessageBox.information(self, APP_NAME, "名稱不能是空的。")
-                continue
-            if any(pl["name"] == name and pl["name"] != default for pl in self.settings.playlists):
-                QMessageBox.information(self, APP_NAME, f"已經有一份叫「{name}」的清單了，請換個名字。")
-                default = name
-                continue
-            return name
-
-    def create_playlist(self, name=None, tracks=None):
-        name = name or self._ask_playlist_name("新增清單", self._next_playlist_name())
-        if not name:
-            return None
-        pl = {"id": uuid.uuid4().hex[:12], "name": name, "tracks": [str(t) for t in (tracks or [])]}
-        self.settings.playlists.append(pl)
-        self.save_settings()
-        return pl
-
-    def show_playlist_menu(self):
-        menu = QMenu(self)
-        current = self._pl_of_view()
-        for pl in self.settings.playlists:
-            act = menu.addAction(f"{'●' if current is pl else '○'}  {pl['name']}　（{len(pl['tracks'])} 首）")
-            act.setData(("open", pl["id"]))
-        if self.settings.playlists:
-            menu.addSeparator()
-        a_new = menu.addAction("＋  新增清單…")
-        a_new.setData(("new", ""))
-        if current is not None:
-            a_rename = menu.addAction(f"✎  重新命名「{current['name']}」…")
-            a_rename.setData(("rename", current["id"]))
-            a_delete = menu.addAction(f"🗑  刪除「{current['name']}」")
-            a_delete.setData(("delete", current["id"]))
-        chosen = menu.exec(self.seg_list.mapToGlobal(QPoint(0, self.seg_list.height() + 4)))
-        data = chosen.data() if chosen is not None else None
-        if data:
-            kind, pid = data
-            if kind == "open":
-                self.set_view_mode(f"pl:{pid}")
-            elif kind == "new":
-                pl = self.create_playlist()
-                if pl:
-                    self.set_view_mode(f"pl:{pl['id']}")
-                    self.subtitle.setText(f"已建立「{pl['name']}」。在歌曲上按右鍵 →「加入清單」就能放進來。")
-            elif kind == "rename":
-                pl = self._playlist_by_id(pid)
-                name = self._ask_playlist_name("重新命名清單", pl["name"]) if pl else ""
-                if name:
-                    pl["name"] = name
-                    self.save_settings()
-        if data and data[0] == "delete":
-            pl = self._playlist_by_id(data[1])
-            if pl and QMessageBox.question(
-                    self, APP_NAME, f"要刪除清單「{pl['name']}」嗎？\n（只會刪除清單，歌曲檔案不會動）",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                    QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
-                self.settings.playlists = [p for p in self.settings.playlists if p["id"] != pl["id"]]
-                self.settings.last_pl_tracks.pop(pl["id"], None)
-                self.save_settings()
-                if self.view_mode == f"pl:{pl['id']}":
-                    self.set_view_mode("all")
-        self.rebuild_track_list()          # refreshes counts, names and the highlighted tab
-
-    def playlist_add(self, pid, track):
-        pl = self._playlist_by_id(pid)
-        if pl is None:
-            return
-        key = path_key(track)
-        if any(path_key(t) == key for t in pl["tracks"]):
-            pl["tracks"] = [t for t in pl["tracks"] if path_key(t) != key]
-            self.subtitle.setText(f"已從「{pl['name']}」移除：{Path(track).stem}")
-        else:
-            pl["tracks"].append(str(track))
-            self.subtitle.setText(f"已加入「{pl['name']}」：{Path(track).stem}")
-        self.save_settings()
-        if self.view_mode == f"pl:{pid}":
-            self.rebuild_track_list()
-        else:
-            self._sync_seg()
-
-    def _sync_seg(self):
-        pl = self._pl_of_view()
-        self.seg_list.setText(f"📋  {pl['name']}  ▾" if pl else "📋  我的清單  ▾")
-        target = self.seg_fav if self.view_mode == "fav" else self.seg_list if pl else self.seg_all
-        target.setChecked(True)
-
-    def _last_track_for_view(self):
-        """Remembered song of the tab that is currently open (全部 / 最愛 / 某份清單)."""
-        pl = self._pl_of_view()
-        if pl is not None:
-            return self.settings.last_pl_tracks.get(pl["id"], "")
-        return self.settings.last_fav_track if self.view_mode == "fav" else self.settings.last_track
-
-    def _remember_last_track(self, path):
-        """Store `path` as the last song of the tab that is currently open."""
-        pl = self._pl_of_view()
-        if pl is not None:
-            self.settings.last_pl_tracks[pl["id"]] = str(path)
-        elif self.view_mode == "fav":
-            self.settings.last_fav_track = str(path)
-        else:
-            self.settings.last_track = str(path)
-
-    def _restore_last_selection(self, last):
-        """Select `last` in the visible list if it is there (no auto-play)."""
-        if not last:
-            return
-        key = path_key(last)
-        for row in range(self.track_list.count()):
-            if path_key(self.track_list.item(row).data(ROLE_PATH)) == key:
-                self.track_list.setCurrentRow(row)
-                return
-
-    def set_view_mode(self, mode):
-        # Read this tab's remembered song BEFORE rebuilding: the rebuild can
-        # fire a selection change that would overwrite it.
-        self.view_mode = mode
-        remembered = self._last_track_for_view()
-        self.settings.last_view_mode = mode
-        self.save_settings()
-        self.rebuild_track_list()
-        self._restore_last_selection(remembered)
-        if (mode == "fav" or self._pl_of_view() is not None) and self.track_list.count() > 1:
-            self.subtitle.setText("拖曳歌曲可調整順序，「下一首」會照這個順序播放。")
-
-    def rebuild_track_list(self):
-        lst = self.track_list
-        scroll = lst.verticalScrollBar().value()
-        current = lst.currentItem()
-        current_key = path_key(current.data(ROLE_PATH)) if current is not None else None
-        favs = [Path(p) for p in self.settings.favorites]
-        fav_keys = {path_key(p) for p in favs}
-        if self.view_mode.startswith("pl:") and self._pl_of_view() is None:
-            self.view_mode = "all"                  # that playlist no longer exists
-        pl = self._pl_of_view()
-        fav_view = self.view_mode == "fav"
-        saved_view = fav_view or pl is not None     # lists made of remembered paths (最愛 / 清單)
-        entries = favs if fav_view else [Path(p) for p in pl["tracks"]] if pl is not None else self.tracks
-        lst.blockSignals(True)
-        lst.clear()
-        width = max(2, len(str(len(entries))))
-        restore = None
-        for index, track in enumerate(entries, 1):
-            key = path_key(track)
-            sub, hay = self._track_info.get(
-                key, (track.parent.name or str(track.parent), f"{track.parent.name} {track.name}".lower()))
-            missing = saved_view and not track.is_file()
-            item = QListWidgetItem()
-            item.setData(ROLE_PATH, str(track))
-            item.setData(ROLE_NAME, track.stem)
-            item.setData(ROLE_SEARCH, hay)
-            item.setData(ROLE_NUM, f"{index:0{width}d}")
-            item.setData(ROLE_FAV, key in fav_keys)
-            item.setData(ROLE_MISSING, missing)
-            item.setData(ROLE_SUB, sub)
-            item.setToolTip(str(track) + ("\n（檔案已被移動、改名或刪除）" if missing else ""))
-            lst.addItem(item)
-            if key == current_key:
-                restore = item
-        lst.blockSignals(False)
-        if restore is not None:
-            lst.setCurrentItem(restore)
-        lst.verticalScrollBar().setValue(scroll)
-        self._apply_playing_mark()
-        self.filter_tracks(self.search_box.text())
-        self.seg_all.setText(f"全部  {len(self.tracks)}")
-        self.seg_fav.setText(f"★  最愛  {len(favs)}")
-        self._sync_seg()
-        if lst.count() == 0:
-            if pl is not None:
-                self.list_empty.setText(f"「{pl['name']}」還是空的\n\n在歌曲上按右鍵 →「加入清單」就能放進來")
-            elif self._scanning and not fav_view:
-                self.list_empty.setText("正在掃描音樂資料夾…\n\n歌曲很多時會花一點時間，期間其他功能都能正常使用")
-            elif fav_view:
-                self.list_empty.setText("還沒有最愛歌曲\n\n在「全部」清單的歌曲上按右鍵 →「加入最愛」\n或直接點歌名前面的 ☆")
-            elif not self.settings.music_folders:
-                self.list_empty.setText("尚未加入音樂資料夾\n\n點右上角「加入音樂資料夾」開始\n可以加入多個資料夾，會合併成同一個曲庫")
-            else:
-                self.list_empty.setText("資料夾裡沒有找到支援的音樂檔\n\n支援 mp3、wav、flac、ogg、m4a、aac、wma、opus")
-        self.list_stack.setCurrentIndex(1 if lst.count() == 0 else 0)
-
-    def is_favorite(self, path):
-        key = path_key(path)
-        return any(path_key(p) == key for p in self.settings.favorites)
-
-    def toggle_favorite(self, track):
-        track = Path(track)
-        key = path_key(track)
-        favs = self.settings.favorites
-        index = next((i for i, p in enumerate(favs) if path_key(p) == key), None)
-        if index is None:
-            favs.append(str(track))
-            self.subtitle.setText(f"★ 已加入最愛：{track.stem}")
-        else:
-            favs.pop(index)
-            self.subtitle.setText(f"已從最愛移除：{track.stem}")
-        self.save_settings()
-        fav_keys = {path_key(p) for p in favs}
-        for row in range(self.track_list.count()):
-            item = self.track_list.item(row)
-            item.setData(ROLE_FAV, path_key(item.data(ROLE_PATH)) in fav_keys)
-        self.track_list.viewport().update()
-        if self.view_mode == "fav":
-            self.rebuild_track_list()
-        else:
-            self.seg_fav.setText(f"★  最愛  {len(favs)}")
-
-    def library_menu(self, pos):
-        item = self.track_list.itemAt(pos)
-        if item is None:
-            return
-        self.track_list.setCurrentItem(item)
-        track = Path(item.data(ROLE_PATH))
-        menu = QMenu(self)
-        a_fav = menu.addAction("☆  從最愛移除" if self.is_favorite(track) else "★  加入最愛")
-        sub = menu.addMenu("📋  加入清單")
-        key = path_key(track)
-        for pl in self.settings.playlists:
-            has = any(path_key(t) == key for t in pl["tracks"])
-            act = sub.addAction(f"{'✓  ' if has else '      '}{pl['name']}")
-            act.setData(pl["id"])
-        if self.settings.playlists:
-            sub.addSeparator()
-        a_new_pl = sub.addAction("＋  新增清單並加入…")
-        a_remove_here = None
-        current_pl = self._pl_of_view()
-        if current_pl is not None:
-            a_remove_here = menu.addAction(f"✖  從「{current_pl['name']}」移除")
-        menu.addSeparator()
-        a_play = menu.addAction("▶  立即播放")
-        a_play.setEnabled(not item.data(ROLE_MISSING))
-        chosen = menu.exec(self.track_list.viewport().mapToGlobal(pos))
-        if chosen is a_fav:
-            self.toggle_favorite(track)
-        elif chosen is a_new_pl:
-            pl = self.create_playlist(tracks=[str(track)])
-            if pl:
-                self.subtitle.setText(f"已建立「{pl['name']}」並加入：{track.stem}")
-                self._sync_seg()
-        elif a_remove_here is not None and chosen is a_remove_here:
-            self.playlist_add(current_pl["id"], track)
-        elif chosen is not None and chosen.data() and chosen.parent() is sub:
-            self.playlist_add(chosen.data(), track)
-        elif chosen is a_play:
-            self.play_track(track)
-
-    def _sync_pause_ui(self, playing):
-        paused = bool(playing and self.mixer.paused)
-        state = (bool(playing), paused)
-        if state == self._pause_ui_state:
-            return
-        self._pause_ui_state = state
-        self.progress.setProperty("paused", paused)
-        restyle(self.progress)
-        self.pause_button.setEnabled(bool(playing))
-        self.pause_button.setText("▶  繼續" if paused else "⏸  暫停")
-        self.pause_button.setProperty("resume", paused)
-        restyle(self.pause_button)
-
-    def quick_page(self):
-        page, box = self.page_shell(
-            "快捷音效板",
-            "點一下按鈕 → 顯示「請按下按鍵…」→ 直接按下想用的鍵或組合鍵（會即時顯示）→ 放開後自動記錄。")
-        rows = {attr: (title, hint) for attr, title, hint in HOTKEY_ROWS}
-        groups = [
-            ("播放控制", ["play_hotkey", "random_hotkey", "next_hotkey", "stop_hotkey", "pause_hotkey"]),
-            ("音量與麥克風", ["volume_up_hotkey", "volume_down_hotkey", "mic_hotkey"]),
-        ]
-        used = {a for _, attrs in groups for a in attrs}
-        groups[-1][1].extend(a for a in rows if a not in used)  # never drop a row
-        for group_title, attrs in groups:
-            card, grid = self.section_card(group_title)
-            for r, attr in enumerate(attrs):
-                title, hint = rows[attr]
-                grid.addWidget(QLabel(title, objectName="settingLabel"), r, 0)
-                grid.addWidget(self.make_hotkey_row(attr), r, 1)
-                grid.addWidget(QLabel(hint, objectName="hint"), r, 2)
-            box.addWidget(card)
-        box.addStretch()
-        return page
-
-    def make_hotkey_row(self, attr):
-        edit = HotkeyEdit(getattr(self.settings, attr))
-        self.hotkey_edits[attr] = edit
-        edit.changed.connect(lambda value, a=attr: self.hotkey_edit_changed(a, value))
-        edit.capture_state.connect(self.on_capture_state)
-        clear = QPushButton("清除")
-        clear.setFixedWidth(70)
-        clear.clicked.connect(edit.clear_value)
-        wrap = QWidget()
-        wrap.setObjectName("row")
-        row = QHBoxLayout(wrap)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(8)
-        row.addWidget(edit, 1)
-        row.addWidget(clear)
-        return wrap
-
-    def _field_row(self, grid, row, label, widget, hint=""):
-        """Label + widget on one line, with an optional one-line hint right under the widget."""
-        # Key-capture buttons carry long prompts ("請按下…"); let them shrink instead
-        # of forcing the two side-by-side cards wider than the window.
-        for button in ([widget] if isinstance(widget, QPushButton) else []) + widget.findChildren(QPushButton):
-            button.setSizePolicy(QSizePolicy.Policy.Ignored, button.sizePolicy().verticalPolicy())
-        grid.addWidget(QLabel(label, objectName="settingLabel"), row * 2, 0, Qt.AlignmentFlag.AlignVCenter)
-        grid.addWidget(widget, row * 2, 1)
-        if hint:
-            note = QLabel(hint)
-            note.setObjectName("hint")
-            note.setWordWrap(True)
-            note.setContentsMargins(0, 0, 0, 6)
-            grid.addWidget(note, row * 2 + 1, 1)
-
-    def _mouse_hotkey_row(self, edit):
-        clear = QPushButton("清除")
-        clear.setFixedWidth(70)
-        clear.clicked.connect(edit.clear_value)
-        wrap = QWidget()
-        wrap.setObjectName("row")
-        row = QHBoxLayout(wrap)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(8)
-        row.addWidget(edit, 1)
-        row.addWidget(clear)
-        return wrap
-
-    def _compact_card(self, title):
-        card, grid = self.section_card(title)
-        grid.setColumnMinimumWidth(0, 104)
-        grid.setHorizontalSpacing(14)
-        grid.setVerticalSpacing(4)
-        return card, grid
-
-    def clicker_page(self):
-        page, box = self.page_shell(
-            "連點器",
-            "連點與壓住並排設定；上方的預設組合可一次切換兩邊的設定。")
-
-        # ---- presets (one preset = click settings + hold settings) ----
-        presets_card, pgrid = self.section_card(
-            "預設組合", "一組預設同時記住「連點」和「壓住」的按鍵、時間與開始前等待；快捷鍵不包含在內。")
-        preset_row = QHBoxLayout()
-        preset_row.setSpacing(10)
-        self.preset_combo = QComboBox()
-        self.preset_combo.setMinimumWidth(320)
-        self.preset_combo.activated.connect(self.apply_clicker_preset)  # only user picks, not code changes
-        save_preset = QPushButton("＋  存成預設")
-        save_preset.setToolTip("把目前的連點與壓住設定存成一組預設（名稱相同會覆蓋舊的）")
-        save_preset.clicked.connect(self.save_clicker_preset)
-        self.delete_preset_button = QPushButton("－  刪除所選")
-        self.delete_preset_button.clicked.connect(self.delete_clicker_preset)
-        preset_row.addWidget(self.preset_combo, 1)
-        preset_row.addWidget(save_preset)
-        preset_row.addWidget(self.delete_preset_button)
-        pgrid.addWidget(QLabel("套用預設", objectName="settingLabel"), 0, 0)
-        pgrid.addLayout(preset_row, 0, 1)
-        self.refresh_clicker_presets()
-        box.addWidget(presets_card)
-
-        columns = QHBoxLayout()
-        columns.setSpacing(16)
-
-        # ---- left: auto click ----
-        card, grid = self._compact_card("連點")
-        self.click_target = ClickTargetEdit(self.settings.clicker_target)
-        self.click_target.changed.connect(self.clicker_target_changed)
-        self.click_target.capture_state.connect(self.on_capture_state)
-        self._field_row(grid, 0, "連點按鍵", self.click_target, "點一下再按想連點的鍵；滑鼠鍵需在本視窗內點選")
-        self.click_interval = QDoubleSpinBox()
-        self.click_interval.setRange(AutoClicker.MIN_INTERVAL, 3600.0)
-        self.click_interval.setDecimals(2)
-        self.click_interval.setSingleStep(0.1)
-        self.click_interval.setSuffix(" 秒")
-        self.click_interval.setValue(max(AutoClicker.MIN_INTERVAL, self.settings.clicker_interval))
-        self.click_interval.valueChanged.connect(self.clicker_interval_changed)
-        self._field_row(grid, 1, "連點間隔", self.click_interval, "最低 0.02 秒（每秒 50 次）")
-        self.click_duration = QSpinBox()
-        self.click_duration.setRange(0, 86400)
-        self.click_duration.setSpecialValueText("不限時")
-        self.click_duration.setSuffix(" 秒")
-        self.click_duration.setValue(max(0, int(self.settings.clicker_duration)))
-        self.click_duration.valueChanged.connect(self.clicker_duration_changed)
-        self._field_row(grid, 2, "時間上限", self.click_duration, "滿這段時間自動停止；0 為不限時")
-        self.click_delay = QDoubleSpinBox()
-        self.click_delay.setRange(0.5, 3.0)
-        self.click_delay.setDecimals(1)
-        self.click_delay.setSingleStep(0.5)
-        self.click_delay.setSuffix(" 秒")
-        self.click_delay.setValue(min(3.0, max(0.5, float(self.settings.clicker_delay))))
-        self.click_delay.valueChanged.connect(self.clicker_delay_changed)
-        self._field_row(grid, 3, "開始前等待", self.click_delay, "按下開始後先等一下（0.5～3 秒），好移到目標位置")
-        self._field_row(grid, 4, "快捷鍵（鍵盤）", self.make_hotkey_row("clicker_hotkey"),
-                        "按一次開始、再按一次結束；可含組合鍵")
-        self.click_mouse_edit = MouseHotkeyEdit(self.settings.clicker_mouse_hotkey)
-        self.click_mouse_edit.changed.connect(self.clicker_mouse_hotkey_changed)
-        self.click_mouse_edit.capture_state.connect(self.on_capture_state)
-        self._field_row(grid, 5, "快捷鍵（滑鼠）", self._mouse_hotkey_row(self.click_mouse_edit),
-                        "可用滑鼠中鍵或側鍵（遊戲內也有效）")
-        self.click_button = QPushButton()
-        self.click_button.setObjectName("primary")
-        self.click_button.setFixedHeight(42)
-        self.click_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.click_button.clicked.connect(self.clicker_button_clicked)
-        grid.addWidget(self.click_button, 12, 0, 1, 2)
-        self.click_status = QLabel()
-        self.click_status.setObjectName("hint")
-        self.click_status.setWordWrap(True)
-        grid.addWidget(self.click_status, 13, 0, 1, 2)
-        columns.addWidget(card, 1, Qt.AlignmentFlag.AlignTop)
-
-        # ---- right: hold key ----
-        card, grid = self._compact_card("壓住按鍵（長按）")
-        self.hold_target_edit = ClickTargetEdit(self.settings.hold_target)
-        self.hold_target_edit.changed.connect(self.hold_target_changed)
-        self.hold_target_edit.capture_state.connect(self.on_capture_state)
-        self._field_row(grid, 0, "壓住按鍵", self.hold_target_edit, "壓住不放（不連點）；滑鼠鍵需在本視窗內點選")
-        self.hold_duration = QSpinBox()
-        self.hold_duration.setRange(0, 86400)
-        self.hold_duration.setSpecialValueText("不限時（手動停止）")
-        self.hold_duration.setSuffix(" 秒")
-        self.hold_duration.setValue(max(0, int(self.settings.hold_duration)))
-        self.hold_duration.valueChanged.connect(self.hold_duration_changed)
-        self._field_row(grid, 1, "壓住時間", self.hold_duration, "壓滿這段時間自動放開；0 要自己按停止")
-        self.hold_delay = QDoubleSpinBox()
-        self.hold_delay.setRange(0.5, 3.0)
-        self.hold_delay.setDecimals(1)
-        self.hold_delay.setSingleStep(0.5)
-        self.hold_delay.setSuffix(" 秒")
-        self.hold_delay.setValue(min(3.0, max(0.5, float(self.settings.hold_delay))))
-        self.hold_delay.valueChanged.connect(self.hold_delay_changed)
-        self._field_row(grid, 2, "開始前等待", self.hold_delay, "按下開始後先等一下（0.5～3 秒），好移到目標位置")
-        self._field_row(grid, 3, "快捷鍵（鍵盤）", self.make_hotkey_row("hold_hotkey"),
-                        "按一次開始、再按一次結束；可含組合鍵")
-        self.hold_mouse_edit = MouseHotkeyEdit(self.settings.hold_mouse_hotkey)
-        self.hold_mouse_edit.changed.connect(self.hold_mouse_hotkey_changed)
-        self.hold_mouse_edit.capture_state.connect(self.on_capture_state)
-        self._field_row(grid, 4, "快捷鍵（滑鼠）", self._mouse_hotkey_row(self.hold_mouse_edit),
-                        "可用滑鼠中鍵或側鍵（遊戲內也有效）")
-        self.hold_button = QPushButton()
-        self.hold_button.setObjectName("primary")
-        self.hold_button.setFixedHeight(42)
-        self.hold_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.hold_button.clicked.connect(self.hold_button_clicked)
-        grid.addWidget(self.hold_button, 12, 0, 1, 2)
-        self.hold_status = QLabel()
-        self.hold_status.setObjectName("hint")
-        self.hold_status.setWordWrap(True)
-        grid.addWidget(self.hold_status, 13, 0, 1, 2)
-        columns.addWidget(card, 1, Qt.AlignmentFlag.AlignTop)
-
-        box.addLayout(columns)
-        box.addStretch()
-        self.update_clicker_ui()
-        self.update_hold_ui()
-        self._update_mouse_hotkey_timer()
-        return page
-
-    def diagnostics_page(self):
-        page, box = self.page_shell(
-            "音訊診斷",
-            "這裡確認 EchoDeck 本機端是否準備完成；WARDOGS 是否真的送達附近玩家仍需在真實伺服器測試。")
-        card, grid = self.section_card("目前狀態")
-        self.diagnostic_labels = {}
-        for r, (key, label) in enumerate([
-            ("output", "虛擬聲卡輸出"), ("input", "真實麥克風輸入"),
-            ("monitor", "本機音效監聽"), ("mic", "麥克風混入"),
-            ("effect", "音效播放狀態"), ("ptt", "遊戲 PTT 狀態"),
-        ]):
-            grid.addWidget(QLabel(label, objectName="settingLabel"), r, 0)
-            value = QLabel("檢查中…")
-            value.setObjectName("diagOff")
-            grid.addWidget(value, r, 1, Qt.AlignmentFlag.AlignLeft)
-            self.diagnostic_labels[key] = value
-        self.diagnostic_refresh = QPushButton("重新檢查")
-        self.diagnostic_refresh.clicked.connect(self.refresh_diagnostics)
-        grid.addWidget(self.diagnostic_refresh, 6, 0, 1, 2)
-        box.addWidget(card)
-        box.addStretch()
-        QTimer.singleShot(0, self.refresh_diagnostics)
-        return page
-
-    def _ptt_diagnostic(self):
-        if not self.ptt_down:
-            return False, "未按住"
-        kind, name = target_kind_name(self.settings.ptt_key)
-        if kind == "mouse":
-            return True, "已按住（滑鼠鍵）"
-        state = key_is_down(name)
-        if state is True:
-            return True, f"已按住「{name}」，Windows 已確認"
-        if state is False:
-            return False, f"程式已送出「{name}」，但 Windows 沒偵測到按下"
-        return True, "已按住"
-
-    def refresh_diagnostics(self):
-        values = {
-            "output": (self.mixer.output_stream is not None, self.settings.output_device or "尚未選擇"),
-            "input": (self.mixer.input_stream is not None, self.settings.microphone_device or "尚未選擇"),
-            "monitor": ((not self.settings.monitor_enabled) or self.mixer.monitor_stream is not None,
-                        "關閉" if not self.settings.monitor_enabled else self.settings.monitor_device or "尚未選擇"),
-            "mic": (self.settings.microphone_enabled, "開啟" if self.settings.microphone_enabled else "關閉"),
-            "effect": (self.mixer.effect_playing(), "播放中" if self.mixer.effect_playing() else "待命"),
-            "ptt": self._ptt_diagnostic(),
-        }
-        for key, (ok, text) in values.items():
-            widget = self.diagnostic_labels.get(key)
-            if widget:
-                widget.setText(("✓ " if ok else "○ ") + text)
-                widget.setObjectName("diagOk" if ok else "diagOff")
-                restyle(widget)
-
-    def settings_page(self):
-        page, box = self.page_shell("設定精靈", "只要設定一次。每個欄位旁都有用途說明，不用懂音訊技術。")
-
-        # -- music folders --
-        card, grid = self.section_card("音樂資料夾", "全部資料夾（含子資料夾）會合併成同一個曲庫，不用一個一個切換。")
-        grid.addWidget(QLabel("資料夾", objectName="settingLabel"), 0, 0, Qt.AlignmentFlag.AlignTop)
-        self.folder_list = QListWidget()
-        self.folder_list.setObjectName("folderList")
-        self.folder_list.setFixedHeight(150)
-        self.folder_list.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
-        grid.addWidget(self.folder_list, 0, 1)
-        folder_buttons = QHBoxLayout()
-        folder_buttons.setSpacing(10)
-        add_folder_button = QPushButton("＋  加入資料夾")
-        add_folder_button.clicked.connect(self.add_folder)
-        self.remove_folder_button = QPushButton("－  移除所選")
-        self.remove_folder_button.clicked.connect(self.remove_selected_folder)
-        rescan_button = QPushButton("↻  重新掃描")
-        rescan_button.clicked.connect(self.scan_folders)
-        folder_buttons.addWidget(add_folder_button)
-        folder_buttons.addWidget(self.remove_folder_button)
-        folder_buttons.addWidget(rescan_button)
-        folder_buttons.addStretch()
-        grid.addLayout(folder_buttons, 1, 1)
-        grid.addWidget(QLabel("移除資料夾只會從曲庫拿掉，不會刪除檔案；最愛直接記錄歌曲完整路徑，不受影響。",
-                              objectName="hint"), 2, 1)
-        box.addWidget(card)
-
-        # -- YouTube favourites folder --
-        card, grid = self.section_card("YouTube 檔案存放位置",
-                                       "最愛歌曲與 YouTube 元件（yt-dlp、Deno）都可以各自選資料夾，例如放在 EchoDeck 資料夾裡方便找。")
-        grid.addWidget(QLabel("最愛歌曲位置", objectName="settingLabel"), 0, 0)
-        self.yt_dir_edit = QLineEdit()
-        self.yt_dir_edit.setReadOnly(True)
-        grid.addWidget(self.yt_dir_edit, 0, 1)
-        yt_dir_buttons = QHBoxLayout()
-        yt_dir_buttons.setSpacing(10)
-        yt_pick_button = QPushButton("📁  選擇資料夾…")
-        yt_pick_button.clicked.connect(self.yt_choose_fav_dir)
-        yt_app_button = QPushButton("📦  放到 EchoDeck 資料夾")
-        yt_app_button.setToolTip("存到 EchoDeck.exe 所在的資料夾裡的「YouTube最愛」")
-        yt_app_button.clicked.connect(self.yt_use_app_fav_dir)
-        self.yt_dir_reset_button = QPushButton("↩  恢復預設")
-        self.yt_dir_reset_button.setToolTip("%APPDATA%\\EchoDeck\\YouTube最愛")
-        self.yt_dir_reset_button.clicked.connect(self.yt_reset_fav_dir)
-        for b in (yt_pick_button, yt_app_button, self.yt_dir_reset_button):
-            yt_dir_buttons.addWidget(b)
-        yt_dir_buttons.addStretch()
-        grid.addLayout(yt_dir_buttons, 1, 1)
-        grid.addWidget(QLabel("更換位置時，可以選擇要不要把已存好的歌一起搬過去。", objectName="hint"), 2, 1)
-        grid.addWidget(QLabel("元件位置（tools）", objectName="settingLabel"), 3, 0)
-        self.tools_dir_edit = QLineEdit()
-        self.tools_dir_edit.setReadOnly(True)
-        grid.addWidget(self.tools_dir_edit, 3, 1)
-        tools_buttons = QHBoxLayout()
-        tools_buttons.setSpacing(10)
-        tools_pick = QPushButton("📁  選擇資料夾…")
-        tools_pick.clicked.connect(self.tools_choose_dir)
-        tools_app = QPushButton("📦  放到 EchoDeck 資料夾")
-        tools_app.setToolTip("存到 EchoDeck.exe 所在的資料夾裡的「tools」")
-        tools_app.clicked.connect(self.tools_use_app_dir)
-        self.tools_dir_reset_button = QPushButton("↩  恢復預設")
-        self.tools_dir_reset_button.setToolTip("%APPDATA%\\EchoDeck\\tools")
-        self.tools_dir_reset_button.clicked.connect(self.tools_reset_dir)
-        for b in (tools_pick, tools_app, self.tools_dir_reset_button):
-            tools_buttons.addWidget(b)
-        tools_buttons.addStretch()
-        grid.addLayout(tools_buttons, 4, 1)
-        grid.addWidget(QLabel("更換位置時會把 yt-dlp.exe 與 deno.exe 複製過去；若正在下載或播放 YouTube 請稍後再換。", objectName="hint"), 5, 1)
-        self.refresh_yt_dir_ui()
-        box.addWidget(card)
-
-        # -- appearance --
-        card, grid = self.section_card("外觀", "整套外觀一起切換：背景圖案、玻璃面板、選取色、文字與強調色。")
-        grid.addWidget(QLabel("主題色", objectName="settingLabel"), 0, 0)
-        self.theme_combo = QComboBox()
-        for key, spec in THEMES.items():
-            label, colors = spec["label"], palette_for(key)
-            swatch = QPixmap(22, 22)
-            swatch.fill(Qt.GlobalColor.transparent)
-            sp = QPainter(swatch)
-            sp.setRenderHint(QPainter.RenderHint.Antialiasing)
-            art = get_art(key).scaled(22, 22, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                                      Qt.TransformationMode.SmoothTransformation)
-            clip = QPainterPath()
-            clip.addRoundedRect(QRectF(1, 1, 20, 20), 6, 6)
-            sp.setClipPath(clip)
-            sp.drawPixmap(0, 0, art)
-            sp.setClipping(False)
-            sp.setPen(QPen(QColor(colors["ACC_BAR"]), 1.6))
-            sp.setBrush(Qt.BrushStyle.NoBrush)
-            sp.drawRoundedRect(QRectF(1, 1, 20, 20), 6, 6)
-            sp.end()
-            self.theme_combo.addItem(QIcon(swatch), label, key)
-        self.theme_combo.setCurrentIndex(max(0, self.theme_combo.findData(self.settings.theme)))
-        self.theme_combo.currentIndexChanged.connect(self.theme_changed)
-        grid.addWidget(self.theme_combo, 0, 1)
-        grid.addWidget(QLabel("播放中視覺化", objectName="settingLabel"), 1, 0)
-        self.viz_combo = QComboBox()
-        for label, key in (("柱狀頻譜", "bars"), ("鏡像頻譜", "mirror"), ("柔和曲線", "wave"), ("圓形頻譜", "circle"), ("關閉", "off")):
-            self.viz_combo.addItem(label, key)
-        self.viz_combo.setCurrentIndex(max(0, self.viz_combo.findData(self.settings.viz_style)))
-        self.viz_combo.currentIndexChanged.connect(self.viz_style_changed)
-        grid.addWidget(self.viz_combo, 1, 1)
-        grid.addWidget(QLabel("低音光暈", objectName="settingLabel"), 2, 0)
-        self.viz_glow_slider = QSlider(Qt.Orientation.Horizontal)
-        self.viz_glow_slider.setRange(0, 100)
-        self.viz_glow_slider.setValue(self.settings.viz_glow)
-        self.viz_glow_slider.setToolTip("鼓點／低音出現時，視覺化背景發光的強度（0 = 不發光）")
-        self.viz_glow_slider.valueChanged.connect(self.viz_options_changed)
-        glow_wrap, _glow_badge = self.slider_with_value(self.viz_glow_slider, "%")
-        grid.addWidget(glow_wrap, 2, 1)
-        self.viz_flow_check = QCheckBox("顏色隨音樂緩緩流動（關閉則固定用主題色）")
-        self.viz_flow_check.setChecked(self.settings.viz_flow)
-        self.viz_flow_check.toggled.connect(self.viz_options_changed)
-        grid.addWidget(self.viz_flow_check, 3, 1)
-        grid.addWidget(QLabel("視覺化大小", objectName="settingLabel"), 4, 0)
-        self.viz_size_combo = QComboBox()
-        for label, key in (("標準", "normal"), ("加大", "large"), ("填滿右側剩餘空間", "fill")):
-            self.viz_size_combo.addItem(label, key)
-        self.viz_size_combo.setCurrentIndex(max(0, self.viz_size_combo.findData(self.settings.viz_size)))
-        self.viz_size_combo.currentIndexChanged.connect(self.viz_layout_changed)
-        grid.addWidget(self.viz_size_combo, 4, 1)
-        grid.addWidget(QLabel("視窗氛圍光", objectName="settingLabel"), 5, 0)
-        self.viz_ambient_combo = QComboBox()
-        for label, key in (("關閉", "off"), ("柔和", "soft"), ("強烈", "strong")):
-            self.viz_ambient_combo.addItem(label, key)
-        self.viz_ambient_combo.setCurrentIndex(max(0, self.viz_ambient_combo.findData(self.settings.viz_ambient)))
-        self.viz_ambient_combo.setToolTip("整個視窗的背景隨低音／鼓點發光（透過半透明面板透出來）。如果覺得畫面不順可以關閉。")
-        self.viz_ambient_combo.currentIndexChanged.connect(self.viz_layout_changed)
-        grid.addWidget(self.viz_ambient_combo, 5, 1)
-        box.addWidget(card)
-
-        # -- output device --
-        card, grid = self.section_card("音樂輸出裝置")
-        grid.addWidget(QLabel("輸出裝置", objectName="settingLabel"), 0, 0)
-        self.device_combo = QComboBox()
-        self.device_combo.currentTextChanged.connect(self.device_changed)
-        grid.addWidget(self.device_combo, 0, 1)
-        device_note = QLabel("選擇虛擬聲卡的播放端，例如 VB-CABLE 的「CABLE Input」。遊戲內麥克風則選「CABLE Output」。")
-        device_note.setObjectName("hint")
-        device_note.setWordWrap(True)
-        grid.addWidget(device_note, 1, 1)
-        box.addWidget(card)
-
-        # -- microphone --
-        card, grid = self.section_card("麥克風")
-        grid.addWidget(QLabel("輸入裝置", objectName="settingLabel"), 0, 0)
-        self.mic_combo = QComboBox()
-        self.mic_combo.currentTextChanged.connect(self.microphone_device_changed)
-        grid.addWidget(self.mic_combo, 0, 1)
-        grid.addWidget(QLabel("混入開關", objectName="settingLabel"), 1, 0)
-        self.mic_button = QPushButton()
-        self.mic_button.setObjectName("primary")
-        self.mic_button.clicked.connect(self.toggle_microphone)
-        grid.addWidget(self.mic_button, 1, 1)
-        grid.addWidget(QLabel("麥克風音量", objectName="settingLabel"), 2, 0)
-        self.mic_volume = QSlider(Qt.Orientation.Horizontal)
-        self.mic_volume.setRange(0, 200)
-        self.mic_volume.setValue(self.settings.microphone_volume)
-        self.mic_volume.valueChanged.connect(self.change_microphone_volume)
-        mic_widget, _badge = self.slider_with_value(self.mic_volume)
-        grid.addWidget(mic_widget, 2, 1)
-        self.mute_mic_when_sound = QCheckBox("播放音效時自動靜音麥克風（預設開啟）")
-        self.mute_mic_when_sound.setChecked(self.settings.mute_mic_while_sound)
-        self.mute_mic_when_sound.toggled.connect(self.mute_mic_when_sound_changed)
-        grid.addWidget(self.mute_mic_when_sound, 3, 1)
-        box.addWidget(card)
-
-        # -- local monitor --
-        card, grid = self.section_card("本機監聽")
-        self.monitor_check = QCheckBox("我也要從耳機／喇叭聽到播放的音樂")
-        self.monitor_check.setChecked(self.settings.monitor_enabled)
-        self.monitor_check.toggled.connect(self.monitor_changed)
-        grid.addWidget(self.monitor_check, 0, 1)
-        grid.addWidget(QLabel("監聽裝置", objectName="settingLabel"), 1, 0)
-        self.monitor_combo = QComboBox()
-        self.monitor_combo.currentTextChanged.connect(self.monitor_device_changed)
-        grid.addWidget(self.monitor_combo, 1, 1)
-        box.addWidget(card)
-
-        # -- push to talk --
-        card, grid = self.section_card("遊戲區域發話鍵（PTT）")
-        grid.addWidget(QLabel("發話鍵", objectName="settingLabel"), 0, 0)
-        self.ptt_input = QLineEdit(self.settings.ptt_key)
-        self.ptt_input.setPlaceholderText("例如：v、caps lock、f8、mouse4")
-        self.ptt_input.editingFinished.connect(self.ptt_changed)
-        grid.addWidget(self.ptt_input, 0, 1, 1, 2)
-        self.auto_ptt_check = QCheckBox("播放音樂時，自動按住並在停止時放開此按鍵")
-        self.auto_ptt_check.setChecked(self.settings.auto_ptt)
-        self.auto_ptt_check.toggled.connect(self.auto_ptt_changed)
-        grid.addWidget(self.auto_ptt_check, 1, 1, 1, 2)
-        grid.addWidget(QLabel("開麥等待", objectName="settingLabel"), 2, 0)
-        self.delay_spin = QSpinBox()
-        self.delay_spin.setRange(0, 2000)
-        self.delay_spin.setSuffix(" ms")
-        self.delay_spin.setValue(self.settings.ptt_delay_ms)
-        self.delay_spin.valueChanged.connect(self.delay_changed)
-        grid.addWidget(self.delay_spin, 2, 1)
-        grid.addWidget(QLabel("先按住 PTT 再播歌，避免歌曲開頭被遊戲切掉。", objectName="hint"), 2, 2)
-        self.ptt_test = QPushButton("測試：按住遊戲 PTT 兩秒")
-        self.ptt_test.setToolTip("切到遊戲畫面後按這裡；遊戲應顯示區域發話圖示。此測試不播放音樂。")
-        self.ptt_test.clicked.connect(self.test_ptt)
-        grid.addWidget(self.ptt_test, 3, 1, 1, 2)
-        box.addWidget(card)
-
-        # -- playback --
-        card, grid = self.section_card("播放")
-        self.shuffle_check = QCheckBox("隨機播放：整份清單都播過一輪才會重複")
-        self.shuffle_check.setChecked(self.settings.shuffle)
-        self.shuffle_check.toggled.connect(self.shuffle_changed)
-        grid.addWidget(self.shuffle_check, 0, 1)
-        grid.addWidget(QLabel("播完後自動播放下一首的設定已移至「音樂庫」頁上方的下拉選單。", objectName="hint"), 1, 1)
-        self.normalize_check = QCheckBox("音量正規化（自動降低過大的歌曲，讓音量較一致）")
-        self.normalize_check.setChecked(self.settings.normalize_audio)
-        self.normalize_check.toggled.connect(self.normalize_changed)
-        grid.addWidget(self.normalize_check, 2, 1)
-        self.audio_test_button = QPushButton("執行音訊設定測試")
-        self.audio_test_button.clicked.connect(self.run_audio_test)
-        grid.addWidget(self.audio_test_button, 3, 1)
-        box.addWidget(card)
-
-        warning = QLabel("麥克風混音：Mic 與音效由同一條虛擬聲卡輸出串流送出。耳機監聽只包含音效，不包含麥克風，避免回音。")
-        warning.setObjectName("privacyBanner")
-        warning.setWordWrap(True)
-        box.addWidget(warning)
-        box.addStretch()
-        return page
-
-    def refresh_devices(self):
-        previous = self.settings.output_device
-        self.device_combo.blockSignals(True)
-        self.monitor_combo.blockSignals(True)
-        self.mic_combo.blockSignals(True)
-        self.device_combo.clear()
-        self.monitor_combo.clear()
-        self.mic_combo.clear()
-        # The same Windows endpoint can be shown once per host API. Keep one
-        # human-readable entry per exact name so menus are not duplicated.
-        outputs = list(dict.fromkeys(self.mixer.devices('output')))
-        inputs = list(dict.fromkeys(self.mixer.devices('input')))
-        for device in outputs:
-            self.device_combo.addItem(device)
-            self.monitor_combo.addItem(device)
-        self.mic_combo.addItem(MIC_OFF_LABEL)
-        for device in inputs:
-            self.mic_combo.addItem(device)
-        index = self.device_combo.findText(previous)
-        self.device_combo.setCurrentIndex(index if index >= 0 else 0)
-        monitor_index = self.monitor_combo.findText(self.settings.monitor_device)
-        if monitor_index < 0:
-            # Default output is generally the first Qt device and is a much
-            # safer monitor choice than the VB-CABLE endpoint.
-            monitor_index = 0
-        self.monitor_combo.setCurrentIndex(monitor_index)
-        mic_index = self.mic_combo.findText(self.settings.microphone_device)
-        # Empty setting (or a missing device) = microphone not used.
-        self.mic_combo.setCurrentIndex(mic_index if (mic_index > 0 and self.settings.microphone_device) else 0)
-        self.device_combo.blockSignals(False)
-        self.monitor_combo.blockSignals(False)
-        self.mic_combo.blockSignals(False)
-        self.apply_device()
-        self.apply_monitor_device()
-        self.update_mic_button()
-
-    def apply_device(self):
-        self.settings.output_device = self.device_combo.currentText()
-        self.save_settings()
-        self.apply_mixer_output()
-
-    def apply_monitor_device(self):
-        self.settings.monitor_device = self.monitor_combo.currentText()
-        self.save_settings()
-        self.apply_mixer_output()
-
-    def apply_mixer_output(self):
-        if self.settings.output_device:
-            self.mixer.configure_output(self.settings.output_device, self.settings.monitor_device,
-                                        self.settings.monitor_enabled)
-
-    def apply_microphone(self):
-        self.mixer.configure_microphone(self.settings.microphone_device)
-        self.mixer.mic_enabled = self.settings.microphone_enabled
-        self.mixer.mute_mic_while_sound = self.settings.mute_mic_while_sound
-        self.mixer.mic_gain = self.settings.microphone_volume / 100
-
-    def show_audio_error(self, message):
-        QMessageBox.warning(self, APP_NAME, message)
-
-    def run_audio_test(self):
-        checks = [
-            ("虛擬輸出", self.mixer.output_stream is not None),
-            ("麥克風輸入", self.mixer.input_stream is not None),
-            ("本機監聽", (not self.settings.monitor_enabled) or self.mixer.monitor_stream is not None),
-            ("Mic 混入", self.settings.microphone_enabled),
-        ]
-        report = "\n".join(f"{'✓' if ok else '○'} {name}" for name, ok in checks)
-        QMessageBox.information(self, APP_NAME, "本機音訊鏈路測試\n\n" + report +
-            "\n\n此測試確認 EchoDeck 的裝置已開啟；最後仍需在 WARDOGS 真實伺服器按 K，確認『當地』沒有紅叉。")
-
-    def refresh_folder_list(self):
-        self.folder_list.clear()
-        for folder in self.settings.music_folders:
-            exists = Path(folder).is_dir()
-            item = QListWidgetItem(folder if exists else f"{folder}　（找不到）")
-            item.setData(ROLE_PATH, folder)
-            item.setToolTip(folder)
-            if not exists:
-                item.setForeground(QColor(T["NOT_FOUND"]))
-            self.folder_list.addItem(item)
-        self.remove_folder_button.setEnabled(bool(self.settings.music_folders))
-        self.folder_button.setToolTip("\n".join(self.settings.music_folders) or "尚未選擇資料夾")
-
-    def show_folder_manage_menu(self):
-        menu = QMenu(self)
-        if not self.settings.music_folders:
-            empty = menu.addAction("尚未加入任何資料夾")
-            empty.setEnabled(False)
-        else:
-            for folder in list(self.settings.music_folders):
-                exists = Path(folder).is_dir()
-                label = folder if exists else f"{folder}　（找不到）"
-                act = menu.addAction(f"✕  {label}")
-                act.setToolTip("點一下從曲庫移除這個資料夾（不會刪除檔案）")
-                act.triggered.connect(lambda checked=False, f=folder: self.remove_folder_path(f))
-            menu.addSeparator()
-        add_act = menu.addAction("＋  加入新資料夾…")
-        add_act.triggered.connect(self.add_folder)
-        menu.exec(self.folder_manage_button.mapToGlobal(
-            self.folder_manage_button.rect().bottomLeft()))
-
-    def remove_folder_path(self, folder):
-        self.settings.music_folders = [f for f in self.settings.music_folders if path_key(f) != path_key(folder)]
-        self.save_settings()
-        self.refresh_folder_list()
-        self.scan_folders()
-        self.subtitle.setText("已從曲庫移除該資料夾（原始檔案不受影響）。")
-
-    def add_folder(self):
-        start = self.settings.music_folders[-1] if self.settings.music_folders else str(Path.home())
-        path = QFileDialog.getExistingDirectory(self, "加入音樂資料夾", start)
-        if not path:
-            return
-        if not self._add_folder_path(path):
-            self.subtitle.setText("這個資料夾已經在曲庫裡了。")
-            return
-        self.refresh_folder_list()
-        self.scan_folders()
-
-    def _add_folder_path(self, path):
-        """Add one folder to the library settings; False if it was already there."""
-        path = str(Path(path))
-        if any(path_key(f) == path_key(path) for f in self.settings.music_folders):
-            return False
-        self.settings.music_folders.append(path)
-        self.save_settings()
-        return True
-
-    @staticmethod
-    def _dropped_folders(event):
-        urls = event.mimeData().urls() if event.mimeData().hasUrls() else []
-        return [u.toLocalFile() for u in urls if u.isLocalFile() and Path(u.toLocalFile()).is_dir()]
-
-    def dragEnterEvent(self, event):
-        if self._dropped_folders(event):
-            event.acceptProposedAction()
-        else:
-            event.ignore()
-
-    def dragMoveEvent(self, event):
-        if self._dropped_folders(event):
-            event.acceptProposedAction()
-        else:
-            event.ignore()
-
-    def dropEvent(self, event):
-        folders = self._dropped_folders(event)
-        if not folders:
-            return
-        event.acceptProposedAction()
-        added = [f for f in folders if self._add_folder_path(f)]
-        if added:
-            self.refresh_folder_list()
-            self.scan_folders()
-            self.subtitle.setText(f"已加入 {len(added)} 個資料夾，正在掃描…")
-        else:
-            self.subtitle.setText("拖進來的資料夾都已經在曲庫裡了。")
-
-    def remove_selected_folder(self):
-        item = self.folder_list.currentItem()
-        if item is None:
-            return
-        folder = item.data(ROLE_PATH)
-        self.settings.music_folders = [f for f in self.settings.music_folders if path_key(f) != path_key(folder)]
-        self.save_settings()
-        self.refresh_folder_list()
-        self.scan_folders()
-
-    def update_selection_details(self, current, _previous):
-        if current:
-            path = Path(current.data(Qt.ItemDataRole.UserRole))
-            self.now_title.setText(path.stem)
-            self.now_path.setText(str(path.parent))
-            if self._restored_last_track:
-                self._remember_last_track(path)
-                self.save_settings()
-
-    def play_selected(self):
-        item = self.track_list.currentItem()
-        if not item and self.tracks:
-            self.track_list.setCurrentRow(0)
-            item = self.track_list.currentItem()
-        if item:
-            self.play_track(Path(item.data(Qt.ItemDataRole.UserRole)))
-        elif not self.tracks:
-            self.pages.setCurrentIndex(3)
-            QMessageBox.information(self, APP_NAME, "請先在設定頁選擇含有音樂檔的資料夾。")
-
-    def _pool(self):
-        """Songs that 隨機 / 下一首 draw from: the favourites when that view is open, else the library."""
-        pl = self._pl_of_view()
-        if pl is not None:
-            pool = [Path(p) for p in pl["tracks"] if Path(p).is_file()]
-            if pool:
-                return pool
-        if self.view_mode == "fav":
-            pool = [Path(p) for p in self.settings.favorites if Path(p).is_file()]
-            if pool:
-                return pool
-        return list(self.tracks)
-
-    def play_random(self):
-        pool = [p for p in self._pool() if p.is_file()]
-        if not pool:
-            self.play_selected()
-            return
-        if self.settings.shuffle and len(pool) > 1:
-            # "Deal a deck": every song is played once before any repeats. Songs
-            # played by hand also count, and a new round never opens with the
-            # song that just finished.
-            choices = [p for p in pool if path_key(p) not in self._shuffle_played]
-            if not choices:
-                self._shuffle_played.clear()
-                current = path_key(self.current_track) if self.current_track is not None else None
-                choices = [p for p in pool if path_key(p) != current] or pool
-        else:
-            choices = pool
-        track = random.choice(choices)
-        self._select_in_list(track)
-        self.play_track(track)
-
-    def play_track(self, track: Path):
-        track = Path(track)
-        if not track.is_file():
-            # Moved / renamed / deleted: grey it out and carry on instead of raising.
-            self._flag_missing(track)
-            if not self.mixer.effect_playing() and not self._starting:
-                self.release_ptt()
-            return
-        self.stop(release=False)
-        self._play_token += 1
-        token = self._play_token
-        self._starting = True
-        self.effect_was_playing = False
-        # Mute the mic BEFORE PTT goes down and keep it muted until PTT is
-        # released, so no voice leaks during the lead-in / release tail.
-        self.mixer.mic_hold = True
-        self.current_track = track
-        self.mark_playing(track)
-        self.current_track_index = self.tracks.index(track) if track in self.tracks else -1
-        self.history.append(track)
-        self._shuffle_played.add(path_key(track))
-        self._remember_last_track(track)
-        self.save_settings()
-        self.history = self.history[-20:]
-        self.set_sub("正在送往虛擬麥克風…")
-        if self.settings.auto_ptt:
-            already_down = self.ptt_down
-            self.press_ptt()
-            # Non-blocking wait so the UI (and poll timer) never re-enter here.
-            QTimer.singleShot(0 if already_down else max(0, self.settings.ptt_delay_ms),
-                              lambda: self._begin_playback(track, token))
-        else:
-            self._begin_playback(track, token)
-
-    def _begin_playback(self, track: Path, token: int):
-        if token != self._play_token:
-            return  # stopped or replaced while waiting for PTT
-        self._starting = False
-        if not self.mixer.play_file(track, self.settings.normalize_audio):
-            self.release_ptt()
-            self.mixer.mic_hold = False
-        else:
-            self.effect_was_playing = True
-            self.set_sub(track.parent.name or str(track.parent))
-
-    def stop(self, release=True):
-        self._play_token += 1  # cancels any pending delayed start
-        self._starting = False
-        self.mixer.stop_effect()
-        self.current_source = None
-        self.mark_playing(None)
-        self._refresh_source_marks()
-        if release:
-            self.release_ptt()
-            if not self.ptt_down:
-                self.mixer.mic_hold = False
-
-    def play_next_in_order(self):
-        pool = [p for p in self._pool() if p.is_file()]
-        if not pool:
-            self.play_selected()
-            return
-        keys = [path_key(p) for p in pool]
-        current = path_key(self.current_track) if self.current_track is not None else None
-        index = (keys.index(current) + 1) % len(pool) if current in keys else 0
-        self._select_in_list(pool[index])
-        self.play_track(pool[index])
-
-    def poll_effect_state(self):
-        playing = self.mixer.effect_playing()
-        self._ptt_keepalive(playing)
-        if self.effect_was_playing and not playing:
-            self.mark_playing(None)
-            was_manual_stop = self.mixer.manual_stop
-            mode = self.settings.autoplay_mode
-            src, self.current_source = self.current_source, None
-            self._refresh_source_marks()
-            if src is not None:
-                if not was_manual_stop and self._source_ended(src):
-                    return
-            else:
-                if not was_manual_stop and mode == "random":
-                    self.play_random()
-                    return
-                if not was_manual_stop and mode == "sequential":
-                    self.play_next_in_order()
-                    return
-                if not was_manual_stop and mode == "loop" and self.current_track is not None:
-                    self.play_track(self.current_track)
-                    return
-            self.release_ptt()
-        self.effect_was_playing = playing
-        if not playing:
-            self.mixer.release_song_if_finished()
-        peak_in, self.mixer.mic_in_peak = self.mixer.mic_in_peak, 0.0
-        peak_out, self.mixer.mic_out_peak = self.mixer.mic_out_peak, 0.0
-        self.meter.setText(
-            f"麥克風收音 {min(999, int(peak_in * 100)):>3}%　｜　EchoDeck 送進虛擬聲卡的麥克風 {min(999, int(peak_out * 100)):>3}%"
-            "　（放音樂時右邊應為 0%）"
-            + (f"　音訊欠載 {self.mixer.underflows}" if self.mixer.underflows else ""))
-        if not playing and not self.ptt_down and not self._starting:
-            self.mixer.mic_hold = False
-        elapsed, total = self.mixer.times()
-        self._update_online_panels(playing, elapsed, total)
-        if not self.progress.isSliderDown():
-            self.progress.setValue(int(min(1.0, elapsed / total) * 1000) if total else 0)
-        if playing and self.mixer.paused:
-            self.status.setText("● 已暫停")
-            self.status.setObjectName("statusPaused")
-        elif playing:
-            self.status.setText("● 正在區域發話")
-            self.status.setObjectName("statusLive")
-        else:
-            self.status.setText("● 待命中")
-            self.status.setObjectName("statusIdle")
-        self.status.style().unpolish(self.status)
-        self.status.style().polish(self.status)
-        self._sync_pause_ui(playing)
-
-    def press_ptt(self):
-        kind, name = target_kind_name(self.settings.ptt_key)
-        if self.ptt_down and kind != "mouse" and key_is_down(name) is False:
-            # The app believed PTT was held, but Windows says the key is up
-            # (e.g. it was lost on a focus change). Press it again.
-            self.ptt_down = False
-        if self.ptt_down:
-            return
-        try:
-            wait_for_modifiers_released()  # avoid sending Alt+K when K was meant
-            self.ptt_kind = kind
-            if kind == "mouse":
-                send_mouse_button(name, True)
-                self.ptt_uses_scan_code = False
-            else:
-                self.ptt_uses_scan_code = send_key_state(name, True)
-            self.ptt_down = True
-            QTimer.singleShot(250, self._verify_ptt)
-        except Exception as exc:
-            QMessageBox.warning(self, APP_NAME, f"無法按下 PTT 鍵：{exc}\n\n若遊戲以系統管理員啟動，請也以系統管理員啟動 EchoDeck。")
-
-    def _ptt_keepalive(self, playing):
-        """If Windows says the PTT key came up while we are still 'talking'
-        (focus change, another program, a stray key-up), press it again."""
-        if not (self.ptt_down and (playing or self._starting)) or self.mixer.paused:
-            return
-        kind, name = target_kind_name(self.settings.ptt_key)
-        if kind == "mouse" or key_is_down(name) is not False or modifiers_held():
-            return
-        try:
-            self.ptt_uses_scan_code = send_key_state(name, True)
-        except Exception:
-            pass
-
-    def _verify_ptt(self):
-        """Tell the user when Windows did not register the injected PTT key."""
-        if not self.ptt_down:
-            return
-        kind, name = target_kind_name(self.settings.ptt_key)
-        if kind != "mouse" and key_is_down(name) is False:
-            self.subtitle.setText("⚠ 已送出發話鍵，但 Windows 沒有偵測到按下。請到「診斷」頁確認，或檢查 PTT 鍵設定。")
-
-    def release_ptt(self):
-        if not self.ptt_down:
-            return
-        try:
-            time.sleep(self.settings.release_delay_ms / 1000)
-            kind, name = target_kind_name(self.settings.ptt_key)
-            if kind == "mouse":
-                send_mouse_button(name, False)
-            elif self.ptt_uses_scan_code:
-                send_scan_code(name, True)
-            else:
-                keyboard.release(name)
-        finally:
-            self.ptt_down = False
-            self.ptt_uses_scan_code = False
-            if not self._starting:
-                self.mixer.mic_hold = False
-
-    def test_ptt(self):
-        if not target_kind_name(self.settings.ptt_key)[1]:
-            QMessageBox.warning(self, APP_NAME, "請先設定遊戲區域發話鍵。")
-            return
-        self.subtitle.setText("PTT 測試將在 3 秒後執行；請立刻切回遊戲畫面。")
-        QTimer.singleShot(3000, self._run_ptt_test)
-
-    def _run_ptt_test(self):
-        self.press_ptt()
-        QTimer.singleShot(2000, self._finish_ptt_test)
-
-    def _finish_ptt_test(self):
-        self.release_ptt()
-        self.subtitle.setText("PTT 測試已完成。若遊戲沒有圖示，請以系統管理員啟動 EchoDeck 與遊戲，並告訴我遊戲名稱。")
-
-    def install_hotkeys(self):
-        self.remove_hotkeys()
-        bindings = [
-            ("play_hotkey", self.signals.play_requested),
-            ("stop_hotkey", self.signals.stop_requested),
-            ("random_hotkey", self.signals.random_requested),
-            ("next_hotkey", self.signals.next_requested),
-            ("mic_hotkey", self.signals.mic_requested),
-            ("pause_hotkey", self.signals.pause_requested),
-            ("loop_hotkey", self.signals.loop_requested),
-            ("hold_hotkey", self.signals.hold_requested),
-            ("clicker_hotkey", self.signals.clicker_requested),
-            ("volume_up_hotkey", self.signals.volume_up_requested),
-            ("volume_down_hotkey", self.signals.volume_down_requested),
-        ]
-        self._hotkey_states = {}
-        self._poll_bindings = []
-        self._poll_alive = False
-        ptt_kind, ptt_name = target_kind_name(self.settings.ptt_key)
-        ptt_name = (ptt_name or "").strip().lower() if ptt_kind != "mouse" else ""
-        use_polling = hasattr(ctypes, "windll")
-        registered = failed = 0
-        for attr, signal in bindings:
-            names = hotkey_names(getattr(self.settings, attr))
-            if not names:
-                continue
-            handler = self._make_hotkey_handler(attr, signal, names)
-            # Path 1 - keyboard library (the original, known-good mechanism).
-            # It only matches when the pressed keys are EXACTLY the combo, and
-            # EchoDeck itself holds the PTT key during playback, so also
-            # register "combo + PTT key" so the hotkey still matches then.
-            combos = [names]
-            if ptt_name and ptt_name not in names:
-                combos.append(names + [ptt_name])
-            for combo in combos:
-                try:  # one bad hotkey must not disable the rest
-                    self.hotkeys.append(keyboard.add_hotkey(combo if len(combo) > 1 else combo[0], handler))
-                    registered += 1
-                except Exception as exc:
-                    failed += 1
-                    hotkey_log(f"register failed {attr} {combo}: {exc}")
-            # Path 2 - poll Windows key state; shares the same de-dup state.
-            vks = hotkey_vks(names) if use_polling else None
-            if vks is not None:
-                self._poll_bindings.append({"attr": attr, "vks": vks, "handler": handler, "was": False,
-                                            "repeatable": attr in ("volume_up_hotkey", "volume_down_hotkey")})
-        try:
-            self._release_hook = keyboard.on_release(self._on_any_key_release)
-        except Exception as exc:
-            self._release_hook = None
-            hotkey_log(f"on_release failed: {exc}")
-        if self._poll_bindings:
-            if getattr(self, "_hk_timer", None) is None:
-                self._hk_timer = QTimer(self)
-                self._hk_timer.setInterval(15)
-                self._hk_timer.timeout.connect(self._poll_hotkeys)
-            self._hk_timer.start()
-        hotkey_log(f"installed: keyboard-lib registrations={registered} failed={failed} "
-                   f"polled={len(self._poll_bindings)} ptt={ptt_name or ptt_kind}")
-
-    def _poll_hotkeys(self):
-        """Second, independent detector: reads Windows key state directly, so it
-        also works while the PTT key is held. Calls the same handler as the
-        keyboard library, whose de-dup state makes a press fire only once."""
-        now = time.monotonic()
-        for b in self._poll_bindings:
-            held = [any(vk_is_down(vk) for vk in alts) for alts in b["vks"]]
-            if any(held) and not self._poll_alive:
-                self._poll_alive = True   # Windows key-state polling demonstrably works here
-                hotkey_log("polling sees key presses")
-            state = self._hotkey_states.get(b["attr"], ({}, None))[0]
-            if all(held):
-                if not b["was"]:
-                    b["was"] = True
-                    b["handler"]("poll")
-                elif b["repeatable"]:
-                    b["handler"]("poll")
-            else:
-                b["was"] = False
-                if self._poll_alive and state.get("down"):
-                    state["down"] = False  # polling is trusted only after it has seen a key
-
-    def _make_hotkey_handler(self, attr, signal, names):
-        """Fire once per physical key press. Holding a key makes Windows send
-        ~30 repeat events/sec, which used to fire the action dozens of times
-        (volume jumped ~50%). Volume keys may repeat slowly while held."""
-        repeatable = attr in ("volume_up_hotkey", "volume_down_hotkey")
-        state = {"down": False, "t0": 0.0, "last": 0.0}
-        self._hotkey_states[attr] = (state, {n.lower() for n in names})
-
-        def handler(source="lib"):
-            now = time.monotonic()
-            if state["down"] and now - state["last"] > 3.0 and source != "poll":
-                state["down"] = False  # missed a release event; recover
-            if not state["down"]:
-                state.update(down=True, t0=now, last=now)
-                hotkey_log(f"fire {attr} via {source}")
-                signal.emit()
-            elif repeatable and now - state["t0"] >= 0.45 and now - state["last"] >= 0.2:
-                state["last"] = now
-                signal.emit()
-        return handler
-
-    def _on_any_key_release(self, event):
-        name = (event.name or "").lower()
-        for state, keys in getattr(self, "_hotkey_states", {}).values():
-            if name in keys:
-                state["down"] = False
-
-    def remove_hotkeys(self):
-        timer = getattr(self, "_hk_timer", None)
-        if timer is not None:
-            timer.stop()
-        self._poll_bindings = []
-        hook = getattr(self, "_release_hook", None)
-        if hook is not None:
-            try:
-                keyboard.unhook(hook)
-            except Exception:
-                pass
-            self._release_hook = None
-        for key in self.hotkeys:
-            try:
-                keyboard.remove_hotkey(key)
-            except Exception:
-                pass
-        self.hotkeys = []
-
-    def change_volume(self, value):
-        self.mixer.music_gain = value / 100
-        self.settings.music_volume = value
-        for slider in self._volume_mirrors:
-            if slider.value() != value:
-                slider.blockSignals(True)
-                slider.setValue(value)
-                slider.blockSignals(False)
-                slider.valueChanged.emit(value)    # refresh its % badge (our own handler ignores the echo)
-        self.save_settings()
-
-    def device_changed(self, _value): self.apply_device()
-    def monitor_device_changed(self, _value): self.apply_monitor_device()
-    def monitor_changed(self, value): self.settings.monitor_enabled = value; self.save_settings()
-    def microphone_device_changed(self, _value):
-        self.settings.microphone_device = "" if self.mic_combo.currentIndex() <= 0 else self.mic_combo.currentText()
-        self.save_settings(); self.apply_microphone(); self.update_mic_button()
-    def change_microphone_volume(self, value):
-        self.settings.microphone_volume = value; self.mixer.mic_gain = value / 100; self.save_settings()
-    def mute_mic_when_sound_changed(self, value):
-        self.settings.mute_mic_while_sound = value; self.mixer.mute_mic_while_sound = value; self.save_settings()
-    def toggle_microphone(self):
-        if not self.settings.microphone_device:
-            return  # no microphone selected
-        self.settings.microphone_enabled = not self.settings.microphone_enabled
-        self.mixer.mic_enabled = self.settings.microphone_enabled
-        self.save_settings(); self.update_mic_button()
-    def update_mic_button(self):
-        if not self.settings.microphone_device:
-            self.mic_button.setText("○ 麥克風：未使用（輸入裝置選「不使用麥克風」）")
-            self.mic_button.setObjectName("")
-            self.mic_button.setEnabled(False)
-            restyle(self.mic_button)
-            return
-        self.mic_button.setEnabled(True)
-        if self.settings.microphone_enabled:
-            self.mic_button.setText("● 麥克風：開啟（會混入虛擬聲卡）")
-            self.mic_button.setObjectName("primary")
-        else:
-            self.mic_button.setText("○ 麥克風：關閉")
-            self.mic_button.setObjectName("")
-        restyle(self.mic_button)
-    def ptt_changed(self):
-        self.settings.ptt_key = self.ptt_input.text().strip().lower(); self.save_settings(); self.install_hotkeys()
-    def _ambient_level(self):
-        return {"off": 0.0, "soft": .55, "strong": 1.0}.get(self.settings.viz_ambient, 0.0)
-
-    def _ambient_tick(self):
-        """Feeds the window-wide bass glow (cheap: one 2048-point FFT, only the low bands are used)."""
-        level = self._ambient_level()
-        if level <= 0 or not self.isVisible() or self.isMinimized():
-            return
-        x = self.mixer.viz_samples()
-        if float(np.max(np.abs(x))) < 1e-4:
-            bass = 0.0
-        else:
-            spec = np.abs(np.fft.rfft(x * self._amb_win)) / 512.0
-            db = 20 * np.log10(float(spec[2:10].max()) + 1e-7) + 4.0       # about 47-230 Hz
-            bass = max(0.0, min(1.0, (db + 66.0) / 56.0))
-        self._amb_avg = self._amb_avg * .96 + bass * .04
-        kick = max(0.0, bass - self._amb_avg * 1.08)
-        self._amb_pulse = max(self._amb_pulse * .84, min(1.0, kick * 3.4))
-        self._amb_bass += (bass - self._amb_bass) * .35
-        if self._amb_bass < .01:
-            self._amb_bass = 0.0
-        if self._amb_pulse < .01:
-            self._amb_pulse = 0.0
-        self.backdrop.feed_ambient(self._amb_bass, self._amb_pulse)
-
-    def viz_layout_changed(self, *_):
-        self.settings.viz_size = self.viz_size_combo.currentData()
-        self.settings.viz_ambient = self.viz_ambient_combo.currentData()
-        for v in [self.viz] + list(self._extra_viz):
-            v.set_size_mode(self.settings.viz_size)
-        self.backdrop.set_ambient_level(self._ambient_level())
-        self.save_settings()
-
-    def _all_viz(self):
-        return [self.viz] + list(self._extra_viz) + ([self._viz_window.viz] if self._viz_window is not None else [])
-
-    def viz_options_changed(self, *_):
-        self.settings.viz_glow = self.viz_glow_slider.value()
-        self.settings.viz_flow = self.viz_flow_check.isChecked()
-        for v in self._all_viz():
-            v.set_options(self.settings.viz_glow / 100, self.settings.viz_flow)
-        self.save_settings()
-
-    def open_viz_fullscreen(self):
-        if self._viz_window is not None:
-            self._viz_window.raise_()
-            self._viz_window.activateWindow()
-            return
-
-        def info():
-            return (self.card_title._full or "尚未播放", self.card_sub._full or "", self.time_label.text())
-
-        win = VizWindow(lambda: self.mixer.viz_samples(), info, self.settings.viz_style,
-                        self.settings.viz_glow / 100, self.settings.viz_flow)
-        win.closed.connect(lambda: setattr(self, "_viz_window", None))
-        self._viz_window = win
-        win.showFullScreen()
-        win.activateWindow()
-        win.setFocus()
-
-    def viz_style_changed(self, _index):
-        self.settings.viz_style = self.viz_combo.currentData()
-        self.viz.set_style(self.settings.viz_style)
-        for extra in self._extra_viz:
-            extra.set_style(self.settings.viz_style)
-        self.save_settings()
-
-    def theme_changed(self, _index):
-        key = set_theme(self.theme_combo.currentData())
-        self.settings.theme = key
-        QApplication.instance().setStyleSheet(build_stylesheet())
-        for page, button in self.nav_buttons.items():      # icon colours depend on light / dark
-            button.setIcon(nav_icon(self.nav_kinds[page]))
-        self.track_list.viewport().update()
-        self.centralWidget().update()
-        self.save_settings()
-
-    def auto_ptt_changed(self, value): self.settings.auto_ptt = value; self.save_settings()
-    def delay_changed(self, value): self.settings.ptt_delay_ms = value; self.save_settings()
-    def shuffle_changed(self, value): self.settings.shuffle = value; self.save_settings()
-    def normalize_changed(self, value): self.settings.normalize_audio = value; self.save_settings()
-    def autoplay_changed(self, _index):
-        self.settings.autoplay_mode = self.autoplay_combo.currentData()
-        self.save_settings()
-        if hasattr(self, "loop_button"):
-            self.loop_button.blockSignals(True)
-            self.loop_button.setChecked(self.settings.autoplay_mode == "loop")
-            self.loop_button.blockSignals(False)
-            self._set_loop_button_style()
-
-    def loop_button_toggled(self, checked):
-        self._apply_loop_state(checked)
-
-    def toggle_loop(self):
-        self._apply_loop_state(self.settings.autoplay_mode != "loop")
-
-    def _apply_loop_state(self, enabled):
-        self.settings.autoplay_mode = "loop" if enabled else "off"
-        self.save_settings()
-        if hasattr(self, "autoplay_combo"):
-            index = self.autoplay_combo.findData(self.settings.autoplay_mode)
-            self.autoplay_combo.blockSignals(True)
-            self.autoplay_combo.setCurrentIndex(max(0, index))
-            self.autoplay_combo.blockSignals(False)
-        if hasattr(self, "loop_button"):
-            self.loop_button.blockSignals(True)
-            self.loop_button.setChecked(enabled)
-            self.loop_button.blockSignals(False)
-            self._set_loop_button_style()
-
-    def _set_loop_button_style(self):
-        self.loop_button.setObjectName("primary" if self.loop_button.isChecked() else "")
-        restyle(self.loop_button)
-    def filter_tracks(self, text):
-        text = text.strip().lower()
-        for row in range(self.track_list.count()):
-            item = self.track_list.item(row)
-            haystack = (item.data(Qt.ItemDataRole.UserRole + 2) or item.text()).lower()
-            item.setHidden(bool(text) and text not in haystack)
-        # Reordering a filtered list would be confusing, so it is only allowed
-        # in the 最愛 tab while the search box is empty.
-        self.track_list.set_reorderable((self.view_mode == "fav" or self._pl_of_view() is not None) and not text)
-
-    def fav_order_changed(self):
-        """The user dragged a favourite to a new spot: save that order. 下一首 and
-        the numbering both follow settings.favorites."""
-        pl = self._pl_of_view()
-        if self.view_mode != "fav" and pl is None:
-            return
-        lst = self.track_list
-        order = [str(lst.item(row).data(ROLE_PATH)) for row in range(lst.count())]
-        if pl is not None:
-            pl["tracks"] = order
-        else:
-            self.settings.favorites = order
-        self.save_settings()
-        width = max(2, len(str(lst.count())))
-        for row in range(lst.count()):
-            lst.item(row).setData(ROLE_NUM, f"{row + 1:0{width}d}")
-        lst.viewport().update()
-    def on_capture_state(self, capturing):
-        self._capturing = bool(capturing)
-        # Suspend global hotkeys while a key is being recorded so it cannot trigger an action.
-        if capturing:
-            self.remove_hotkeys()
-        else:
-            self.install_hotkeys()
-
-    def hotkey_edit_changed(self, attr, value):
-        names = hotkey_names(value)
-        if names:
-            for other, edit in self.hotkey_edits.items():
-                if other != attr and hotkey_names(getattr(self.settings, other)) == names:
-                    QMessageBox.warning(self, APP_NAME, f"「{hotkey_display(value)}」已被其他功能使用，請換一組按鍵。")
-                    self.hotkey_edits[attr].set_value(getattr(self.settings, attr))
-                    return
-        setattr(self.settings, attr, value)
-        self.save_settings()
-        self.install_hotkeys()
-        self.refresh_hotkey_hint()
-        self.update_clicker_ui()
-
-    def refresh_hotkey_hint(self):
-        s = self.settings
-        def d(value):
-            return hotkey_display(value) or "（未設定）"
-        self.hotkey_note.setText(
-            f"遊戲內使用：{d(s.play_hotkey)} 播放目前選取；{d(s.random_hotkey)} 隨機播放；"
-            f"{d(s.stop_hotkey)} 停止；{d(s.pause_hotkey)} 暫停／繼續；"
-            f"{d(s.loop_hotkey)} 單曲循環開／關；"
-            f"{d(s.volume_up_hotkey)} / {d(s.volume_down_hotkey)} 音量加／減。"
-            "請在遊戲畫面內按快捷鍵，PTT 才會送到遊戲。")
-
-    def adjust_volume(self, delta):
-        self.volume.setValue(max(0, min(200, self.volume.value() + delta)))
-
-    def toggle_pause(self):
-        if not self.mixer.effect_playing():
-            return
-        if self.mixer.stream_info()[0]:     # live radio cannot be paused: it would resume minutes late
-            self.stop()
-            return
-        if not self.mixer.paused:
-            self.mixer.paused = True
-            self.release_ptt()          # let go of PTT while silent
-            self.mixer.mic_hold = True  # keep mic muted until resumed
-        else:
-            token = self._play_token
-            if self.settings.auto_ptt:
-                self.press_ptt()
-                QTimer.singleShot(max(0, self.settings.ptt_delay_ms), lambda: self._finish_resume(token))
-            else:
-                self.mixer.paused = False
-
-    def _finish_resume(self, token):
-        if token == self._play_token:
-            self.mixer.paused = False
-
-    # ================= online sources: web radio + YouTube =================
-    RADIO_NOTE = "已自動排除新聞、談話類電台。電台有沒有人說話由電台自己決定，播到主持人就換下一台。"
-    YT_NOTE = "聲音和本機音樂走同一條混音器：自動按發話鍵、播放時關麥克風、本機聆聽都照常運作。"
-
-    def set_title(self, text):
-        self.card_title.setText(text)
-        for w in self._panels:
-            w["title"].setText(text)
-
-    def set_sub(self, text):
-        self.card_sub.setText(text)
-        for w in self._panels:
-            w["sub"].setText(text)
-
-    def set_now(self, title, sub):
-        self.set_title(title)
-        self.set_sub(sub)
-
-    def _set_note(self, src_or_kind, text):
-        kind = src_or_kind["kind"] if isinstance(src_or_kind, dict) else src_or_kind
-        if kind == "radio":
-            self.radio_note.setText(text or self.RADIO_NOTE)
-        else:
-            self.yt_note.setText(text or self._yt_default_note())
-
-    def _yt_default_note(self):
-        if not ytdlp_available():
-            return "尚未安裝 YouTube 元件：請按右上角「🔧  YouTube 元件」下載（只需要做一次）。"
-        return self.YT_NOTE
-
-    def _chip(self, text, checkable=True):
-        button = QPushButton(text)
-        button.setObjectName("chip")
-        button.setFixedHeight(32)
-        button.setCheckable(checkable)
-        button.setCursor(Qt.CursorShape.PointingHandCursor)
-        return button
-
-    def _segmented(self, left, right, mode, on_pick):
-        seg = QHBoxLayout()
-        seg.setSpacing(0)
-        a, b = QPushButton(left), QPushButton(right)
-        a.setObjectName("segL")
-        b.setObjectName("segR")
-        group = QButtonGroup(self)
-        group.setExclusive(True)
-        for button, value in ((a, "all"), (b, "fav")):
-            button.setCheckable(True)
-            button.setCursor(Qt.CursorShape.PointingHandCursor)
-            group.addButton(button)
-            button.clicked.connect(lambda _=False, m=value: on_pick(m))
-            seg.addWidget(button)
-        (b if mode == "fav" else a).setChecked(True)
-        return seg
-
-    def _now_panel(self, extras):
-        """Right-hand 'now playing' panel for the online pages. Same look as the library's.
-        extras = [(key, text, tooltip), ...] shown as a row of small buttons."""
-        panel = QFrame()
-        panel.setObjectName("nowPanel")
-        panel.setMinimumWidth(380)
-        p = QVBoxLayout(panel)
-        p.setContentsMargins(18, 16, 18, 16)
-        p.setSpacing(8)
-        w = {"frame": panel}
-        card = QFrame()
-        card.setObjectName("nowCard")
-        card.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
-        k = QVBoxLayout(card)
-        k.setContentsMargins(20, 12, 20, 14)
-        k.setSpacing(4)
-        top = QHBoxLayout()
-        top.addWidget(QLabel("♪  正在播放", objectName="eyebrowAccent"))
-        top.addStretch()
-        w["time"] = QLabel("")
-        w["time"].setObjectName("hint")
-        top.addWidget(w["time"])
-        k.addLayout(top)
-        w["title"] = ElideLabel(self.card_title._full)
-        w["title"].setObjectName("cardTitle")
-        k.addWidget(w["title"])
-        w["sub"] = ElideLabel(self.card_sub._full)
-        w["sub"].setObjectName("muted")
-        k.addWidget(w["sub"])
-        k.addSpacing(2)
-        w["progress"] = SeekSlider(Qt.Orientation.Horizontal)
-        w["progress"].setObjectName("cardSeek")
-        w["progress"].setRange(0, 1000)
-        w["progress"].setFixedHeight(20)
-        w["progress"].setCursor(Qt.CursorShape.PointingHandCursor)
-        w["progress"].seek_requested.connect(lambda v: self.mixer.seek(v / 10))
-        w["progress"].sliderReleased.connect(lambda: self.mixer.seek(w["progress"].value() / 10))
-        k.addWidget(w["progress"])
-        p.addWidget(card)
-        viz = VisualizerWidget(lambda: self.mixer.viz_samples())
-        viz.set_options(self.settings.viz_glow / 100, self.settings.viz_flow)
-        viz.set_style(self.settings.viz_style)
-        viz.expand_requested.connect(self.open_viz_fullscreen)
-        viz.set_size_mode(self.settings.viz_size)
-        self._extra_viz.append(viz)
-        p.addWidget(viz, 10)
-
-        vol_row = QHBoxLayout()
-        vol_row.setSpacing(10)
-        vol_row.addWidget(QLabel("🔊"))
-        slider = QSlider(Qt.Orientation.Horizontal)
-        slider.setRange(0, 200)
-        slider.setValue(self.settings.music_volume)
-        slider.setToolTip("音量（0–200%，和音樂庫共用）")
-        slider.valueChanged.connect(self.volume.setValue)      # change_volume() mirrors it everywhere
-        wrap, _badge = self.slider_with_value(slider)
-        vol_row.addWidget(wrap, 1)
-        vol_row.setContentsMargins(4, 0, 4, 0)
-        p.addLayout(vol_row)
-        self._volume_mirrors.append(slider)
-
-        sel = QVBoxLayout()
-        sel.setSpacing(2)
-        sel.addWidget(QLabel("目前選取", objectName="eyebrow"))
-        w["sel_title"] = ElideLabel("尚未選擇")
-        w["sel_title"].setObjectName("nowTitle")
-        sel.addWidget(w["sel_title"])
-        w["sel_sub"] = ElideLabel("")
-        w["sel_sub"].setObjectName("nowPath")
-        sel.addWidget(w["sel_sub"])
-        p.addLayout(sel)
-        p.addStretch(1)
-
-        w["play"] = QPushButton("▶  播放")
-        w["play"].setObjectName("primary")
-        w["play"].setFixedHeight(44)
-        w["play"].setCursor(Qt.CursorShape.PointingHandCursor)
-        p.addWidget(w["play"])
-        if extras:
-            row = QHBoxLayout()
-            row.setSpacing(12)
-            for key, text, tip in extras:
-                button = QPushButton(text)
-                button.setFixedHeight(38)
-                button.setToolTip(tip)
-                button.setCursor(Qt.CursorShape.PointingHandCursor)
-                w[key] = button
-                row.addWidget(button)
-            p.addLayout(row)
-        row = QHBoxLayout()
-        row.setSpacing(12)
-        w["pause"] = QPushButton("⏸  暫停")
-        w["pause"].setObjectName("pauseBtn")
-        w["pause"].setFixedHeight(40)
-        w["pause"].setEnabled(False)
-        w["pause"].setCursor(Qt.CursorShape.PointingHandCursor)
-        w["pause"].clicked.connect(self.toggle_pause)
-        row.addWidget(w["pause"], 1)
-        w["stop"] = QPushButton("■  停止並關閉發話")
-        w["stop"].setObjectName("danger")
-        w["stop"].setFixedHeight(40)
-        w["stop"].setCursor(Qt.CursorShape.PointingHandCursor)
-        w["stop"].clicked.connect(lambda: self.stop())
-        row.addWidget(w["stop"], 1)
-        p.addLayout(row)
-        self._panels.append(w)
-        return w
-
-    def _online_list(self):
-        """List + empty/loading message, built like the library list. Returns (stack, list, message label)."""
-        lst = TrackListWidget()
-        lst.setObjectName("trackList")
-        lst.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        empty = QLabel()
-        empty.setObjectName("emptyState")
-        empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        empty.setWordWrap(True)
-        stack = QStackedWidget()
-        stack.setObjectName("row")
-        stack.addWidget(lst)
-        stack.addWidget(empty)
-        stack.setMinimumWidth(320)
-        return stack, lst, empty
-
-    def _fill_online_list(self, stack, lst, empty, rows, message, fav_keys):
-        """rows = [(key, data dict, title, sub tag)]. Shows `message` instead when there is nothing."""
-        current = lst.currentItem()
-        keep = current.data(ROLE_PATH) if current is not None else None
-        lst.setUpdatesEnabled(False)
-        lst.clear()
-        width = max(2, len(str(len(rows))))
-        src = self.current_source
-        for index, (key, data, title, sub) in enumerate(rows, 1):
-            item = QListWidgetItem()
-            item.setData(ROLE_PATH, key)
-            item.setData(ROLE_NAME, title)
-            item.setData(ROLE_SEARCH, f"{title} {sub}".lower())
-            item.setData(ROLE_NUM, f"{index:0{width}d}")
-            item.setData(ROLE_FAV, key in fav_keys)
-            item.setData(ROLE_SUB, sub)
-            item.setData(ROLE_DATA, data)
-            item.setData(ROLE_PLAYING, bool(src) and src["key"] == key)
-            lst.addItem(item)
-            if key == keep:
-                lst.setCurrentItem(item)
-        lst.setUpdatesEnabled(True)
-        if rows and lst.currentItem() is None:
-            lst.setCurrentRow(0)
-        empty.setText(message)
-        stack.setCurrentIndex(0 if rows else 1)
-
-    # ---------------------------------------------------------------- 電台 page
-    def radio_page(self):
-        page = QWidget()
-        outer = QVBoxLayout(page)
-        outer.setContentsMargins(10, 4, 10, 4)
-        outer.setSpacing(12)
-        header = QHBoxLayout()
-        title_wrap = QVBoxLayout()
-        title_wrap.setSpacing(4)
-        title_wrap.addWidget(QLabel("網路電台", objectName="title"))
-        sub = QLabel("國內外的純音樂電台：氛圍、Lofi、古典、爵士……點兩下就會送進遊戲語音。")
-        sub.setObjectName("subtitle")
-        title_wrap.addWidget(sub)
-        header.addLayout(title_wrap)
-        header.addStretch()
-        self.radio_add_button = QPushButton("➕  新增電台網址")
-        self.radio_add_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.radio_add_button.setToolTip("加入你自己知道的電台串流網址（mp3 / aac / m3u8 / pls），會存到最愛")
-        self.radio_add_button.clicked.connect(self.radio_add_custom)
-        header.addWidget(self.radio_add_button, 0, Qt.AlignmentFlag.AlignTop)
-        outer.addLayout(header)
-
-        self.radio_note = QLabel(self.RADIO_NOTE)
-        self.radio_note.setObjectName("tipBar")
-        self.radio_note.setWordWrap(True)
-        outer.addWidget(self.radio_note)
-
-        tools = QHBoxLayout()
-        tools.setSpacing(12)
-        tools.addLayout(self._segmented("電台", "★  最愛", self.settings.radio_view, self.radio_set_view))
-        self.radio_search = QLineEdit()
-        self.radio_search.setPlaceholderText("🔍  輸入電台名稱，按 Enter 搜尋…")
-        self.radio_search.setClearButtonEnabled(True)
-        self.radio_search.returnPressed.connect(self.radio_reload)
-        tools.addWidget(self.radio_search, 1)
-        self.radio_country = QComboBox()
-        for label, code in RADIO_COUNTRIES:
-            self.radio_country.addItem(f"🌐  {label}" if not code else f"📍  {label}", code)
-        self.radio_country.setCurrentIndex(max(0, self.radio_country.findData(self.settings.radio_country)))
-        self.radio_country.setMinimumWidth(140)
-        self.radio_country.currentIndexChanged.connect(self.radio_country_changed)
-        tools.addWidget(self.radio_country)
-        outer.addLayout(tools)
-
-        chips = QHBoxLayout()
-        chips.setSpacing(8)
-        self.radio_chips = {}
-        chip_group = QButtonGroup(self)
-        chip_group.setExclusive(True)
-        for label, value in RADIO_GENRES:
-            chip = self._chip(label)
-            chip_group.addButton(chip)
-            chip.clicked.connect(lambda _=False, v=value: self.radio_genre_clicked(v))
-            self.radio_chips[value] = chip
-            chips.addWidget(chip)
-        chips.addStretch()
-        self.radio_chips.get(self.settings.radio_genre, self.radio_chips["ambient"]).setChecked(True)
-        outer.addLayout(chips)
-
-        body = QHBoxLayout()
-        body.setSpacing(16)
-        self.radio_stack, self.radio_rows, self.radio_empty = self._online_list()
-        self.radio_rows.itemDoubleClicked.connect(lambda _: self.radio_play())
-        self.radio_rows.currentItemChanged.connect(self._radio_selection)
-        self.radio_rows.star_clicked.connect(lambda item: self.radio_toggle_fav(item.data(ROLE_DATA)))
-        self.radio_rows.customContextMenuRequested.connect(self.radio_menu)
-        body.addWidget(self.radio_stack, 1)
-        self.radio_panel = self._now_panel([("random", "🎲  隨機一台", "從目前清單隨機挑一台播放"),
-                                            ("fav", "★  加入最愛", "加入／移出最愛")])
-        self.radio_panel["play"].setText("▶  播放電台")
-        self.radio_panel["play"].clicked.connect(self.radio_play)
-        self.radio_panel["random"].clicked.connect(self.radio_random)
-        self.radio_panel["fav"].clicked.connect(lambda: self.radio_toggle_fav(self._radio_current()))
-        body.addWidget(self.radio_panel["frame"], 1)
-        outer.addLayout(body, 1)
-        self._radio_apply_view_state()
-        return page
-
-    def _station_sub(self, st, tags_shown=2):
-        parts = []
-        cc = st.get("cc") or ""
-        if cc:
-            parts.append(COUNTRY_NAMES.get(cc, cc))
-        tags = [GENRE_NAMES.get(t, t) for t in (st.get("tags") or [])][:tags_shown]
-        parts += tags
-        if st.get("bitrate"):
-            parts.append(f"{st['bitrate']}k")
-        return " · ".join(parts)
-
-    def _radio_fav_keys(self):
-        return {d["urls"][0] for d in self.settings.radio_favorites if d.get("urls")}
-
-    def _radio_current(self):
-        item = self.radio_rows.currentItem()
-        return item.data(ROLE_DATA) if item is not None else None
-
-    def _radio_selection(self, item, _prev=None):
-        w = self.radio_panel
-        st = item.data(ROLE_DATA) if item is not None else None
-        w["sel_title"].setText(st["name"] if st else "尚未選擇")
-        w["sel_sub"].setText(self._station_sub(st) if st else "")
-        faved = bool(st) and st["urls"][0] in self._radio_fav_keys()
-        w["fav"].setText("★  移出最愛" if faved else "★  加入最愛")
-        w["fav"].setEnabled(bool(st))
-        w["play"].setEnabled(bool(st))
-
-    def _radio_apply_view_state(self):
-        fav = self.settings.radio_view == "fav"
-        for chip in self.radio_chips.values():
-            chip.setEnabled(not fav)
-        self.radio_country.setEnabled(not fav)
-        self.radio_search.setPlaceholderText("🔍  在最愛裡篩選…" if fav else "🔍  輸入電台名稱，按 Enter 搜尋…")
-
-    def radio_set_view(self, mode):
-        self.settings.radio_view = mode
-        self.save_settings()
-        self._radio_apply_view_state()
-        self.radio_reload()
-
-    def radio_genre_clicked(self, value):
-        self.settings.radio_genre = value
-        self.radio_search.clear()
-        self.save_settings()
-        self.radio_reload()
-
-    def radio_country_changed(self, _index):
-        self.settings.radio_country = self.radio_country.currentData() or ""
-        self.save_settings()
-        self.radio_reload()
-
-    def _radio_rows(self, stations):
-        return [(st["urls"][0], st, st["name"], self._station_sub(st, 1)) for st in stations if st.get("urls")]
-
-    def radio_reload(self):
-        self._radio_token += 1
-        token = self._radio_token
-        text = self.radio_search.text().strip()
-        if self.settings.radio_view == "fav":
-            favs = [d for d in self.settings.radio_favorites if d.get("urls")]
-            if text:
-                favs = [d for d in favs if text.lower() in d.get("name", "").lower()]
-            self._fill_online_list(self.radio_stack, self.radio_rows, self.radio_empty, self._radio_rows(favs),
-                                   "還沒有最愛的電台。\n\n在「電台」分頁按一下列表左邊的 ☆，或用右上角「新增電台網址」加入。",
-                                   self._radio_fav_keys())
-            self._radio_selection(self.radio_rows.currentItem())
-            return
-        self.radio_empty.setText("搜尋電台中…")
-        self.radio_stack.setCurrentIndex(1)
-        cc, tag = self.settings.radio_country, ("" if text else self.settings.radio_genre)
-        threading.Thread(target=self._radio_worker, args=(token, text, cc, tag), daemon=True).start()
-
-    def _radio_worker(self, token, text, cc, tag):
-        try:
-            curated = curated_matches(text, cc, tag)
-            online, err = [], ""
-            try:
-                online = radio_query(text, cc, tag)
-            except Exception as exc:
-                err = str(exc) or exc.__class__.__name__
-            seen = {re.sub(r"\W+", "", s["name"].lower()) for s in curated}
-            merged = curated + [s for s in online if re.sub(r"\W+", "", s["name"].lower()) not in seen]
-            self.signals.radio_results.emit(token, merged, "" if merged else err)
-        except Exception as exc:
-            self.signals.radio_results.emit(token, [], str(exc) or exc.__class__.__name__)
-
-    def _on_radio_results(self, token, stations, err):
-        if token != self._radio_token or self.settings.radio_view == "fav":
-            return
-        if err:
-            message = f"{err}\n\n請檢查網路後，再按一次上方的類型或國家。"
-        else:
-            message = ("這個國家／類型沒有找到電台。\n\n試試「全球」、換一個類型，或直接輸入電台名稱搜尋。")
-        self._fill_online_list(self.radio_stack, self.radio_rows, self.radio_empty, self._radio_rows(stations),
-                               message, self._radio_fav_keys())
-        self._radio_selection(self.radio_rows.currentItem())
-
-    def _radio_src(self, st):
-        return {"kind": "radio", "key": st["urls"][0], "title": st["name"], "sub": self._station_sub(st),
-                "urls": list(st["urls"]), "live": True}
-
-    def radio_play(self):
-        st = self._radio_current()
-        if st:
-            self.play_source(self._radio_src(st))
-
-    def radio_random(self):
-        count = self.radio_rows.count()
-        if not count:
-            return
-        row = random.randrange(count)
-        self.radio_rows.setCurrentRow(row)
-        self.radio_play()
-
-    def radio_toggle_fav(self, st):
-        if not st or not st.get("urls"):
-            return
-        key = st["urls"][0]
-        favs = self.settings.radio_favorites
-        if key in self._radio_fav_keys():
-            self.settings.radio_favorites = [d for d in favs if not (d.get("urls") and d["urls"][0] == key)]
-        else:
-            favs.append({k: st.get(k) for k in ("name", "urls", "cc", "tags", "bitrate", "custom") if k in st})
-        self.save_settings()
-        if self.settings.radio_view == "fav":
-            self.radio_reload()
-        else:
-            fav_keys = self._radio_fav_keys()
-            for row in range(self.radio_rows.count()):
-                item = self.radio_rows.item(row)
-                item.setData(ROLE_FAV, item.data(ROLE_PATH) in fav_keys)
-            self.radio_rows.viewport().update()
-            self._radio_selection(self.radio_rows.currentItem())
-
-    def radio_add_custom(self):
-        url, ok = QInputDialog.getText(self, "新增電台", "電台串流網址（http / https）：")
-        url = url.strip()
-        if not ok or not url:
-            return
-        if not re.match(r"^https?://", url, re.I):
-            QMessageBox.warning(self, APP_NAME, "網址要以 http:// 或 https:// 開頭。")
-            return
-        host = urllib.parse.urlparse(url).netloc
-        name, ok = QInputDialog.getText(self, "新增電台", "電台名稱：", text=host)
-        if not ok:
-            return
-        name = name.strip() or host or url
-        if url not in self._radio_fav_keys():
-            self.settings.radio_favorites.append({"name": name, "urls": [url], "cc": "", "tags": [], "custom": True})
-            self.save_settings()
-        self.settings.radio_view = "fav"
-        self.save_settings()
-        self.radio_set_view_buttons()
-        self._radio_apply_view_state()
-        self.radio_reload()
-
-    def radio_set_view_buttons(self):
-        """Re-check the 電台/最愛 segmented buttons after the view was changed from code."""
-        for button in self.pages.widget(5).findChildren(QPushButton):
-            if button.objectName() == "segL":
-                button.setChecked(self.settings.radio_view != "fav")
-            elif button.objectName() == "segR":
-                button.setChecked(self.settings.radio_view == "fav")
-
-    def radio_menu(self, pos):
-        item = self.radio_rows.itemAt(pos)
-        if item is None:
-            return
-        st = item.data(ROLE_DATA)
-        menu = QMenu(self)
-        menu.addAction("▶  播放", lambda: (self.radio_rows.setCurrentItem(item), self.radio_play()))
-        faved = st["urls"][0] in self._radio_fav_keys()
-        menu.addAction("移出最愛" if faved else "★  加入最愛", lambda: self.radio_toggle_fav(st))
-        menu.addAction("複製串流網址", lambda: QApplication.clipboard().setText(st["urls"][0]))
-        menu.exec(self.radio_rows.viewport().mapToGlobal(pos))
-
-    # ------------------------------------------------------------ YouTube page
-    def youtube_page(self):
-        page = QWidget()
-        outer = QVBoxLayout(page)
-        outer.setContentsMargins(10, 4, 10, 4)
-        outer.setSpacing(12)
-        header = QHBoxLayout()
-        title_wrap = QVBoxLayout()
-        title_wrap.setSpacing(4)
-        title_wrap.addWidget(QLabel("YouTube 音樂", objectName="title"))
-        sub = QLabel("貼上影片、播放清單或直播網址，或直接輸入關鍵字搜尋。")
-        sub.setObjectName("subtitle")
-        title_wrap.addWidget(sub)
-        header.addLayout(title_wrap)
-        header.addStretch()
-        self.yt_tools_button = QPushButton("🔧  YouTube 元件")
-        self.yt_tools_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.yt_tools_button.setToolTip("下載／更新 yt-dlp 與 Deno；YouTube 要求驗證時可在這裡選瀏覽器 Cookies")
-        self.yt_tools_button.clicked.connect(self.yt_tools_dialog)
-        header.addWidget(self.yt_tools_button, 0, Qt.AlignmentFlag.AlignTop)
-        folder_button = QPushButton("📂  最愛資料夾")
-        folder_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        folder_button.setToolTip("加入最愛的 YouTube 歌曲會存成檔案放在這裡，也可以把它加進音樂庫")
-        folder_button.clicked.connect(self.yt_open_fav_folder)
-        header.addWidget(folder_button, 0, Qt.AlignmentFlag.AlignTop)
-        outer.addLayout(header)
-
-        self.yt_note = QLabel(self._yt_default_note())
-        self.yt_note.setObjectName("tipBar")
-        self.yt_note.setWordWrap(True)
-        outer.addWidget(self.yt_note)
-
-        tools = QHBoxLayout()
-        tools.setSpacing(12)
-        tools.addLayout(self._segmented("搜尋結果", "★  最愛", "all", self.yt_set_view))
-        self.yt_search = QLineEdit()
-        self.yt_search.setPlaceholderText("🔍  貼上 YouTube 網址，或輸入關鍵字，按 Enter…")
-        self.yt_search.setClearButtonEnabled(True)
-        self.yt_search.returnPressed.connect(self.yt_submit)
-        tools.addWidget(self.yt_search, 1)
-        go = QPushButton("搜尋")
-        go.setCursor(Qt.CursorShape.PointingHandCursor)
-        go.clicked.connect(self.yt_submit)
-        tools.addWidget(go)
-        self.yt_after_combo = QComboBox()
-        self.yt_after_combo.addItem("播完後：自動下一首", "next")
-        self.yt_after_combo.addItem("播完後：單曲循環", "loop")
-        self.yt_after_combo.addItem("播完後：停止", "stop")
-        self.yt_after_combo.setCurrentIndex(max(0, self.yt_after_combo.findData(self.settings.yt_after)))
-        self.yt_after_combo.currentIndexChanged.connect(self.yt_after_changed)
-        self.yt_after_combo.setMinimumWidth(170)
-        tools.addWidget(self.yt_after_combo)
-        outer.addLayout(tools)
-
-        chips = QHBoxLayout()
-        chips.setSpacing(8)
-        for label, query in YT_SUGGESTIONS:
-            chip = self._chip(label, checkable=False)
-            chip.clicked.connect(lambda _=False, q=query: (self.yt_search.setText(q), self.yt_submit()))
-            chips.addWidget(chip)
-        chips.addStretch()
-        outer.addLayout(chips)
-
-        body = QHBoxLayout()
-        body.setSpacing(16)
-        self.yt_stack, self.yt_rows, self.yt_empty = self._online_list()
-        self.yt_empty.setText("在上方貼上 YouTube 網址，或輸入關鍵字（例如「lofi 純音樂」）開始。\n\n也可以直接點上面的快速搜尋。")
-        self.yt_stack.setCurrentIndex(1)
-        self.yt_rows.itemDoubleClicked.connect(lambda _: self.yt_play())
-        self.yt_rows.currentItemChanged.connect(self._yt_selection)
-        self.yt_rows.star_clicked.connect(lambda item: self.yt_toggle_fav(item.data(ROLE_DATA)))
-        self.yt_rows.customContextMenuRequested.connect(self.yt_menu)
-        body.addWidget(self.yt_stack, 1)
-        self.yt_panel = self._now_panel([("next", "⏭  下一首", "播放清單裡的下一首"),
-                                         ("fav", "★  加入最愛", "加入／移出最愛")])
-        self.yt_panel["play"].setText("▶  播放")
-        self.yt_panel["play"].clicked.connect(self.yt_play)
-        self.yt_panel["next"].clicked.connect(self.yt_next)
-        self.yt_panel["fav"].clicked.connect(lambda: self.yt_toggle_fav(self._yt_current()))
-        body.addWidget(self.yt_panel["frame"], 1)
-        outer.addLayout(body, 1)
-        self._yt_results_cache = []
-        self._yt_view = "all"
-        return page
-
-    def _yt_current(self):
-        item = self.yt_rows.currentItem()
-        return item.data(ROLE_DATA) if item is not None else None
-
-    def _yt_fav_keys(self):
-        return {d.get("id") or d.get("url") for d in self.settings.yt_favorites}
-
-    @staticmethod
-    def _yt_key(entry):
-        return entry.get("id") or entry.get("url")
-
-    def _yt_fav_entry(self, key):
-        for d in self.settings.yt_favorites:
-            if self._yt_key(d) == key:
-                return d
-        return None
-
-    def _yt_sub(self, e):
-        parts = [e.get("channel") or ""]
-        parts.append("🔴 直播" if e.get("live") else fmt_duration(e.get("duration")))
-        key = self._yt_key(e)
-        if key in self._yt_jobs:
-            parts.append("⬇ 下載中")
-        elif yt_fav_file(self._yt_fav_entry(key)):
-            parts.append("✓ 已存檔")
-        return " · ".join(x for x in parts if x)
-
-    def _yt_refresh_rows(self):
-        for row in range(self.yt_rows.count()):
-            item = self.yt_rows.item(row)
-            item.setData(ROLE_SUB, self._yt_sub(item.data(ROLE_DATA)))
-            item.setData(ROLE_FAV, item.data(ROLE_PATH) in self._yt_fav_keys())
-        self.yt_rows.viewport().update()
-        self._yt_selection(self.yt_rows.currentItem())
-
-    def _yt_rows(self, entries):
-        return [(self._yt_key(e), e, e.get("title") or "（未命名）", self._yt_sub(e)) for e in entries]
-
-    def _yt_selection(self, item, _prev=None):
-        w = self.yt_panel
-        e = item.data(ROLE_DATA) if item is not None else None
-        w["sel_title"].setText(e.get("title", "") if e else "尚未選擇")
-        w["sel_sub"].setText(self._yt_sub(e) if e else "")
-        faved = bool(e) and self._yt_key(e) in self._yt_fav_keys()
-        w["fav"].setText("★  移出最愛" if faved else "★  加入最愛")
-        w["fav"].setEnabled(bool(e))
-        w["play"].setEnabled(bool(e))
-
-    def yt_set_view(self, mode):
-        self._yt_view = mode
-        if mode == "fav":
-            favs = list(self.settings.yt_favorites)
-            self._fill_online_list(self.yt_stack, self.yt_rows, self.yt_empty, self._yt_rows(favs),
-                                   "還沒有最愛的影片。\n\n搜尋後按一下列表左邊的 ☆ 就能收藏。", self._yt_fav_keys())
-        else:
-            self._fill_online_list(self.yt_stack, self.yt_rows, self.yt_empty, self._yt_rows(self._yt_results_cache),
-                                   "在上方貼上 YouTube 網址，或輸入關鍵字開始。", self._yt_fav_keys())
-        self._yt_selection(self.yt_rows.currentItem())
-
-    def yt_after_changed(self, _index):
-        self.settings.yt_after = self.yt_after_combo.currentData() or "next"
-        self.save_settings()
-
-    def yt_submit(self):
-        text = self.yt_search.text().strip()
-        if not text:
-            return
-        if not ytdlp_available():
-            self._set_note("yt", "⚠  尚未安裝 YouTube 元件，請按右上角「🔧  YouTube 元件」下載。")
-            self.yt_tools_dialog()
-            return
-        self._yt_token += 1
-        token = self._yt_token
-        self._yt_view = "all"
-        for button in self.pages.widget(6).findChildren(QPushButton):
-            if button.objectName() == "segL":
-                button.setChecked(True)
-        self.yt_empty.setText("搜尋中…（第一次可能需要幾秒）")
-        self.yt_stack.setCurrentIndex(1)
-        self._set_note("yt", "")
-        threading.Thread(target=self._yt_worker, args=(token, text), daemon=True).start()
-
-    def _yt_worker(self, token, text):
-        try:
-            result = yt_list(text, self.settings.yt_cookies_browser)
-            self.signals.yt_results.emit(token, result, "")
-        except Exception as exc:
-            self.signals.yt_results.emit(token, None, str(exc) or exc.__class__.__name__)
-
-    def _on_yt_results(self, token, result, err):
-        if token != self._yt_token:
-            return
-        if err or not result:
-            self._yt_results_cache = []
-            self.yt_set_view("all")
-            self.yt_empty.setText(f"⚠  {err or '沒有結果'}")
-            self.yt_stack.setCurrentIndex(1)
-            return
-        self._yt_results_cache = result["entries"]
-        self.yt_set_view("all")
-        if result["autoplay"] and result["entries"]:
-            self.yt_rows.setCurrentRow(0)
-            self.yt_play()
-
-    def _yt_src(self, e):
-        return {"kind": "yt", "key": self._yt_key(e), "title": e.get("title") or "（未命名）",
-                "sub": e.get("channel") or "", "page_url": e["url"], "live": bool(e.get("live")),
-                "duration": e.get("duration") or 0}
-
-    def yt_play(self):
-        e = self._yt_current()
-        if not e:
-            return
-        if not ytdlp_available():
-            self.yt_tools_dialog()
-            return
-        # The list on screen at this moment becomes the queue that 下一首 / 自動下一首 walk through.
-        self._yt_queue = [self.yt_rows.item(r).data(ROLE_DATA) for r in range(self.yt_rows.count())]
-        self.play_source(self._yt_src(e))
-
-    def _yt_next_src(self, src):
-        queue = self._yt_queue
-        if len(queue) < 2:
-            return None
-        keys = [self._yt_key(e) for e in queue]
-        index = (keys.index(src["key"]) + 1) % len(queue) if src["key"] in keys else 0
-        return self._yt_src(queue[index])
-
-    def yt_next(self):
-        src = self.current_source if self.current_source and self.current_source["kind"] == "yt" else None
-        if src is None:
-            self.yt_play()
-            return
-        nxt = self._yt_next_src(src)
-        if nxt:
-            self.yt_select_key(nxt["key"])
-            self.play_source(nxt)
-
-    def _yt_update_row(self, src):
-        """A pasted link only has its URL as title; show the real title / channel once it is known."""
-        for entry in self._yt_results_cache:
-            if self._yt_key(entry) == src["key"]:
-                entry["title"], entry["channel"] = src["title"], src.get("sub", "")
-                entry["live"] = bool(src.get("live"))
-        for row in range(self.yt_rows.count()):
-            item = self.yt_rows.item(row)
-            if item.data(ROLE_PATH) == src["key"]:
-                data = dict(item.data(ROLE_DATA))
-                data["title"], data["channel"], data["live"] = src["title"], src.get("sub", ""), bool(src.get("live"))
-                item.setData(ROLE_DATA, data)
-                item.setData(ROLE_NAME, data["title"])
-                item.setData(ROLE_SUB, self._yt_sub(data))
-        self.yt_rows.viewport().update()
-        self._yt_selection(self.yt_rows.currentItem())
-
-    def yt_select_key(self, key):
-        for row in range(self.yt_rows.count()):
-            if self.yt_rows.item(row).data(ROLE_PATH) == key:
-                self.yt_rows.setCurrentRow(row)
-                return
-
-    def yt_toggle_fav(self, e):
-        if not e:
-            return
-        key = self._yt_key(e)
-        entry = self._yt_fav_entry(key)
-        if entry is not None:                    # remove: stop its download and delete the saved file
-            job = self._yt_jobs.pop(key, None)
-            if job is not None:
-                job.cancel()
-            path = yt_fav_file(entry)
-            if path and Path(path).parent.resolve() in [d.resolve() for d in yt_fav_dirs()]:
-                try:
-                    Path(path).unlink()
-                except OSError:
-                    pass
-            self.settings.yt_favorites = [d for d in self.settings.yt_favorites if self._yt_key(d) != key]
-            self.save_settings()
-        else:
-            entry = {k: e.get(k) for k in ("id", "title", "url", "channel", "duration", "live")}
-            entry["file"] = ""
-            self.settings.yt_favorites.append(entry)
-            self.save_settings()
-            self.yt_download_fav(entry)
-        if self._yt_view == "fav":
-            self.yt_set_view("fav")
-        else:
-            self._yt_refresh_rows()
-
-    def yt_download_fav(self, entry):
-        """Save a favourite as a real file (YouTube最愛 folder). Live streams cannot be saved."""
-        key = self._yt_key(entry)
-        if entry.get("live"):
-            self._set_note("yt", "直播無法存成檔案，只加入最愛清單。")
-            return
-        if key in self._yt_jobs or yt_fav_file(entry):
-            return
-        if not ytdlp_available():
-            self._set_note("yt", "已加入最愛，但尚未安裝 YouTube 元件，所以還沒存檔。")
-            return
-        self._yt_jobs[key] = YtFavJob(entry, self.settings.yt_cookies_browser,
-                                      lambda k, err: self.signals.tool_done.emit(f"fav:{k}", err))
-        self._set_note("yt", f"⬇  正在把「{entry.get('title', '')}」存到最愛資料夾…")
-
-    def yt_open_fav_folder(self):
-        folder = yt_fav_dir()
-        try:
-            folder.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            pass
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
-
-    # ---- 設定：YouTube 最愛存放位置 ----
-    def refresh_yt_dir_ui(self):
-        folder = yt_fav_dir()
-        self.yt_dir_edit.setText(str(folder))
-        self.yt_dir_edit.setToolTip(str(folder))
-        self.yt_dir_edit.setCursorPosition(0)
-        self.yt_dir_reset_button.setEnabled(bool(self.settings.yt_fav_dir))
-        self.tools_dir_edit.setText(str(tools_dir()))
-        self.tools_dir_edit.setToolTip(str(tools_dir()))
-        self.tools_dir_edit.setCursorPosition(0)
-        self.tools_dir_reset_button.setEnabled(bool(self.settings.tools_dir))
-
-    # ---- 設定：YouTube 元件（tools）位置 ----
-    def tools_choose_dir(self):
-        current = tools_dir()
-        start = str(current if current.is_dir() else current.parent if current.parent.is_dir() else Path.home())
-        path = QFileDialog.getExistingDirectory(self, "選擇 YouTube 元件要存放的資料夾", start)
-        if path:
-            self.tools_set_dir(path)
-
-    def tools_use_app_dir(self):
-        self.tools_set_dir(str(app_home_dir() / "tools"))
-
-    def tools_reset_dir(self):
-        self.tools_set_dir("")
-
-    def tools_set_dir(self, new):
-        old = tools_dir()
-        target = Path(new) if new else TOOLS_DIR_DEFAULT
-        if path_key(target) == path_key(old):
-            self.refresh_yt_dir_ui()
-            return
-        if getattr(self, "_yt_tool_busy", False) or self._yt_jobs:
-            QMessageBox.information(self, APP_NAME, "YouTube 元件或最愛歌曲正在下載中，請等完成後再更換位置。")
-            return
-        try:
-            target.mkdir(parents=True, exist_ok=True)
-            probe = target / ".echodeck_write_test"
-            probe.write_text("ok", encoding="utf-8")
-            probe.unlink()
-        except OSError as exc:
-            QMessageBox.warning(self, APP_NAME, f"這個資料夾無法寫入，請換一個位置。\n\n{target}\n{exc}")
-            return
-        copied = []
-        try:                                         # copy first; only switch when every file made it
-            for name in ("yt-dlp.exe", "deno.exe"):
-                src_file, dest = old / name, target / name
-                if src_file.is_file() and not dest.is_file():
-                    shutil.copy2(str(src_file), str(dest))
-                    copied.append(dest)
-        except OSError as exc:
-            for dest in copied:
-                try:
-                    dest.unlink()
-                except OSError:
-                    pass
-            QMessageBox.warning(self, APP_NAME, f"複製元件失敗，位置沒有更換。\n\n{exc}")
-            return
-        self.settings.tools_dir = "" if path_key(target) == path_key(TOOLS_DIR_DEFAULT) else str(target)
-        _TOOLS_CUSTOM[0] = self.settings.tools_dir
-        _ytdlp_ver[0] = None
-        self.save_settings()
-        leftovers = 0
-        for name in ("yt-dlp.exe", "deno.exe"):      # tidy the old folder; a locked file just stays
-            try:
-                (old / name).unlink(missing_ok=True)
-            except OSError:
-                leftovers += 1
-        self.refresh_yt_dir_ui()
-        text = f"✓  YouTube 元件之後會放在：{target}"
-        if leftovers:
-            text += "（舊位置有檔案被佔用沒刪掉，可以之後手動刪除）"
-        self.subtitle.setText(text)
-
-    def yt_choose_fav_dir(self):
-        current = yt_fav_dir()
-        start = str(current if current.is_dir() else current.parent if current.parent.is_dir() else Path.home())
-        path = QFileDialog.getExistingDirectory(self, "選擇 YouTube 最愛要存放的資料夾", start)
-        if path:
-            self.yt_set_fav_dir(path)
-
-    def yt_use_app_fav_dir(self):
-        self.yt_set_fav_dir(str(app_home_dir() / "YouTube最愛"))
-
-    def yt_reset_fav_dir(self):
-        self.yt_set_fav_dir("")
-
-    def yt_set_fav_dir(self, new):
-        old = yt_fav_dir()
-        target = Path(new) if new else YT_FAV_DIR_DEFAULT
-        if path_key(target) == path_key(old):
-            self.refresh_yt_dir_ui()
-            return
-        if self._yt_jobs:
-            QMessageBox.information(self, APP_NAME, "還有最愛歌曲正在下載中，請等下載完成後再更換存放位置。")
-            return
-        try:
-            target.mkdir(parents=True, exist_ok=True)
-            probe = target / ".echodeck_write_test"
-            probe.write_text("ok", encoding="utf-8")
-            probe.unlink()
-        except OSError as exc:
-            QMessageBox.warning(self, APP_NAME, f"這個資料夾無法寫入，請換一個位置。\n\n{target}\n{exc}")
-            return
-        movable = [e for e in self.settings.yt_favorites
-                   if yt_fav_file(e) and path_key(Path(e["file"]).parent) == path_key(old)]
-        move = False
-        if movable:
-            answer = QMessageBox.question(
-                self, APP_NAME,
-                f"要把已經存好的 {len(movable)} 首歌，從\n{old}\n搬到新位置嗎？\n\n{target}\n\n"
-                "「是」＝一起搬過去（最愛清單不會掉）\n「否」＝舊檔留在原處，之後新加的最愛才存到新位置",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
-                QMessageBox.StandardButton.Yes)
-            if answer == QMessageBox.StandardButton.Cancel:
-                return
-            move = answer == QMessageBox.StandardButton.Yes
-        moved = failed = 0
-        if move:
-            for entry in movable:
-                src_file = Path(entry["file"])
-                dest = target / src_file.name
-                n = 2
-                while dest.exists():
-                    dest = target / f"{src_file.stem} ({n}){src_file.suffix}"
-                    n += 1
-                try:
-                    shutil.move(str(src_file), str(dest))
-                    entry["file"] = str(dest)
-                    moved += 1
-                except OSError:
-                    failed += 1                     # e.g. the song is playing right now
-        self.settings.yt_fav_dir = "" if path_key(target) == path_key(YT_FAV_DIR_DEFAULT) else str(target)
-        _YT_FAV_CUSTOM[0] = self.settings.yt_fav_dir
-        self.save_settings()
-        self.refresh_yt_dir_ui()
-        if getattr(self, "_yt_view", "") == "fav":
-            self.yt_set_view("fav")
-        elif hasattr(self, "_yt_refresh_rows"):
-            self._yt_refresh_rows()
-        text = f"✓  YouTube 最愛之後會存到：{target}"
-        if move:
-            text += f"（已搬移 {moved} 首" + (f"，{failed} 首搬不動，請先停止播放再試" if failed else "") + "）"
-        self.subtitle.setText(text)
-
-    def yt_menu(self, pos):
-        item = self.yt_rows.itemAt(pos)
-        if item is None:
-            return
-        e = item.data(ROLE_DATA)
-        menu = QMenu(self)
-        menu.addAction("▶  播放", lambda: (self.yt_rows.setCurrentItem(item), self.yt_play()))
-        faved = self._yt_key(e) in self._yt_fav_keys()
-        menu.addAction("移出最愛（並刪除檔案）" if faved else "★  加入最愛（並存檔）", lambda: self.yt_toggle_fav(e))
-        fav_entry = self._yt_fav_entry(self._yt_key(e))
-        if fav_entry is not None and not yt_fav_file(fav_entry) and self._yt_key(e) not in self._yt_jobs:
-            menu.addAction("⬇  存成檔案", lambda: (self.yt_download_fav(fav_entry), self._yt_refresh_rows()))
-        menu.addAction("在瀏覽器開啟", lambda: QDesktopServices.openUrl(QUrl(e["url"])))
-        menu.addAction("複製連結", lambda: QApplication.clipboard().setText(e["url"]))
-        menu.exec(self.yt_rows.viewport().mapToGlobal(pos))
-
-    # --------------------------------------------------- YouTube components dialog
-    def yt_tools_dialog(self):
-        if getattr(self, "_yt_dialog", None) is not None:
-            self._yt_dialog.raise_()
-            self._yt_dialog.activateWindow()
-            return
-        dlg = QDialog(self)
-        dlg.setWindowTitle("YouTube 元件")
-        dlg.setMinimumWidth(520)
-        v = QVBoxLayout(dlg)
-        v.setContentsMargins(26, 22, 26, 22)
-        v.setSpacing(12)
-        v.addWidget(QLabel("YouTube 元件", objectName="sectionTitle"))
-        intro = QLabel("YouTube 需要兩個小工具才能取得音訊（官方 yt-dlp 與 Deno）。都只需下載一次，之後 YouTube 改版造成搜尋或播放失敗時，再按「更新」即可。")
-        intro.setObjectName("hint")
-        intro.setWordWrap(True)
-        v.addWidget(intro)
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(14)
-        grid.setVerticalSpacing(12)
-        grid.setColumnStretch(1, 1)
-        names = QLabel("yt-dlp（解析 YouTube）")
-        self._yt_ver_label = QLabel()
-        self._yt_ver_label.setObjectName("muted")
-        self._yt_ytdlp_button = QPushButton()
-        self._yt_ytdlp_button.clicked.connect(lambda: self._yt_run_tool("ytdlp"))
-        grid.addWidget(names, 0, 0)
-        grid.addWidget(self._yt_ver_label, 0, 1)
-        grid.addWidget(self._yt_ytdlp_button, 0, 2)
-        names2 = QLabel("Deno（JavaScript 環境）")
-        self._yt_deno_label = QLabel()
-        self._yt_deno_label.setObjectName("muted")
-        self._yt_deno_button = QPushButton()
-        self._yt_deno_button.clicked.connect(lambda: self._yt_run_tool("deno"))
-        grid.addWidget(names2, 1, 0)
-        grid.addWidget(self._yt_deno_label, 1, 1)
-        grid.addWidget(self._yt_deno_button, 1, 2)
-        v.addLayout(grid)
-        cookie_row = QHBoxLayout()
-        cookie_row.addWidget(QLabel("Cookies 來源"))
-        self._yt_cookie_combo = QComboBox()
-        self._yt_cookie_combo.addItem("不使用（預設）", "")
-        for label, value in (("Chrome", "chrome"), ("Edge", "edge"), ("Firefox", "firefox"), ("Brave", "brave")):
-            self._yt_cookie_combo.addItem(label, value)
-        self._yt_cookie_combo.setCurrentIndex(max(0, self._yt_cookie_combo.findData(self.settings.yt_cookies_browser)))
-        self._yt_cookie_combo.currentIndexChanged.connect(self._yt_cookie_changed)
-        cookie_row.addWidget(self._yt_cookie_combo, 1)
-        v.addLayout(cookie_row)
-        cookie_note = QLabel("只有出現「請證明你不是機器人」之類的驗證訊息時才需要。選擇你平常登入 YouTube 的瀏覽器，EchoDeck 只會用它讀取登入狀態。")
-        cookie_note.setObjectName("hint")
-        cookie_note.setWordWrap(True)
-        v.addWidget(cookie_note)
-        self._yt_tool_status = QLabel("")
-        self._yt_tool_status.setObjectName("muted")
-        self._yt_tool_status.setWordWrap(True)
-        v.addWidget(self._yt_tool_status)
-        close = QPushButton("關閉")
-        close.clicked.connect(dlg.accept)
-        v.addWidget(close, 0, Qt.AlignmentFlag.AlignRight)
-        dlg.finished.connect(lambda _=0: setattr(self, "_yt_dialog", None))
-        self._yt_dialog = dlg
-        self._yt_tools_refresh()
-        dlg.open()
-
-    def _yt_tools_refresh(self):
-        if getattr(self, "_yt_dialog", None) is None:
-            return
-        have = ytdlp_available()
-        ver = _ytdlp_ver[0]
-        if have and ver is None:
-            self._yt_ver_label.setText("已安裝　（讀取版本中…）")
-            threading.Thread(target=lambda: (ytdlp_version(), self.signals.tool_done.emit("version", "")),
-                             daemon=True).start()
-        elif have:
-            self._yt_ver_label.setText(f"已安裝　{ver}" if ver else "已安裝")
-        else:
-            self._yt_ver_label.setText("尚未安裝")
-        self._yt_ytdlp_button.setText("更新" if have else "下載")
-        runtime = find_js_runtime()
-        self._yt_deno_label.setText(f"已安裝　{runtime[0]}" if runtime else "尚未安裝")
-        self._yt_deno_button.setText("更新" if deno_exe().is_file() else "下載")
-
-    def _yt_cookie_changed(self, _index):
-        self.settings.yt_cookies_browser = self._yt_cookie_combo.currentData() or ""
-        self.save_settings()
-
-    def _yt_run_tool(self, which):
-        if self._yt_tool_busy:
-            return
-        self._yt_tool_busy = True
-        for button in (self._yt_ytdlp_button, self._yt_deno_button):
-            button.setEnabled(False)
-        self._yt_tool_status.setText("下載中…請稍候" + ("（約 40 MB）" if which == "deno" else "（約 18 MB）"))
-        threading.Thread(target=self._yt_tool_worker, args=(which,), daemon=True).start()
-
-    def _yt_tool_worker(self, which):
-        try:
-            if which == "ytdlp":
-                update_ytdlp()
-            else:
-                install_deno()
-            self.signals.tool_done.emit(which, "")
-        except Exception as exc:
-            self.signals.tool_done.emit(which, str(exc) or exc.__class__.__name__)
-
-    def _on_tool_done(self, which, err):
-        if which.startswith("fav:"):             # a favourite finished downloading (or failed)
-            key = which[4:]
-            self._yt_jobs.pop(key, None)
-            entry = self._yt_fav_entry(key)
-            if entry is not None:
-                self.save_settings()
-                self._set_note("yt", f"⚠  存檔失敗：{err}" if err else f"✓  已存到「{Path(entry['file']).parent.name}」資料夾：{Path(entry['file']).name}")
-            if self._yt_view == "fav":
-                self.yt_set_view("fav")
-            else:
-                self._yt_refresh_rows()
-            return
-        if which == "version":              # only the version label needs a refresh
-            self._yt_tools_refresh()
-            return
-        self._yt_tool_busy = False
-        if getattr(self, "_yt_dialog", None) is not None:
-            self._yt_tool_status.setText(f"⚠  下載失敗：{err}" if err else "✓  完成")
-            for button in (self._yt_ytdlp_button, self._yt_deno_button):
-                button.setEnabled(True)
-            self._yt_tools_refresh()
-        self._set_note("yt", "")
-
-    # ------------------------------------------------------- shared playback path
-    def play_source(self, src):
-        """Play a radio station / YouTube video. Connecting happens on a worker thread (it can take
-        seconds); the current sound keeps playing until the new one is ready, then PTT is handled
-        exactly like a local song."""
-        self._play_token += 1
-        token = self._play_token
-        self._starting = True
-        self._pending_src = src
-        self._set_note(src, "連線中…（網路串流第一次可能需要幾秒）")
-        threading.Thread(target=self._stream_worker, args=(token, src), daemon=True).start()
-
-    def _stream_worker(self, token, src):
-        st, err = None, ""
-        try:
-            headers, urls = {}, []
-            live, duration = bool(src.get("live")), src.get("duration") or 0
-            saved = yt_fav_file(self._yt_fav_entry(src["key"])) if src["kind"] == "yt" else ""
-            if saved:                          # favourite already saved: instant start and seekable
-                st = self.mixer.open_stream(saved, self.settings.normalize_audio, live=False)
-            elif src["kind"] == "yt":
-                if live or not duration:        # unknown length / maybe live: ask yt-dlp first (a few seconds)
-                    info = yt_resolve_audio(src["page_url"], self.settings.yt_cookies_browser)
-                    if token != self._play_token:
-                        return
-                    urls, headers = [info["url"]], info["headers"]
-                    live, duration = info["live"], info["duration"] or duration
-                    if info["title"]:
-                        src["title"] = info["title"]
-                    if info["channel"]:
-                        src["sub"] = info["channel"]
-                    src["live"] = live
-            else:
-                for url in src["urls"]:
-                    urls += resolve_playlist_url(url)
-            last = None
-            if st is not None:
-                pass                           # opened from the saved favourite above
-            elif src["kind"] == "yt" and not live:
-                # A direct googlevideo link is refused (HTTP 403) when FFmpeg opens it: the link is tied to
-                # the IP / client that yt-dlp used. So yt-dlp itself downloads the song and FFmpeg reads
-                # the bytes from its output. Nothing to resolve first when the length is already known.
-                if token != self._play_token:
-                    return
-                pipe = YtPipe(src["page_url"], self.settings.yt_cookies_browser)
-                try:
-                    st = self.mixer.open_stream(src["page_url"], self.settings.normalize_audio, live=False,
-                                                duration=duration, opener=lambda: pipe)
-                except Exception as exc:
-                    detail = pipe.error_text()
-                    pipe.close()
-                    raise RuntimeError(_yt_friendly_error(detail) if detail.strip() else str(exc))
-            else:
-                for url in urls:
-                    if token != self._play_token:
-                        return
-                    try:
-                        st = self.mixer.open_stream(url, self.settings.normalize_audio, live=live,
-                                                    headers=headers, duration=duration)
-                        break
-                    except Exception as exc:
-                        last = exc
-            if st is None:
-                raise RuntimeError(f"無法連線（{last}）" if last else "沒有可用的串流網址")
-        except Exception as exc:
-            err = re.sub(r"https?://\S+", "…", str(exc) or exc.__class__.__name__)[:160]
-        self.signals.stream_ready.emit(token, st, err)
-
-    def _on_stream_ready(self, token, st, err):
-        src = self._pending_src
-        if token != self._play_token:           # stopped / replaced while connecting
-            if st is not None:
-                st.close()
-            return
-        if st is None:
-            self._starting = False
-            self._set_note(src, "⚠  " + (err or "無法播放"))
-            return
-        self.mixer.mic_hold = True              # mute the mic before PTT goes down, like local songs
-
-        def go():
-            if token != self._play_token:
-                st.close()
-                return
-            self._starting = False
-            self.mixer.install(st)
-            self.current_track = None
-            self.mark_playing(None)
-            self.current_source = src
-            self.effect_was_playing = True
-            self.set_now(src["title"], src.get("sub", ""))
-            self._set_note(src, "")
-            self._refresh_source_marks()
-            if src["kind"] == "yt":
-                self._yt_update_row(src)
-        if self.settings.auto_ptt:
-            already_down = self.ptt_down
-            self.press_ptt()
-            QTimer.singleShot(0 if already_down else max(0, self.settings.ptt_delay_ms), go)
-        else:
-            go()
-
-    def _source_ended(self, src):
-        """A stream stopped by itself. True when something new was started."""
-        if src["kind"] == "radio":
-            self.set_now("電台連線中斷", "已多次嘗試重新連線仍失敗，請再按一次播放或換一台")
-            return False
-        mode = self.settings.yt_after
-        if mode == "loop":
-            self.play_source(src)
-            return True
-        if mode == "next":
-            nxt = self._yt_next_src(src)
-            if nxt:
-                self.yt_select_key(nxt["key"])
-                self.play_source(nxt)
-                return True
-        return False
-
-    def _refresh_source_marks(self):
-        src = self.current_source
-        for kind, lst in (("radio", getattr(self, "radio_rows", None)), ("yt", getattr(self, "yt_rows", None))):
-            if lst is None:
-                continue
-            key = src["key"] if src and src["kind"] == kind else None
-            for row in range(lst.count()):
-                item = lst.item(row)
-                item.setData(ROLE_PLAYING, key is not None and item.data(ROLE_PATH) == key)
-            lst.viewport().update()
-
-    def _update_online_panels(self, playing, elapsed, total):
-        live, status, meta = self.mixer.stream_info()
-
-        def fmt(seconds):
-            seconds = int(seconds)
-            h, rest = divmod(seconds, 3600)
-            return f"{h}:{rest // 60:02d}:{rest % 60:02d}" if h else f"{rest // 60:02d}:{rest % 60:02d}"
-        if live and playing:
-            text = f"● LIVE  {fmt(elapsed)}"
-        else:
-            text = f"{fmt(elapsed)} / {fmt(total)}"
-        self.time_label.setText(text)
-        src = self.current_source
-        if src is not None and playing:
-            sub = status or (meta if live and meta else src.get("sub", ""))
-            if sub != self.card_sub._full:
-                self.set_sub(sub)
-        paused = bool(playing and self.mixer.paused)
-        pause_text = "▶  繼續" if paused else "⏸  暫停"
-        for w in self._panels:
-            w["time"].setText(text)
-            if not w["progress"].isSliderDown():
-                w["progress"].setValue(int(min(1.0, elapsed / total) * 1000) if total and not live else 0)
-            w["progress"].setVisible(not live or not playing)
-            w["progress"].setEnabled(bool(total) and not live and self.mixer.can_seek())
-            w["pause"].setEnabled(bool(playing) and not live)
-            if w["pause"].text() != pause_text:
-                w["pause"].setText(pause_text)
-                w["pause"].setProperty("resume", paused)
-                restyle(w["pause"])
-
-    # ---- auto clicker ----
-    def clicker_target_changed(self, value):
-        kind, _, name = value.partition(":")
-        if kind == "mouse" and name and name == (self.settings.clicker_mouse_hotkey or "").partition(":")[2]:
-            QMessageBox.warning(self, APP_NAME, "要連點的滑鼠鍵不能和「快捷鍵（滑鼠）」相同，請換一個。")
-            self.click_target.value = self.settings.clicker_target
-            self.click_target._refresh()
-            return
-        self.settings.clicker_target = value
-        self.clicker.target = value
-        self.save_settings()
-
-    def clicker_interval_changed(self, value):
-        value = max(AutoClicker.MIN_INTERVAL, value)
-        self.settings.clicker_interval = value
-        self.clicker.interval = value
-        self.save_settings()
-
-    def clicker_duration_changed(self, value):
-        self.settings.clicker_duration = int(value)
-        self.save_settings()
-
-    def _begin_clicker(self):
-        self.clicker.start()
-        seconds = int(self.settings.clicker_duration)
-        if seconds > 0:
-            self._clicker_deadline.start(seconds * 1000)
-
-    def stop_clicker(self):
-        self._clicker_pending = False
-        self._clicker_token += 1
-        self._clicker_deadline.stop()
-        self.clicker.stop()
-        self.update_clicker_ui()
-
-    def clicker_delay_changed(self, value):
-        self.settings.clicker_delay = round(float(value), 1)
-        self.save_settings()
-        self.update_clicker_ui()
-
-    # ---- presets: one preset = the click settings AND the hold settings ----
-    @staticmethod
-    def _preset_part(preset, part):
-        """The "click" or "hold" half of a preset (None if it has none). Presets
-        saved by the earlier clicker-only version are flat and count as "click"."""
-        sub = preset.get(part)
-        if isinstance(sub, dict):
-            return sub
-        if part == "click" and "target" in preset:
-            return preset
-        return None
-
-    def refresh_clicker_presets(self, select=None):
-        combo = self.preset_combo
-        combo.blockSignals(True)
-        combo.clear()
-        combo.addItem("（選擇預設組合…）")
-        for p in self.settings.clicker_presets:
-            bits = []
-            click, hold = self._preset_part(p, "click"), self._preset_part(p, "hold")
-            if click:
-                bits.append(f"連點 {target_display(click.get('target'))} 每 {float(click.get('interval', 0.1)):g} 秒")
-            if hold:
-                bits.append(f"壓住 {target_display(hold.get('target'))}")
-            combo.addItem(p["name"] + ("　" + "　｜　".join(bits) if bits else ""))
-        index = 0
-        if select is not None:
-            index = next((i + 1 for i, p in enumerate(self.settings.clicker_presets) if p["name"] == select), 0)
-        combo.setCurrentIndex(index)
-        combo.blockSignals(False)
-        self.delete_preset_button.setEnabled(bool(self.settings.clicker_presets))
-
-    def save_clicker_preset(self):
-        name, ok = QInputDialog.getText(self, APP_NAME, "預設組合名稱：")
-        name = name.strip()
-        if not ok or not name:
-            return
-        preset = {
-            "name": name,
-            "click": {
-                "target": self.settings.clicker_target,
-                "interval": max(AutoClicker.MIN_INTERVAL, float(self.settings.clicker_interval)),
-                "duration": int(self.settings.clicker_duration),
-                "delay": round(float(self.settings.clicker_delay), 1),
-            },
-            "hold": {
-                "target": self.settings.hold_target,
-                "duration": int(self.settings.hold_duration),
-                "delay": round(float(self.settings.hold_delay), 1),
-            },
-        }
-        presets = self.settings.clicker_presets
-        for i, old in enumerate(presets):
-            if old["name"] == name:
-                presets[i] = preset
-                break
-        else:
-            presets.append(preset)
-        self.save_settings()
-        self.refresh_clicker_presets(select=name)
-        self.click_status.setText(f"○ 已儲存預設：{name}")
-        self.hold_status.setText(f"○ 已儲存預設：{name}")
-
-    def apply_clicker_preset(self, index):
-        presets = self.settings.clicker_presets
-        if not (1 <= index <= len(presets)):
-            return
-        preset = presets[index - 1]
-        click, hold = self._preset_part(preset, "click"), self._preset_part(preset, "hold")
-
-        def mouse_name(target):
-            kind, _, button = str(target or "").partition(":")
-            return button if kind == "mouse" else ""
-        # Same conflict rules as picking the keys by hand: a target may not be
-        # the mouse button that is also used as that feature's hotkey.
-        if click and mouse_name(click.get("target")) and \
-                mouse_name(click.get("target")) == (self.settings.clicker_mouse_hotkey or "").partition(":")[2]:
-            QMessageBox.warning(self, APP_NAME, "這組預設要連點的滑鼠鍵，和目前「連點快捷鍵（滑鼠）」相同，請先改掉其中一個。")
-            self.refresh_clicker_presets()
-            return
-        if hold and mouse_name(hold.get("target")) and \
-                mouse_name(hold.get("target")) == (self.settings.hold_mouse_hotkey or "").partition(":")[2]:
-            QMessageBox.warning(self, APP_NAME, "這組預設要壓住的滑鼠鍵，和目前「壓住快捷鍵（滑鼠）」相同，請先改掉其中一個。")
-            self.refresh_clicker_presets()
-            return
-        self.stop_clicker()  # never change a target under a running / counting-down action
-        self.stop_hold()
-        if click:
-            target = str(click.get("target") or "mouse:left")
-            self.click_target.value = target
-            self.click_target._refresh()
-            self.settings.clicker_target = target
-            self.clicker.target = target
-            self.click_interval.setValue(max(AutoClicker.MIN_INTERVAL, float(click.get("interval", 0.1))))
-            self.click_duration.setValue(max(0, int(click.get("duration", 60))))
-            self.click_delay.setValue(min(3.0, max(0.5, float(click.get("delay", 3.0)))))
-        if hold:
-            target = str(hold.get("target") or "key:v")
-            self.hold_target_edit.value = target
-            self.hold_target_edit._refresh()
-            self.settings.hold_target = target
-            self.hold_action.target = target
-            self.hold_duration.setValue(max(0, int(hold.get("duration", 5))))
-            self.hold_delay.setValue(min(3.0, max(0.5, float(hold.get("delay", 3.0)))))
-        self.save_settings()
-        self.click_status.setText(f"○ 已套用預設：{preset['name']}")
-        self.hold_status.setText(f"○ 已套用預設：{preset['name']}")
-
-    def delete_clicker_preset(self):
-        index = self.preset_combo.currentIndex()
-        presets = self.settings.clicker_presets
-        if not (1 <= index <= len(presets)):
-            QMessageBox.information(self, APP_NAME, "請先在上面的下拉選單選一組要刪除的預設。")
-            return
-        name = presets[index - 1]["name"]
-        if QMessageBox.question(self, APP_NAME, f"刪除預設「{name}」？") != QMessageBox.StandardButton.Yes:
-            return
-        presets.pop(index - 1)
-        self.save_settings()
-        self.refresh_clicker_presets()
-        self.click_status.setText(f"○ 已刪除預設：{name}")
-
-    def clicker_delay_ms(self):
-        return int(round(min(3.0, max(0.5, float(self.settings.clicker_delay))) * 1000))
-
-    def clicker_button_clicked(self):
-        self.toggle_clicker()
-
-    def toggle_clicker(self):
-        """Start (after the countdown) or stop: used by the button and both hotkeys."""
-        if self.clicker.running or self._clicker_pending:
-            self.stop_clicker()  # also cancels a countdown in progress
-            return
-        self._clicker_pending = True
-        self._clicker_token += 1
-        token = self._clicker_token
-        delay = self.clicker_delay_ms()
-        self.click_button.setText("■  取消（倒數中）")
-        self.click_button.setObjectName("danger")
-        restyle(self.click_button)
-        self.click_status.setText(f"● {delay / 1000:g} 秒後開始，請把滑鼠移到目標位置…")
-        QTimer.singleShot(delay, lambda: self._start_clicker_now(token))
-
-    def _start_clicker_now(self, token=None):
-        if not self._clicker_pending or (token is not None and token != self._clicker_token):
-            return  # cancelled (or replaced by a newer start) during the countdown
-        self._clicker_pending = False
-        if not self.clicker.running:
-            wait_for_modifiers_released()  # a hotkey like Alt+C must not turn the clicks into Alt+key
-            self._begin_clicker()
-        self.update_clicker_ui()
-
-    def update_clicker_ui(self):
-        if not hasattr(self, "click_button"):
-            return
-        if self.clicker.running:
-            self.click_button.setText("■  停止連點")
-            self.click_button.setObjectName("danger")
-            self.click_status.setText("● 連點中（時間到、快捷鍵或按「停止連點」結束）")
-        elif self._clicker_pending:
-            return
-        else:
-            self.click_button.setText(f"▶  開始連點（{self.settings.clicker_delay:g} 秒後開始）")
-            self.click_button.setObjectName("primary")
-            self.click_status.setText("○ 已停止")
-        restyle(self.click_button)
-
-    # ---- hold key (press and hold, no repeated clicking) ----
-    def hold_target_changed(self, value):
-        kind, name = target_kind_name(value)
-        hotkey_name = (self.settings.hold_mouse_hotkey or "").partition(":")[2]
-        if kind == "mouse" and hotkey_name and name == hotkey_name:
-            QMessageBox.warning(self, APP_NAME, "要壓住的滑鼠鍵不能和「快捷鍵（滑鼠）」相同，請換一個。")
-            self.hold_target_edit.value = self.settings.hold_target
-            self.hold_target_edit._refresh()
-            return
-        self.settings.hold_target = value
-        self.hold_action.target = value
-        self.save_settings()
-
-    def hold_duration_changed(self, value):
-        self.settings.hold_duration = int(value)
-        self.save_settings()
-
-    def _begin_hold(self):
-        self.hold_action.start()
-        seconds = int(self.settings.hold_duration)
-        if seconds > 0:
-            self._hold_deadline.start(seconds * 1000)
-
-    def stop_hold(self):
-        self._hold_pending = False
-        self._hold_token += 1
-        self._hold_deadline.stop()
-        self.hold_action.stop()
-        self.update_hold_ui()
-
-    def hold_delay_changed(self, value):
-        self.settings.hold_delay = round(float(value), 1)
-        self.save_settings()
-        self.update_hold_ui()
-
-    def hold_delay_ms(self):
-        return int(round(min(3.0, max(0.5, float(self.settings.hold_delay))) * 1000))
-
-    def hold_button_clicked(self):
-        self.toggle_hold()
-
-    def toggle_hold(self):
-        """Start (after the countdown) or stop: used by the button and both hotkeys."""
-        if self.hold_action.running or self._hold_pending:
-            self.stop_hold()  # also cancels a countdown in progress
-            return
-        self._hold_pending = True
-        self._hold_token += 1
-        token = self._hold_token
-        delay = self.hold_delay_ms()
-        self.hold_button.setText("■  取消（倒數中）")
-        self.hold_button.setObjectName("danger")
-        restyle(self.hold_button)
-        self.hold_status.setText(f"● {delay / 1000:g} 秒後開始，請把滑鼠移到目標位置…")
-        QTimer.singleShot(delay, lambda: self._start_hold_now(token))
-
-    def _start_hold_now(self, token=None):
-        if not self._hold_pending or (token is not None and token != self._hold_token):
-            return  # cancelled (or replaced by a newer start) during the countdown
-        self._hold_pending = False
-        if not self.hold_action.running:
-            wait_for_modifiers_released()  # a hotkey like Alt+H must not turn the held key into Alt+key
-            self._begin_hold()
-        self.update_hold_ui()
-
-    # ---- mouse hotkey for the hold feature (polled, works inside games) ----
-    _MOUSE_HOTKEY_VKS = {"middle": 0x04, "x1": 0x05, "x2": 0x06}
-
-    def _update_mouse_hotkey_timer(self):
-        if self.settings.hold_mouse_hotkey or self.settings.clicker_mouse_hotkey:
-            self._mouse_hotkey_down = {}
-            self._mouse_hotkey_timer.start()
-        else:
-            self._mouse_hotkey_timer.stop()
-
-    def _poll_mouse_hotkey(self):
-        for key, value, action in (("hold", self.settings.hold_mouse_hotkey, self.toggle_hold),
-                                   ("clicker", self.settings.clicker_mouse_hotkey, self.toggle_clicker)):
-            vk = self._MOUSE_HOTKEY_VKS.get((value or "").partition(":")[2])
-            if not vk:
-                continue
-            down = vk_is_down(vk)
-            pressed_now = down and not self._mouse_hotkey_down.get(key, False)
-            self._mouse_hotkey_down[key] = down
-            if pressed_now and not self._capturing:
-                action()
-
-    def clicker_mouse_hotkey_changed(self, value):
-        name = (value or "").partition(":")[2]
-        kind, target = (self.settings.clicker_target or "").partition(":")[0], (self.settings.clicker_target or "").partition(":")[2]
-        message = ""
-        if value and kind == "mouse" and target == name:
-            message = "快捷鍵不能和「連點按鍵」是同一個滑鼠鍵，請換一個。"
-        elif value and value == self.settings.hold_mouse_hotkey:
-            message = "這個滑鼠鍵已被「壓住按鍵」的快捷鍵使用，請換一個。"
-        if message:
-            QMessageBox.warning(self, APP_NAME, message)
-            self.click_mouse_edit.value = self.settings.clicker_mouse_hotkey
-            self.click_mouse_edit._refresh()
-            return
-        self.settings.clicker_mouse_hotkey = value
-        self.save_settings()
-        self._update_mouse_hotkey_timer()
-
-    def hold_mouse_hotkey_changed(self, value):
-        name = (value or "").partition(":")[2]
-        kind, held = target_kind_name(self.settings.hold_target)
-        if value and kind == "mouse" and held == name:
-            QMessageBox.warning(self, APP_NAME, "快捷鍵不能和「要壓住的按鍵」是同一個滑鼠鍵，請換一個。")
-            self.hold_mouse_edit.value = self.settings.hold_mouse_hotkey
-            self.hold_mouse_edit._refresh()
-            return
-        if value and value == self.settings.clicker_mouse_hotkey:
-            QMessageBox.warning(self, APP_NAME, "這個滑鼠鍵已被「連點」的快捷鍵使用，請換一個。")
-            self.hold_mouse_edit.value = self.settings.hold_mouse_hotkey
-            self.hold_mouse_edit._refresh()
-            return
-        self.settings.hold_mouse_hotkey = value
-        self.save_settings()
-        self._update_mouse_hotkey_timer()
-
-    def update_hold_ui(self):
-        if not hasattr(self, "hold_button"):
-            return
-        if self.hold_action.running:
-            self.hold_button.setText("■  停止壓住")
-            self.hold_button.setObjectName("danger")
-            self.hold_status.setText("● 壓住中（時間到或按「停止壓住」放開）")
-        elif self._hold_pending:
-            return
-        else:
-            self.hold_button.setText(f"▶  開始壓住（{self.settings.hold_delay:g} 秒後開始）")
-            self.hold_button.setObjectName("primary")
-            self.hold_status.setText("○ 已放開")
-        restyle(self.hold_button)
-
-    def load_settings(self):
-        try:
-            data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-            known = {f.name for f in fields(Settings)}
-            settings = Settings(**{k: v for k, v in data.items() if k in known})
-        except (OSError, ValueError, TypeError, AttributeError):
-            return Settings()
-        for name in ("music_folders", "favorites"):
-            value = getattr(settings, name)
-            setattr(settings, name, [str(v) for v in value] if isinstance(value, list) else [])
-        for name in ("radio_favorites", "yt_favorites"):
-            value = getattr(settings, name)
-            setattr(settings, name, [d for d in value if isinstance(d, dict)] if isinstance(value, list) else [])
-        settings.radio_favorites = [d for d in settings.radio_favorites if isinstance(d.get("urls"), list) and d["urls"]]
-        if settings.yt_after not in ("stop", "next", "loop"):
-            settings.yt_after = "next"
-        if settings.radio_view not in ("all", "fav"):
-            settings.radio_view = "all"
-        presets = settings.clicker_presets if isinstance(settings.clicker_presets, list) else []
-        settings.clicker_presets = [p for p in presets if isinstance(p, dict) and str(p.get("name", "")).strip()]
-        if settings.music_folder:  # one-time migration from the old single-folder setting
-            if not any(path_key(f) == path_key(settings.music_folder) for f in settings.music_folders):
-                settings.music_folders.insert(0, settings.music_folder)
-            settings.music_folder = ""
-        settings.yt_fav_dir = str(settings.yt_fav_dir or "") if isinstance(settings.yt_fav_dir, str) else ""
-        _YT_FAV_CUSTOM[0] = settings.yt_fav_dir
-        settings.tools_dir = settings.tools_dir if isinstance(settings.tools_dir, str) else ""
-        _TOOLS_CUSTOM[0] = settings.tools_dir
-        if settings.viz_style not in ("off", "bars", "mirror", "wave", "circle"):
-            settings.viz_style = "bars"
-        try:
-            settings.viz_glow = max(0, min(100, int(settings.viz_glow)))
-        except (TypeError, ValueError):
-            settings.viz_glow = 60
-        settings.viz_flow = bool(settings.viz_flow)
-        if settings.viz_size not in ("normal", "large", "fill"):
-            settings.viz_size = "normal"
-        if settings.viz_ambient not in ("off", "soft", "strong"):
-            settings.viz_ambient = "soft"
-        pls = []
-        for pl in (settings.playlists if isinstance(settings.playlists, list) else []):
-            if isinstance(pl, dict) and isinstance(pl.get("id"), str) and str(pl.get("name", "")).strip():
-                tracks = pl.get("tracks")
-                pls.append({"id": pl["id"], "name": str(pl["name"]).strip(),
-                            "tracks": [str(t) for t in tracks] if isinstance(tracks, list) else []})
-        settings.playlists = pls
-        if not isinstance(settings.last_pl_tracks, dict):
-            settings.last_pl_tracks = {}
-        return settings
-
-    def save_settings(self):
-        try:
-            CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-            CONFIG_PATH.write_text(json.dumps(asdict(self.settings), ensure_ascii=False, indent=2), encoding="utf-8")
-        except OSError:
-            # A second, old EchoDeck process may temporarily hold the config.
-            # Audio should stay usable rather than crash during device setup.
-            pass
-
-    def closeEvent(self, event):
-        if getattr(self, "_viz_window", None) is not None:
-            self._viz_window.close()
-        self.clicker.stop()
-        self.hold_action.stop()
-        self.stop()
-        self.remove_hotkeys()
-        self.mixer.close()
-        event.accept()
-
-
-
-# ---- colour system + artwork --------------------------------------------------
-# A theme = a whole palette (generated from hues) + procedurally painted artwork
-# behind the window. Panels are translucent "glass" so the artwork shows through.
-import colorsys
-import math
-import random
-from PySide6.QtGui import QImage, QPolygonF, QRadialGradient
-from PySide6.QtCore import QRectF
-
-
-def _hsl(h, s, l):
-    r, g, b = colorsys.hls_to_rgb((h % 360) / 360, max(0.0, min(1.0, l)), max(0.0, min(1.0, s)))
-    return "#%02x%02x%02x" % (round(r * 255), round(g * 255), round(b * 255))
-
-
-def _rgba(hexc, alpha):
-    c = QColor(hexc)
-    return f"rgba({c.red()},{c.green()},{c.blue()},{int(alpha)})"
-
-
-DEFAULT_THEME = "tokyo"
-# bh/bs = background hue/saturation, ah = accent hue, lum = base lightness,
-# glass = panel opacity 0-255 (255 = solid), art = backdrop painter
-THEMES = {
-    "graphite": dict(label="石墨（素色）", bh=225, bs=.08, ah=262, lum=.125, glass=255, art="plain"),
-    # ---- 柔光漸層系列：低對比、大面積柔焦光暈，內容區保持乾淨 ----
-    "tokyo":    dict(label="東京夜雨",   bh=232, bs=.30, ah=255, lum=.095, glass=178, art="mesh",
-                     base=("#12131d", "#191a2a", "#0e0f18"), deco="waves", deco_color="#7aa2f7",
-                     orbs=[(.10, .02, .60, "#7aa2f7", 95), (.96, .22, .52, "#bb9af7", 75), (.72, 1.02, .62, "#f7768e", 48)]),
-    "rose":     dict(label="玫瑰松林",   bh=252, bs=.24, ah=348, lum=.09,  glass=180, art="mesh",
-                     base=("#15121f", "#1d1830", "#0f0c18"), deco="bokeh", deco_color="#ebbcba",
-                     orbs=[(.08, .00, .62, "#c4a7e7", 80), (.96, .92, .58, "#eb6f92", 58), (.88, .06, .42, "#f6c177", 34)]),
-    "nord":     dict(label="北歐冰川",   bh=206, bs=.34, ah=180, lum=.088, glass=178, art="mesh",
-                     base=("#050f1a", "#0d2436", "#030810"), decos=[("aurora", "#49e8c0"), ("peaks", "#e4f4ff")],
-                     orbs=[(.14, .04, .58, "#48b6d6", 66), (.90, .90, .52, "#2f6fa8", 64),
-                           (.55, .28, .32, "#8fe3d0", 22)]),
-    "sakura":   dict(label="櫻花墨夜",   bh=330, bs=.22, ah=338, lum=.085, glass=176, art="mesh",
-                     base=("#17101a", "#22152a", "#0f0a13"), deco="petals", deco_color="#ffb7d1",
-                     orbs=[(.92, .06, .62, "#ff8fb8", 78), (.06, .98, .56, "#8e5bd6", 58), (.5, .5, .40, "#4a1d4a", 40)]),
-    "mocha":    dict(label="黑膠咖啡",   bh=24,  bs=.28, ah=34,  lum=.085, glass=186, art="mesh",
-                     base=("#17100b", "#21160e", "#0f0a06"), deco="vinyl", deco_color="#e8b27a",
-                     orbs=[(.08, .06, .62, "#d98c4a", 72), (.98, .98, .62, "#a8452f", 60)]),
-    "forest":   dict(label="森林薄霧",   bh=165, bs=.32, ah=150, lum=.085, glass=182, art="mesh",
-                     base=("#08130f", "#0e1f19", "#060e0b"), decos=[("rays", "#b8f2d4"), ("woods", "#6fd8b0"), ("fireflies", "#c6ff7a")],
-                     orbs=[(.86, .04, .62, "#4fd1a5", 58), (.04, .92, .52, "#2f7f9d", 58), (.5, .35, .30, "#7ee0b8", 20)]),
-    "obsidian": dict(label="黑曜鎏金",   bh=40,  bs=.07, ah=42,  lum=.08,  glass=204, art="mesh",
-                     base=("#0b0a09", "#12100d", "#070605"), decos=[("marble", "#d4af6a")],
-                     orbs=[(.50, -.10, .65, "#b98f45", 40), (.00, 1.00, .45, "#8a6a2f", 30), (1.0, 1.0, .45, "#6b4f1f", 26)]),
-    # ---- 風景系列 ----
-    "dusk":     dict(label="夕陽餘暉",   bh=285, bs=.34, ah=22,  lum=.09,  glass=180, art="mesh",
-                     base=("#1b1028", "#33193a", "#0f0714"), decos=[("sunset", "#ff8a4c")],
-                     orbs=[(.50, .93, .75, "#ff6b3d", 70), (.08, .02, .60, "#7a4bd6", 78), (.96, .26, .52, "#ff5f8f", 58)]),
-    "skyline":  dict(label="東京霓虹",   bh=255, bs=.40, ah=325, lum=.085, glass=178, art="mesh",
-                     base=("#0f0c24", "#1a1038", "#080616"), decos=[("skyline", "#6fd6ff")],
-                     orbs=[(.12, .04, .62, "#4d7cff", 85), (.92, .20, .52, "#c455ff", 70), (.50, 1.0, .65, "#ff4f9a", 60)]),
-    "fuji":     dict(label="富士月夜",   bh=228, bs=.36, ah=205, lum=.09,  glass=182, art="mesh",
-                     base=("#0a1030", "#131c48", "#070a1c"), decos=[("fuji", "#bcd0ff")],
-                     orbs=[(.80, .15, .55, "#8aa4ff", 62), (.05, .95, .55, "#4a3a9a", 55)]),
-    "torii":    dict(label="京都鳥居",   bh=358, bs=.26, ah=14,  lum=.085, glass=184, art="mesh",
-                     base=("#190c0e", "#27121a", "#0d0608"), decos=[("torii", "#c0392b"), ("petals", "#ff9a5a")],
-                     orbs=[(.10, .00, .62, "#ff6a3d", 66), (.96, .96, .62, "#8a2a56", 62), (.50, .30, .30, "#ffb36b", 20)]),
-    # ---- 淺色柔光系列：粉彩漸層、低飽和、不刺眼（面板是半透明白玻璃，文字自動換成深色）----
-    "lilac":    dict(label="薰衣草（淺色）", light=True, bh=250, bs=.45, ah=247, lum=.9, glass=232, art="mesh",
-                     base=("#f5f3fc", "#f4f2fb", "#f4f2fb"), vignette=0, grain=0,
-                     orbs=[(.0, .0, .80, "#dfd9fa", 190), (1.0, .0, .72, "#dee9fb", 190), (.62, 1.08, .66, "#f3e0f3", 190)]),
-    "skylight": dict(label="晴空（淺色）", light=True, bh=212, bs=.50, ah=214, lum=.9, glass=232, art="mesh",
-                     base=("#f3f7fc", "#f1f5fb", "#f2f6fb"), vignette=0, grain=0,
-                     orbs=[(.0, .0, .80, "#d6e7fb", 190), (1.0, .0, .72, "#d9f0f2", 190), (.62, 1.08, .66, "#e5e1f8", 190)]),
-    "rosewater": dict(label="玫瑰（淺色）", light=True, bh=338, bs=.45, ah=338, lum=.9, glass=232, art="mesh",
-                      base=("#fcf5f7", "#fbf3f6", "#fbf3f6"), vignette=0, grain=0,
-                      orbs=[(.0, .0, .80, "#f8dde7", 190), (1.0, .0, .72, "#fbe9d8", 190), (.62, 1.08, .66, "#ece0f6", 190)]),
-}
-
-
-def palette_for(key):
-    t = THEMES.get(key) or THEMES[DEFAULT_THEME]
-    bh, bs, ah, lum, glass = t["bh"], t["bs"], t["ah"], t["lum"], t["glass"]
-    if t.get("light"):
-        d = _light_palette(bh, bs, ah, t.get("dim", 0))
-    else:
-        d = _dark_palette(bh, bs, ah, lum)
-    # solid + translucent ("glass") variants used by the stylesheet
-    d["PANEL_S"], d["RAISED_S"] = d["PANEL"], d["RAISED"]
-    d["PANEL_A"] = _rgba(d["PANEL"], glass)
-    d["BASE_A"] = _rgba(d["BASE"], min(255, glass + 30))
-    d["RAISED_A"] = _rgba(d["RAISED"], min(255, glass + 25))
-    d["RAISED_HI_A"] = _rgba(d["RAISED_HI"], min(255, glass + 40))
-    return d
-
-
-def _dark_palette(bh, bs, ah, lum):
-    d = {
-        "BASE": _hsl(bh, bs, lum), "PANEL": _hsl(bh, bs, lum * 1.4),
-        "RAISED": _hsl(bh, bs, lum * 1.85), "RAISED_HI": _hsl(bh, bs, lum * 2.3),
-        "LINE": _hsl(bh, bs * .9, lum + .17), "LINE_HI": _hsl(bh, bs * .8, lum + .25),
-        "SEL": _hsl(bh, max(.30, bs * .75), .32), "SEL_LINE": _hsl(bh, max(.30, bs * .75), .47),
-        "FOCUS": _hsl(ah, .55, .64), "FOCUS_HI": _hsl(ah, .72, .78),
-        "TEXT": _hsl(bh, .35, .95), "TEXT2": _hsl(bh, .28, .87), "MUTED": _hsl(bh, .20, .74),
-        "FAINT": _hsl(bh, .18, .66), "DISABLED": _hsl(bh, .12, .48),
-        "SCROLL": _hsl(bh, .30, .32), "SCROLL_HI": _hsl(bh, .35, .44),
-        "ACC_HI": _hsl(ah, .62, .58), "ACC_LO": _hsl(ah, .60, .44),
-        "ACC_HOVER_HI": _hsl(ah, .68, .64), "ACC_HOVER_LO": _hsl(ah, .64, .50),
-        "ACC_LINE": _hsl(ah, .70, .70), "ACC_BAR": _hsl(ah, .88, .70),
-        "ACC_TEXT": _hsl(ah, .95, .85), "ACC_SOFT": _hsl(ah, .50, .25),
-        "ACC_BORDER": _hsl(ah, .42, .36),
-    }
-    # colours that used to be hard-coded in the stylesheet (dark values = the original look)
-    d.update({
-        "HEAD": "#f3f1ff", "STRONG": "#ffffff", "BTN_TEXT": "#dfe2f5",
-        "OK_FG": "#5fd9a4", "OK_FG2": "#7fd9b6", "OK_BG": "#12302a", "OK_LINE": "#1c4a3d",
-        "LIVE_FG": "#ff8da1", "LIVE_BG": "#3a1f2b", "LIVE_LINE": "#6a3045",
-        "WARN_FG": "#f5c26b", "WARN_BG": "#38301a", "WARN_LINE": "#5e4d22",
-        "DANGER_FG": "#ff9fb4", "DANGER_BG": "#3a1f2e", "DANGER_LINE": "#6d3449",
-        "DANGER_HOVER": "#4a2538", "DANGER_HOVER_LINE": "#a04a66", "DANGER_PRESSED": "#55293f",
-        "PAUSE_BG": "#1c2738", "PAUSE_LINE": "#31465f", "PAUSE_FG": "#9fc0e0",
-        "PAUSE_HOVER": "#223149", "PAUSE_HOVER_LINE": "#4a6a90",
-        "CHEVRON": "#a3a8c3", "NAV_OFF": "#8d92b0", "NAV_ON": "#ffffff",
-        "STAR": "#f5c26b", "STAR_MISSING": "#6b5a30", "TAG_MISSING": "#a86a78",
-        "TEXT_MISSING_SEL": "#8a8fb0", "NOT_FOUND": "#5d6280",
-        "LISTEN_QSS": "border-color: #ff9bb0; background: #2a2036;",
-    })
-    return d
-
-
-def _light_palette(bh, bs, ah, dim=0.0):
-    """Pastel light palette: near-white glass panels, dark readable text, accent from `ah`."""
-    dl = -.10 if 65 <= ah <= 205 else 0     # green/teal accents are bright: darken so white button text stays readable
-    d = {
-        "BASE": _hsl(bh, bs, .955 - dim), "PANEL": _hsl(bh, bs * .4, .997 - dim),
-        "RAISED": _hsl(bh, bs * .9, .945 - dim), "RAISED_HI": _hsl(bh, bs * .95, .905 - dim),
-        "LINE": _hsl(bh, bs * .6, .895 - dim), "LINE_HI": _hsl(bh, bs * .55, .815 - dim),
-        "SEL": _hsl(bh, max(.55, bs), .885 - dim), "SEL_LINE": _hsl(bh, max(.45, bs * .8), .72),
-        "FOCUS": _hsl(ah, .62, .56), "FOCUS_HI": _hsl(ah, .66, .46),
-        "TEXT": _hsl(bh, .32, .15), "TEXT2": _hsl(bh, .26, .23), "MUTED": _hsl(bh, .16, .38),
-        "FAINT": _hsl(bh, .13, .46), "DISABLED": _hsl(bh, .10, .64),
-        "SCROLL": _hsl(bh, .25, .78), "SCROLL_HI": _hsl(bh, .30, .65),
-        "ACC_HI": _hsl(ah, .68, .58 + dl), "ACC_LO": _hsl(ah, .64, .47 + dl),
-        "ACC_HOVER_HI": _hsl(ah, .72, .63 + dl), "ACC_HOVER_LO": _hsl(ah, .68, .52 + dl),
-        "ACC_LINE": _hsl(ah, .60, .42), "ACC_BAR": _hsl(ah, .72, .55),
-        "ACC_TEXT": _hsl(ah, .70, .36), "ACC_SOFT": _hsl(ah, .75, .925),
-        "ACC_BORDER": _hsl(ah, .55, .80),
-    }
-    d.update({
-        "HEAD": _hsl(bh, .38, .12), "STRONG": _hsl(bh, .40, .11), "BTN_TEXT": _hsl(bh, .30, .20),
-        "OK_FG": "#10785a", "OK_FG2": "#10785a", "OK_BG": "#dcf5ea", "OK_LINE": "#a9e0c9",
-        "LIVE_FG": "#c0274e", "LIVE_BG": "#ffe2e9", "LIVE_LINE": "#f3b4c4",
-        "WARN_FG": "#946000", "WARN_BG": "#fff0cd", "WARN_LINE": "#efd08a",
-        "DANGER_FG": "#c0274e", "DANGER_BG": "#ffe4ea", "DANGER_LINE": "#f0b3c3",
-        "DANGER_HOVER": "#ffd6e0", "DANGER_HOVER_LINE": "#e58aa3", "DANGER_PRESSED": "#ffc7d5",
-        "PAUSE_BG": "#e4eefb", "PAUSE_LINE": "#b6cdee", "PAUSE_FG": "#2f5f9a",
-        "PAUSE_HOVER": "#d7e6f9", "PAUSE_HOVER_LINE": "#8fb2e0",
-        "CHEVRON": "#6b7090", "NAV_OFF": "#6b7090", "NAV_ON": _hsl(ah, .62, .36),
-        "STAR": "#e0a01c", "STAR_MISSING": "#e6d6aa", "TAG_MISSING": "#c0788a",
-        "TEXT_MISSING_SEL": "#8d92b0", "NOT_FOUND": "#a3a7bd",
-        "LISTEN_QSS": "border-color: #e0708f; background: #ffe9f0;",
-    })
-    return d
-
-
-T = {}
-CURRENT_THEME = [DEFAULT_THEME]
-
-
-def set_theme(key):
-    """Select a theme. The stylesheet, list rows and backdrop all read from it."""
-    if key not in THEMES:
-        key = DEFAULT_THEME
-    T.clear()
-    T.update(palette_for(key))
-    CURRENT_THEME[0] = key
-    return key
-
-
-set_theme(DEFAULT_THEME)
-
-# ---- procedural artwork (painted once at 1600x1000, cached, scaled to the window) ----
-ART_W, ART_H = 1600, 1000
-_ART_CACHE = {}
-
-
-def _qc(color, alpha=255):
-    c = QColor(color)
-    c.setAlpha(int(alpha))
-    return c
-
-
-def _vgrad(stops, y0=0, y1=ART_H):
-    g = QLinearGradient(0, y0, 0, y1)
-    for pos, col in stops:
-        g.setColorAt(pos, QColor(col))
-    return g
-
-
-def _canvas():
-    img = QImage(ART_W, ART_H, QImage.Format.Format_ARGB32_Premultiplied)
-    img.fill(Qt.GlobalColor.black)
-    p = QPainter(img)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-    return img, p
-
-
-def _finish(img, p, vignette=130, color="#000000"):
-    """Tone the edges a little (dark themes: darker, light themes: a soft tint)."""
-    g = QRadialGradient(QPointF(ART_W / 2, ART_H / 2), ART_W * .72)
-    g.setColorAt(.5, _qc(color, 0))
-    g.setColorAt(1, _qc(color, vignette))
-    p.fillRect(img.rect(), QBrush(g))
-    p.end()
-    return QPixmap.fromImage(img)
-
-
-def _art_plain(pal):
-    img, p = _canvas()
-    p.fillRect(img.rect(), _vgrad([(0, pal["PANEL"]), (1, pal["BASE"])]))
-    g = QRadialGradient(QPointF(ART_W * .2, 0), ART_W * .8)
-    g.setColorAt(0, _qc(pal["ACC_HI"], 38))
-    g.setColorAt(1, _qc(pal["ACC_HI"], 0))
-    p.fillRect(img.rect(), QBrush(g))
-    return _finish(img, p, 60)
-
-
-# ---- 柔光漸層（mesh）背景：多顆柔焦光暈 + 低調點綴 + 細顆粒 ----
-def _orb(p, x, y, r, color, alpha):
-    g = QRadialGradient(QPointF(ART_W * x, ART_H * y), ART_W * r)
-    alpha = min(255, alpha * 1.4)
-    g.setColorAt(0, _qc(color, alpha))
-    g.setColorAt(.5, _qc(color, alpha * .38))
-    g.setColorAt(1, _qc(color, 0))
-    p.fillRect(QRectF(0, 0, ART_W, ART_H), QBrush(g))
-
-
-def _deco_waves(p, col):
-    """Very faint sound-wave lines along the bottom (music app feel)."""
-    p.setBrush(Qt.BrushStyle.NoBrush)
-    for i in range(8):
-        p.setPen(QPen(_qc(col, 62 - i * 6), 1.3))
-        path = QPainterPath()
-        for k, x in enumerate(range(0, ART_W + 8, 8)):
-            y = ART_H * (.80 + i * .02) + 26 * math.sin(x / 175 + i * .5) + 11 * math.sin(x / 58 + i * 1.3)
-            path.moveTo(x, y) if k == 0 else path.lineTo(x, y)
-        p.drawPath(path)
-
-
-def _deco_ridges(p, col):
-    """Layered, hazy mountain ridges for depth."""
-    rng = random.Random(3)
-    p.setPen(Qt.PenStyle.NoPen)
-    for i, (base, amp, alpha) in enumerate(((.80, 70, 70), (.88, 55, 120), (.95, 40, 190))):
-        poly = [QPointF(0, ART_H)]
-        ph = rng.uniform(0, 6)
-        for x in range(0, ART_W + 20, 20):
-            poly.append(QPointF(x, ART_H * base - amp * (.5 + .5 * math.sin(x / (210 - i * 40) + ph))
-                                - amp * .3 * math.sin(x / 63 + ph * 2)))
-        poly.append(QPointF(ART_W, ART_H))
-        p.setBrush(_qc(col, alpha))
-        p.drawPolygon(QPolygonF(poly))
-
-
-def _deco_petals(p, col):
-    rng = random.Random(11)
-    p.setPen(Qt.PenStyle.NoPen)
-    for _ in range(46):
-        x = ART_W * (1 - rng.random() ** 1.8)          # denser toward the right
-        y = rng.uniform(0, ART_H * .9)
-        s = rng.uniform(5, 13)
-        p.save()
-        p.translate(x, y)
-        p.rotate(rng.uniform(0, 360))
-        p.setBrush(_qc(col, rng.uniform(25, 95)))
-        p.drawEllipse(QPointF(0, 0), s, s * .55)
-        p.restore()
-
-
-def _deco_bokeh(p, col):
-    rng = random.Random(7)
-    for _ in range(26):
-        r = rng.uniform(10, 44)
-        x, y = rng.uniform(0, ART_W), rng.uniform(0, ART_H)
-        p.setBrush(_qc(col, rng.uniform(8, 26)))
-        p.setPen(QPen(_qc(col, rng.uniform(14, 40)), 1))
-        p.drawEllipse(QPointF(x, y), r, r)
-
-
-def _deco_vinyl(p, col):
-    """A giant vinyl record peeking in from the bottom-right corner."""
-    c = QPointF(ART_W * 1.0, ART_H * 1.02)
-    p.setBrush(Qt.BrushStyle.NoBrush)
-    r = 120
-    while r < 760:
-        p.setPen(QPen(_qc(col, 13 if int(r) % 3 else 26), 1))
-        p.drawEllipse(c, r, r)
-        r += 9
-    p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(_qc(col, 34))
-    p.drawEllipse(c, 96, 96)
-    p.setBrush(_qc("#000000", 120))
-    p.drawEllipse(c, 10, 10)
-
-
-def _deco_beams(p, col):
-    """Soft diagonal light beams + hairline, like a spotlit gallery."""
-    p.setPen(Qt.PenStyle.NoPen)
-    for x0, w, a in ((.30, .10, 26), (.46, .05, 20), (.62, .12, 22), (.80, .04, 18)):
-        poly = QPolygonF([QPointF(ART_W * x0, 0), QPointF(ART_W * (x0 + w), 0),
-                          QPointF(ART_W * (x0 + w) - 380, ART_H), QPointF(ART_W * x0 - 380, ART_H)])
-        g = QLinearGradient(0, 0, 0, ART_H)
-        g.setColorAt(0, _qc(col, a))
-        g.setColorAt(1, _qc(col, 0))
-        p.setBrush(QBrush(g))
-        p.drawPolygon(poly)
-    p.setPen(QPen(_qc(col, 38), 1))
-    p.drawLine(QPointF(0, ART_H * .965), QPointF(ART_W, ART_H * .965))
-
-
-def _bloom(p, draw, scale=6, gain=.8):
-    """Paint `draw` small, scale it up additively -> soft glow."""
-    im = QImage(ART_W // scale, ART_H // scale, QImage.Format.Format_ARGB32_Premultiplied)
-    im.fill(0)
-    q = QPainter(im)
-    q.setRenderHint(QPainter.RenderHint.Antialiasing)
-    q.scale(1 / scale, 1 / scale)
-    draw(q)
-    q.end()
-    p.save()
-    p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)
-    p.setOpacity(gain)
-    p.drawImage(QRectF(0, 0, ART_W, ART_H), im)
-    p.restore()
-
-
-def _soft_ellipse(p, cx, cy, rx, ry, col, alpha):
-    p.save()
-    p.translate(cx, cy)
-    p.scale(1, ry / rx)
-    g = QRadialGradient(QPointF(0, 0), rx)
-    g.setColorAt(0, _qc(col, alpha)); g.setColorAt(.45, _qc(col, alpha * .42)); g.setColorAt(1, _qc(col, 0))
-    p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(QBrush(g))
-    p.drawEllipse(QPointF(0, 0), rx, rx)
-    p.restore()
-
-
-def _deco_sunset(p, col):
-    """Sun already below the horizon: wide soft afterglow, streaky clouds, shimmering sea. No disc."""
-    W, H = ART_W, ART_H
-    hy = H * .86
-    rng = random.Random(8)
-    for rx, ry, a in ((1250, 300, 120), (800, 150, 160), (420, 60, 185)):
-        _soft_ellipse(p, W * .5, hy, rx, ry, col, a)
-    # long cloud streaks lit from below
-    for _ in range(9):
-        cy = hy - rng.uniform(70, 420)
-        cx = rng.uniform(W * .1, W * .9)
-        rx = rng.uniform(260, 620)
-        h = rng.uniform(10, 26)
-        warm = 1 - (hy - cy) / 440
-        _soft_ellipse(p, cx, cy + h * .6, rx, h, "#ff9a5c" if warm > .45 else "#ff6fa0", 70 + 60 * warm)
-        _soft_ellipse(p, cx, cy - h * .3, rx * .9, h * .8, "#2a1030", 70)
-    # faint far island
-    isl = QPainterPath()
-    isl.moveTo(W * .72, hy)
-    for x in range(int(W * .72), int(W * .93), 8):
-        t = (x - W * .72) / (W * .21)
-        isl.lineTo(x, hy - 34 * math.sin(t * math.pi) ** 1.4 - 6 * math.sin(t * math.pi) * math.sin(x / 7.0))
-    isl.lineTo(W * .93, hy)
-    isl.closeSubpath()
-    p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(_qc("#20102c", 170))
-    p.drawPath(isl)
-    # sea
-    sea = QLinearGradient(0, hy, 0, H)
-    sea.setColorAt(0, _qc("#2a1233", 225)); sea.setColorAt(1, _qc("#05020a", 252))
-    p.fillRect(QRectF(0, hy, W, H - hy), QBrush(sea))
-    # shimmering reflection column
-    n = 46
-    sh = (H - hy) / n
-    for i in range(n):
-        half = 90 + i * 13
-        a = max(0, 165 - i * 3.2) * rng.uniform(.4, 1.0)
-        g = QLinearGradient(W * .5 - half, 0, W * .5 + half, 0)
-        g.setColorAt(0, _qc(col, 0)); g.setColorAt(.5, _qc(col, a)); g.setColorAt(1, _qc(col, 0))
-        p.fillRect(QRectF(W * .5 - half, hy + i * sh, half * 2, sh * .62), QBrush(g))
-    g = QLinearGradient(0, 0, W, 0)
-    g.setColorAt(0, _qc("#ffd2a0", 0)); g.setColorAt(.5, _qc("#ffd2a0", 120)); g.setColorAt(1, _qc("#ffd2a0", 0))
-    p.fillRect(QRectF(0, hy - 1, W, 2), QBrush(g))
-
-
-def _tokyo_tower(q, tx, by, Ht, line, deck, lw=1.0, glow=False):
-    """Tokyo Tower in the real proportions: lattice legs, two decks, banded antenna."""
-    def hw(t):
-        return max(.0065 * Ht, .125 * Ht * (1 - t) ** 1.95)
-    ts = [0, .04, .09, .15, .22, .30, .37, .45, .52, .58, .64, .70, .75]
-    rows = [(tx - hw(t), tx + hw(t), by - t * Ht) for t in ts]
-    pen = QPen(_qc(line, 255 if not glow else 200), 3.2 * lw)
-    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-    q.setPen(pen)
-    for side in (0, 1):
-        for a, b in zip(rows, rows[1:]):
-            q.drawLine(QPointF(a[side], a[2]), QPointF(b[side], b[2]))
-    q.setPen(QPen(_qc(line, 200), 1.4 * lw))
-    for a, b in zip(rows, rows[1:]):
-        q.drawLine(QPointF(a[0], a[2]), QPointF(b[1], b[2]))
-        q.drawLine(QPointF(a[1], a[2]), QPointF(b[0], b[2]))
-        q.drawLine(QPointF(a[0], b[2]), QPointF(a[1], b[2]))
-    # feet arch
-    q.setPen(QPen(_qc(line, 220), 2.4 * lw))
-    q.drawArc(QRectF(tx - .06 * Ht, by - .11 * Ht, .12 * Ht, .20 * Ht), 0, 180 * 16)
-    # decks
-    q.setPen(Qt.PenStyle.NoPen)
-    for t, mult, hgt in ((.45, 2.5, .030), (.75, 3.4, .016)):
-        w = hw(t) * mult
-        y = by - t * Ht
-        q.setBrush(_qc(deck, 255 if not glow else 230))
-        q.drawRect(QRectF(tx - w, y - hgt * Ht * .5, w * 2, hgt * Ht))
-        q.setBrush(_qc(line, 255))
-        q.drawRect(QRectF(tx - w * .8, y + hgt * Ht * .5, w * 1.6, hgt * Ht * .35))
-    # antenna with red/white bands
-    y0, y1 = by - .75 * Ht, by - Ht
-    seg = 9
-    for i in range(seg):
-        a = y0 + (y1 - y0) * i / seg
-        b = y0 + (y1 - y0) * (i + 1) / seg
-        q.setBrush(_qc("#ff4a3a" if i % 2 == 0 else "#fff2e0", 255))
-        q.drawRect(QRectF(tx - 1.6 * lw - (1 - i / seg) * 1.4, b, 3.2 * lw + (1 - i / seg) * 2.8, a - b))
-
-
-def _deco_skyline(p, col):
-    """Night Tokyo: lit Tokyo Tower, layered towers with lit floors, neon and light trails."""
-    W, H = ART_W, ART_H
-    rng = random.Random(4)
-    tx, by, Ht = W * .76, H * .985, H * .72
-    # tower glow + sharp
-    _bloom(p, lambda q: _tokyo_tower(q, tx, by, Ht, "#ff7a3a", "#ffd7a0", 3.0, True), 5, .75)
-    _bloom(p, lambda q: _tokyo_tower(q, tx, by, Ht, "#ff7a3a", "#ffd7a0", 5.0, True), 14, .85)
-    _tokyo_tower(p, tx, by, Ht, "#ff8a45", "#ffe2b0", 1.0)
-    lights = []
-    layers = ((.30, 170, 40, 100, .07, "#241a52", "#150f33", .0),
-              (.20, 235, 46, 118, .15, "#120b2c", "#080418", .0),
-              (.115, 252, 56, 140, .10, "#080412", "#04020a", .0))
-    for li, (hmax, alpha, wmin, wmax, lit, c_top, c_bot, _) in enumerate(layers):
-        x = -30
-        while x < W:
-            w = rng.uniform(wmin, wmax)
-            h = rng.uniform(.35, 1.0) * hmax * H
-            if abs(x + w / 2 - tx) < 230:                  # keep the tower's legs visible
-                h = min(h, .085 * H * (li + 1) / 2)
-            top = H - h
-            g = QLinearGradient(0, top, 0, H)
-            g.setColorAt(0, _qc(c_top, alpha)); g.setColorAt(1, _qc(c_bot, alpha))
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QBrush(g))
-            p.drawRect(QRectF(x, top, w, h))
-            if rng.random() < .35:                       # stepped roof
-                sw = w * rng.uniform(.4, .7)
-                sh = rng.uniform(14, 40)
-                p.drawRect(QRectF(x + (w - sw) / 2, top - sh, sw, sh))
-                top -= sh
-            if rng.random() < .30 and li < 2:            # aviation light
-                lights.append((x + w / 2 - 2, top - 8, 4, 4, "#ff3b3b", 230))
-                p.setBrush(_qc("#10081e", alpha))
-                p.drawRect(QRectF(x + w / 2 - 1, top - 14, 2, 14))
-            p.setPen(QPen(_qc("#9a8cff", 26 + li * 6), 1))
-            p.drawLine(QPointF(x, top), QPointF(x, H))   # lit left edge
-            p.setPen(Qt.PenStyle.NoPen)
-            wy = top + 9
-            while wy < H - 12:
-                if rng.random() < lit * 2.6:             # a lit floor
-                    wx = x + 7
-                    base = rng.choice((col, "#ffd9a0", "#ffb36b", "#ff7ab8"))
-                    while wx < x + w - 9:
-                        if rng.random() < .72:
-                            lights.append((wx, wy, 3.2, 4.2, base, rng.uniform(80, 215)))
-                        wx += 8.5
-                wy += 11.5
-            if rng.random() < .11 and li == 1:           # neon sign strip
-                nc = rng.choice(("#ff3d9a", "#33e0ff", "#b66bff"))
-                lights.append((x + w - 9, top + 24, 4, rng.uniform(40, 90), nc, 235))
-            x += w + rng.uniform(-8, 3)
-    # road light trails
-    for i in range(46):
-        y = H * (.965 + .03 * rng.random())
-        x0 = rng.uniform(0, W)
-        ln = rng.uniform(40, 220)
-        c = "#ff4a4a" if i % 2 else "#fff0d0"
-        lights.append((x0, y, ln, 1.8, c, rng.uniform(90, 200)))
-
-    def draw_lights(q):
-        q.setPen(Qt.PenStyle.NoPen)
-        for lx, ly, lw_, lh, lc, la in lights:
-            q.setBrush(_qc(lc, la))
-            q.drawRect(QRectF(lx, ly, lw_, lh))
-    draw_lights(p)
-    _bloom(p, draw_lights, 4, .55)
-    _bloom(p, draw_lights, 12, .65)
-
-
-def _deco_fuji(p, col):
-    """Moonlit Mt. Fuji: concave cone, gullied snowcap, lens cloud, pines and a mirror lake."""
-    W, H = ART_W, ART_H
-    rng = random.Random(6)
-    hy = H * .86
-    cx, peak, half = W * .46, H * .47, W * .64
-    for _ in range(110):
-        r = rng.uniform(.5, 1.5)
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(_qc("#ffffff", rng.uniform(40, 200)))
-        p.drawEllipse(QPointF(rng.uniform(0, W), rng.uniform(0, H * .5)), r, r)
-    mx, my = W * .86, H * .16
-    for r, a in ((340, 55), (150, 70)):
-        g = QRadialGradient(QPointF(mx, my), r)
-        g.setColorAt(0, _qc(col, a)); g.setColorAt(1, _qc(col, 0))
-        p.setBrush(QBrush(g)); p.drawEllipse(QPointF(mx, my), r, r)
-    p.setBrush(_qc("#fff7e2", 235)); p.drawEllipse(QPointF(mx, my), 30, 30)
-    _soft_ellipse(p, cx, hy, 900, 190, "#ff8fb0", 85)           # dusk glow behind the mountain
-
-    def prof(x):
-        d = abs(x - cx) / half
-        y = peak + (hy - peak) * (d ** .74)
-        y += 7 * math.sin(x / 41.0) * d + 3 * math.sin(x / 13.0) * d
-        if abs(x - cx) < 44:
-            y += 7 * (1 - ((x - cx) / 44) ** 2)
-        return y
-    xs = list(range(int(cx - half), int(cx + half) + 1, 5))
-    edge = [(x, prof(x)) for x in xs]
-    mount = QPolygonF([QPointF(xs[0], hy)] + [QPointF(x, y) for x, y in edge] + [QPointF(xs[-1], hy)])
-    mg = QLinearGradient(0, peak, 0, hy)
-    mg.setColorAt(0, _qc("#6b7bb5", 255)); mg.setColorAt(.5, _qc("#2d3870", 255)); mg.setColorAt(1, _qc("#141838", 255))
-    p.setBrush(QBrush(mg)); p.drawPolygon(mount)
-    clip = QPainterPath(); clip.addPolygon(mount)
-    p.save(); p.setClipPath(clip)
-    lg = QLinearGradient(cx - half, 0, cx + half, 0)          # moonlit right flank, shaded left flank
-    lg.setColorAt(0, _qc("#05071a", 120)); lg.setColorAt(.5, _qc("#05071a", 0)); lg.setColorAt(1, _qc("#c8d6ff", 60))
-    p.fillRect(QRectF(0, peak, W, hy - peak), QBrush(lg))
-    p.setBrush(Qt.BrushStyle.NoBrush)
-    for k in range(-7, 8):                                      # a few irregular ravines
-        if rng.random() < .35:
-            continue
-        sx = cx + k * 11 + rng.uniform(-6, 6)
-        ex = cx + k / 7.0 * half * rng.uniform(.72, .98)
-        pth = QPainterPath(QPointF(sx, peak + 40))
-        pth.cubicTo(QPointF(sx + (ex - sx) * .05, peak + 150), QPointF(sx + (ex - sx) * .5, hy - 130), QPointF(ex, hy))
-        p.setPen(QPen(_qc("#070a22", rng.randint(22, 48)), rng.uniform(3, 9)))
-        p.drawPath(pth)
-    top = [(x, y) for x, y in edge if y < peak + 160]
-    low = []
-    for x, y in reversed(top):
-        taper = max(0.0, 1 - (y - peak) / 160.0)
-        f = 30 + 34 * abs(math.sin(x / 10.7) * math.sin(x / 3.9 + 1)) + 8 * math.sin(x / 6.0)
-        low.append(QPointF(x, y + f * taper))
-    sg = QLinearGradient(cx - 200, 0, cx + 200, 0)
-    sg.setColorAt(0, _qc("#b9c6ee", 215)); sg.setColorAt(1, _qc("#f8faff", 245))
-    p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(QBrush(sg))
-    p.drawPolygon(QPolygonF([QPointF(x, y) for x, y in top] + low))
-    p.restore()
-    _soft_ellipse(p, cx + 40, peak + 78, 300, 17, "#eef2ff", 150)    # lens cloud
-    _soft_ellipse(p, cx - 120, peak + 112, 190, 10, "#eef2ff", 95)
-    # lake + mirrored mountain
-    lake = QLinearGradient(0, hy, 0, H)
-    lake.setColorAt(0, _qc("#1b2250", 250)); lake.setColorAt(1, _qc("#04061a", 255))
-    p.fillRect(QRectF(0, hy, W, H - hy), QBrush(lake))
-    p.save()
-    p.setClipRect(QRectF(0, hy, W, H - hy))
-    p.translate(0, 2 * hy); p.scale(1, -1)
-    p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(_qc("#5566ae", 125)); p.drawPolygon(mount)
-    p.setBrush(_qc("#e8eeff", 60)); p.drawPolygon(QPolygonF([QPointF(x, y) for x, y in top] + low))
-    p.restore()
-    for _ in range(70):
-        y = rng.uniform(hy + 4, H)
-        x = rng.uniform(0, W)
-        p.setPen(QPen(_qc("#0a0e30" if rng.random() < .6 else "#9db0ff", rng.randint(14, 40)), 1.4))
-        p.drawLine(QPointF(x, y), QPointF(x + rng.uniform(40, 200), y))
-    for i in range(14):
-        y = hy + 10 + i * 14
-        half_w = 14 + i * 3
-        p.setPen(QPen(_qc("#fff0d0", max(10, 110 - i * 8)), 1.6))
-        p.drawLine(QPointF(mx - half_w, y), QPointF(mx + half_w, y))
-    # pine shore
-    p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(_qc("#050716", 252))
-    x = -20
-    while x < W + 20:
-        h = rng.uniform(24, 70)
-        w = h * .42
-        p.drawPolygon(QPolygonF([QPointF(x - w, hy + 6), QPointF(x, hy + 6 - h), QPointF(x + w, hy + 6)]))
-        x += rng.uniform(10, 26)
-    p.drawRect(QRectF(0, hy, W, 6))
-    for yc, h, a in ((.84, 90, 70), (.74, 150, 32)):         # mist
-        mg2 = QLinearGradient(0, H * yc - h / 2, 0, H * yc + h / 2)
-        mg2.setColorAt(0, _qc("#aebcff", 0)); mg2.setColorAt(.5, _qc("#aebcff", a)); mg2.setColorAt(1, _qc("#aebcff", 0))
-        p.fillRect(QRectF(0, H * yc - h / 2, W, h), QBrush(mg2))
-
-
-def _deco_aurora(p, col):
-    """Aurora curtains made of thin vertical rays (bright hem, fading upward) + stars."""
-    W, H = ART_W, ART_H
-    rng = random.Random(2)
-    p.setPen(Qt.PenStyle.NoPen)
-    for _ in range(150):
-        r = rng.uniform(.5, 1.5)
-        p.setBrush(_qc("#ffffff", rng.uniform(40, 200)))
-        p.drawEllipse(QPointF(rng.uniform(0, W), rng.uniform(0, H * .55)), r, r)
-
-    def curtain(q, y0, amp, f, ph, hgt, c1, c2, gain, step=3):
-        for x in range(0, W + step, step):
-            yb = y0 + amp * math.sin(x / W * f * 6.283 + ph) + amp * .45 * math.sin(x / W * f * 17 + ph * 2)
-            h = hgt * (.5 + .5 * math.sin(x / W * f * 23 + ph * 3) ** 2)
-            g = QLinearGradient(0, yb - h, 0, yb)
-            g.setColorAt(0, _qc(c2, 0)); g.setColorAt(.65, _qc(c2, gain * .45))
-            g.setColorAt(.94, _qc(c1, gain)); g.setColorAt(1, _qc(c1, 0))
-            q.fillRect(QRectF(x, yb - h, step + 1, h), QBrush(g))
-    for y0, amp, f, ph, hgt, c1, c2, gain in ((H * .30, 55, 1.1, .8, 270, col, "#7a6bff", 150),
-                                               (H * .22, 40, 1.6, 2.6, 190, "#5ac8ff", "#8a7bff", 100)):
-        _bloom(p, lambda q: curtain(q, y0, amp, f, ph, hgt, c1, c2, gain), 3, .55)
-        _bloom(p, lambda q: curtain(q, y0, amp, f, ph, hgt, c1, c2, gain), 11, .45)
-
-
-def _deco_peaks(p, col):
-    """Long, smooth mountain ranges fading into fog, a pine edge, and a still fjord."""
-    W, H = ART_W, ART_H
-    hy = H * .90
-    rng = random.Random(12)
-    layers = ((.70, 120, "#1f4259", 232, 21), (.77, 105, "#173448", 238, 22),
-              (.83, 85, "#0f2636", 244, 23), (.895, 55, "#07141d", 252, 24))
-    fog = "#4f8aa8"
-    built = []
-    for base, amp, c_top, alpha, seed in layers:
-        r = random.Random(seed)
-        ph = [r.uniform(0, 6.3) for _ in range(3)]
-        pts = []
-        for x in range(-10, W + 11, 4):
-            v = .55 * math.sin(x / 760.0 + ph[0]) + .30 * math.sin(x / 390.0 + ph[1]) + .15 * math.sin(x / 190.0 + ph[2])
-            pts.append((x, min(hy, H * base - amp * v)))
-        built.append((base, amp, c_top, alpha, pts))
-
-    def draw_all(mirror):
-        k = .30 if mirror else 1.0
-        for i, (base, amp, c_top, alpha, pts) in enumerate(built):
-            poly = QPolygonF([QPointF(pts[0][0], hy)] + [QPointF(x, y) for x, y in pts] + [QPointF(pts[-1][0], hy)])
-            top_y = min(y for _x, y in pts)
-            g = QLinearGradient(0, top_y, 0, hy)
-            g.setColorAt(0, _qc(c_top, alpha * k))
-            g.setColorAt(1, _qc(fog if i < 3 else c_top, (alpha * .55 if i < 3 else alpha) * k))
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QBrush(g))
-            p.drawPolygon(poly)
-    draw_all(False)
-    # pine edge on the nearest ridge
-    p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(_qc("#040b11", 252))
-    pts = built[-1][4]
-    i = 0
-    while i < len(pts):
-        x, y = pts[i]
-        h = rng.uniform(16, 44)
-        w = h * .34
-        p.drawPolygon(QPolygonF([QPointF(x - w, y + 6), QPointF(x, y + 6 - h), QPointF(x + w, y + 6)]))
-        i += rng.randint(2, 4)
-    water = QLinearGradient(0, hy, 0, H)
-    water.setColorAt(0, _qc("#0c2a3a", 235)); water.setColorAt(1, _qc("#030c13", 252))
-    p.fillRect(QRectF(0, hy, W, H - hy), QBrush(water))
-    p.save()
-    p.setClipRect(QRectF(0, hy, W, H - hy))
-    p.translate(0, 2 * hy); p.scale(1, -1)
-    draw_all(True)
-    p.restore()
-    for _ in range(50):
-        y = rng.uniform(hy + 3, H)
-        x = rng.uniform(0, W)
-        p.setPen(QPen(_qc("#bfe8ff" if rng.random() < .5 else "#031018", rng.randint(10, 26)), 1.3))
-        p.drawLine(QPointF(x, y), QPointF(x + rng.uniform(60, 260), y))
-    for yc, h, a in ((.80, 110, 40), (.88, 80, 34)):               # drifting fog
-        mg = QLinearGradient(0, H * yc - h / 2, 0, H * yc + h / 2)
-        mg.setColorAt(0, _qc(fog, 0)); mg.setColorAt(.5, _qc(fog, a)); mg.setColorAt(1, _qc(fog, 0))
-        p.fillRect(QRectF(0, H * yc - h / 2, W, h), QBrush(mg))
-
-
-def _deco_rays(p, col):
-    """Soft light shafts drifting through the mist from the upper right.
-    Drawn once through _bloom at two blur radii so the shafts fade into the
-    canopy instead of cutting the hard-edged polygon lines the old version did."""
-    W, H = ART_W, ART_H
-    rng = random.Random(15)
-
-    def draw(q):
-        q.setPen(Qt.PenStyle.NoPen)
-        for i in range(5):
-            x0 = W * (.52 + .08 * i) + rng.uniform(-30, 30)
-            w0 = rng.uniform(24, 56)
-            spread = rng.uniform(100, 190)
-            off = 520 + rng.uniform(-60, 60)
-            poly = QPolygonF([QPointF(x0, -60), QPointF(x0 + w0, -60),
-                              QPointF(x0 + w0 + spread - off, H), QPointF(x0 - off, H)])
-            g = QLinearGradient(0, 0, 0, H * .85)
-            g.setColorAt(0, _qc(col, rng.uniform(32, 52)))
-            g.setColorAt(.55, _qc(col, 13))
-            g.setColorAt(1, _qc(col, 0))
-            q.setBrush(QBrush(g))
-            q.drawPolygon(poly)
-    _bloom(p, draw, 5, .5)
-    _bloom(p, draw, 15, .42)
-
-
-def _pine(p, x, y, h):
-    w = h * .30
-    pts = [QPointF(x, y - h)]
-    tiers = 4
-    for k in range(1, tiers + 1):
-        ty = y - h + h * k / tiers * .96
-        ww = w * (k / tiers) ** .85
-        pts.append(QPointF(x + ww, ty)); pts.append(QPointF(x + ww * .45, ty - h * .035))
-    pts.append(QPointF(x + w * .10, y)); pts.append(QPointF(x - w * .10, y))
-    for k in range(tiers, 0, -1):
-        ty = y - h + h * k / tiers * .96
-        ww = w * (k / tiers) ** .85
-        pts.append(QPointF(x - ww * .45, ty - h * .035)); pts.append(QPointF(x - ww, ty))
-    p.drawPolygon(QPolygonF(pts))
-
-
-def _deco_woods(p, col):
-    """Three depths of pine forest separated by drifting mist; the near trees frame the sides."""
-    W, H = ART_W, ART_H
-    rng = random.Random(33)
-    p.setPen(Qt.PenStyle.NoPen)
-    for base, hmin, hmax, c, a, edge_only in ((.74, 70, 150, "#143a33", 150, False), (.85, 110, 230, "#0a251f", 210, False),
-                                              (.98, 220, 430, "#03100d", 252, True)):
-        by = H * base
-        p.setBrush(_qc(c, a))
-        x = -30
-        while x < W + 30:
-            near_edge = x < W * .20 or x > W * .76
-            if edge_only and not near_edge:
-                x += rng.uniform(40, 90)
-                continue
-            h = rng.uniform(hmin, hmax) * (1.0 if not edge_only else (1.15 if x < W * .20 else .95))
-            _pine(p, x, by + rng.uniform(-8, 8), h)
-            x += rng.uniform(14, 34) * (hmax / 150 if edge_only else 1.0) * .6
-        p.fillRect(QRectF(0, by, W, H - by), _qc(c, a))
-        mist = QLinearGradient(0, by - 150, 0, by + 20)
-        mist.setColorAt(0, _qc(col, 0)); mist.setColorAt(.7, _qc(col, 30 if not edge_only else 14)); mist.setColorAt(1, _qc(col, 0))
-        p.fillRect(QRectF(0, by - 150, W, 170), QBrush(mist))
-
-
-def _deco_fireflies(p, col):
-    rng = random.Random(77)
-    dots = [(rng.uniform(W_ * .05, W_ * .95), rng.uniform(H_ * .45, H_ * .93), rng.uniform(1.2, 2.6), rng.uniform(150, 255))
-            for W_, H_ in [(ART_W, ART_H)] for _ in range(46)]
-
-    def draw(q):
-        q.setPen(Qt.PenStyle.NoPen)
-        for x, y, r, a in dots:
-            q.setBrush(_qc(col, a))
-            q.drawEllipse(QPointF(x, y), r * 2.2, r * 2.2)
-    _bloom(p, draw, 3, .85)
-    _bloom(p, draw, 9, .8)
-    p.setPen(Qt.PenStyle.NoPen)
-    for x, y, r, a in dots:
-        p.setBrush(_qc("#f4ffc8", a))
-        p.drawEllipse(QPointF(x, y), r * .8, r * .8)
-
-
-def _deco_marble(p, col):
-    """Black marble with flowing, tapering gold veins (luxury lobby feel)."""
-    W, H = ART_W, ART_H
-    rng = random.Random(21)
-    p.setPen(Qt.PenStyle.NoPen)
-    for i in range(26):                                          # cloudy mottling
-        x, y, r = rng.uniform(0, W), rng.uniform(0, H), rng.uniform(200, 520)
-        g = QRadialGradient(QPointF(x, y), r)
-        c = "#ffffff" if i % 3 else "#d4af6a"
-        g.setColorAt(0, _qc(c, rng.uniform(10, 24))); g.setColorAt(1, _qc(c, 0))
-        p.fillRect(QRectF(0, 0, W, H), QBrush(g))
-    veins = []
-
-    def grow(x, y, ang, n, w, depth):
-        pts, off, vel = [(x, y)], 0.0, 0.0
-        for _ in range(n):
-            vel = vel * .90 - off * .028 + rng.uniform(-.05, .05)   # springs back toward the main direction
-            off += vel
-            a_ = ang + off
-            st = rng.uniform(7, 11)
-            x += math.cos(a_) * st
-            y += math.sin(a_) * st
-            pts.append((x, y))
-            if depth < 2 and rng.random() < .022:
-                grow(x, y, a_ + rng.choice((-1, 1)) * rng.uniform(.35, .7), int(n * rng.uniform(.25, .45)), w * .6, depth + 1)
-        veins.append((pts, w, depth))
-    for sx, sy, a, n, w in ((-20, H * .86, -.55, 230, 3.0), (W + 20, H * .16, 2.65, 210, 2.6),
-                            (W * .62, H + 20, -1.75, 120, 2.0), (W * .10, -20, 1.2, 90, 1.6)):
-        grow(sx, sy, a, n, w, 0)
-    p.setBrush(Qt.BrushStyle.NoBrush)
-
-    def stroke(chunk, pw, al, c):
-        pen = QPen(_qc(c, al), pw)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap); pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        p.setPen(pen)
-        path = QPainterPath(QPointF(*chunk[0]))
-        for q in chunk[1:]:
-            path.lineTo(QPointF(*q))
-        p.drawPath(path)
-    for pts, w, depth in veins:
-        n = len(pts)
-        for i in range(0, n - 1, 5):
-            chunk = pts[i:i + 6]
-            t = (i + 3) / max(1, n)
-            ww = w * (.25 + .75 * math.sin(math.pi * min(1.0, t)) ** .7)
-            ww *= .55
-            stroke(chunk, ww * 9, 7, col)
-            stroke(chunk, ww * 4, 16, col)
-            stroke(chunk, ww, 105, "#e3c98a")
-            stroke(chunk, ww * .35, 80, "#fff0c8")
-        if depth == 0:                                           # hairline echoes beside main veins
-            for off in (-10, 15):
-                shifted = []
-                for k in range(1, n - 1):
-                    dx, dy = pts[k + 1][0] - pts[k - 1][0], pts[k + 1][1] - pts[k - 1][1]
-                    ln = math.hypot(dx, dy) or 1
-                    shifted.append((pts[k][0] - dy / ln * (off + 4 * math.sin(k / 6.0)), pts[k][1] + dx / ln * (off + 4 * math.sin(k / 6.0))))
-                for i in range(0, len(shifted) - 1, 5):
-                    stroke(shifted[i:i + 6], .7, 34, "#e8cc88")
-    p.setPen(Qt.PenStyle.NoPen)
-    for pts, w, depth in veins:                                  # gold dust
-        for q in pts[::10]:
-            r = rng.uniform(.6, 1.7)
-            p.setBrush(_qc("#ffe6a8", rng.uniform(30, 100)))
-            p.drawEllipse(QPointF(q[0] + rng.uniform(-16, 16), q[1] + rng.uniform(-16, 16)), r, r)
-
-
-def _deco_torii(p, col):
-    """A vermilion torii gate in the corner, fading into the ground."""
-    W, H = ART_W, ART_H
-    p.setPen(Qt.PenStyle.NoPen)
-    for x0 in (W * .74, W * .88):
-        g = QLinearGradient(0, H * .60, 0, H)
-        g.setColorAt(0, _qc(col, 190)); g.setColorAt(1, _qc(col, 30))
-        p.setBrush(QBrush(g)); p.drawRect(QRectF(x0 - 13, H * .60, 26, H * .40))
-    g = QLinearGradient(0, H * .56, 0, H * .62)
-    g.setColorAt(0, _qc(col, 215)); g.setColorAt(1, _qc(col, 150))
-    p.setBrush(QBrush(g))
-    p.drawPolygon(QPolygonF([QPointF(W * .70, H * .585), QPointF(W * .715, H * .555), QPointF(W * .905, H * .555),
-                             QPointF(W * .92, H * .585), QPointF(W * .905, H * .60), QPointF(W * .715, H * .60)]))
-    p.setBrush(_qc(col, 170)); p.drawRect(QRectF(W * .715, H * .655, W * .19, 20))
-    p.setBrush(_qc(col, 140)); p.drawRect(QRectF(W * .805, H * .60, 18, H * .055))
-    gl = QRadialGradient(QPointF(W * .81, H * .72), 330)
-    gl.setColorAt(0, _qc(col, 60)); gl.setColorAt(1, _qc(col, 0))
-    p.setBrush(QBrush(gl)); p.drawEllipse(QPointF(W * .81, H * .72), 330, 330)
-
-
-def _silk_ribbons(p, col, seed, alpha, n):
-    """Soft translucent satin ribbons sweeping across the canvas."""
-    rng = random.Random(seed)
-    p.setPen(Qt.PenStyle.NoPen)
-    for i in range(n):
-        y0 = ART_H * rng.uniform(.05, .95)
-        amp = rng.uniform(90, 230)
-        ph = rng.uniform(0, 6.28)
-        k = rng.uniform(.0016, .0030)
-        wid = rng.uniform(70, 170)
-        top, bot = [], []
-        for x in range(-20, ART_W + 41, 20):
-            c = y0 + amp * math.sin(x * k + ph) + (x - ART_W / 2) * rng.uniform(-.10, .10)
-            w = wid * (.55 + .45 * math.sin(x * k * 1.6 + ph * 1.7))
-            top.append(QPointF(x, c - w / 2))
-            bot.append(QPointF(x, c + w / 2))
-        poly = QPolygonF(top + bot[::-1])
-        g = QLinearGradient(0, 0, ART_W, 0)
-        g.setColorAt(0, _qc(col, 0)); g.setColorAt(.35, _qc(col, alpha)); g.setColorAt(.7, _qc(col, alpha * .5)); g.setColorAt(1, _qc(col, 0))
-        p.setBrush(QBrush(g))
-        p.drawPolygon(poly)
-
-
-def _deco_silk(p, col):
-    _silk_ribbons(p, col, 11, 38, 5)
-
-
-def _deco_silk2(p, col):
-    _silk_ribbons(p, col, 29, 40, 3)
-
-
-_DECOS = {"silk": _deco_silk, "silk2": _deco_silk2, "waves": _deco_waves, "ridges": _deco_ridges, "petals": _deco_petals,
-          "bokeh": _deco_bokeh, "vinyl": _deco_vinyl, "beams": _deco_beams,
-          "sunset": _deco_sunset, "skyline": _deco_skyline, "fuji": _deco_fuji, "torii": _deco_torii,
-          "aurora": _deco_aurora, "peaks": _deco_peaks, "marble": _deco_marble,
-          "rays": _deco_rays, "woods": _deco_woods, "fireflies": _deco_fireflies}
-
-
-def _grain(p, strength=11):
-    """Fine film grain: removes gradient banding and gives a printed-paper texture."""
-    tile = QImage(256, 256, QImage.Format.Format_ARGB32)
-    rng = random.Random(1)
-    for y in range(256):
-        for x in range(256):
-            v = rng.randint(0, 255)
-            tile.setPixelColor(x, y, QColor(v, v, v, rng.randint(0, strength)))
-    p.drawTiledPixmap(QRectF(0, 0, ART_W, ART_H).toRect(), QPixmap.fromImage(tile))
-
-
-def _art_mesh(pal, spec):
-    img, p = _canvas()
-    b = spec["base"]
-    if spec.get("diag"):
-        g = QLinearGradient(0, 0, ART_W, ART_H)
-        for pos, col in ((0, b[0]), (.5, b[1]), (1, b[2])):
-            g.setColorAt(pos, QColor(col))
-        p.fillRect(img.rect(), QBrush(g))
-    else:
-        p.fillRect(img.rect(), _vgrad([(0, b[0]), (.5, b[1]), (1, b[2])]))
-    for x, y, r, col, a in spec["orbs"]:
-        _orb(p, x, y, r, col, a)
-    for name, dcol in (spec.get("decos") or [(spec.get("deco"), spec.get("deco_color"))]):
-        fn = _DECOS.get(name)
-        if fn:
-            fn(p, dcol)
-    # a thin bright rim of light along the very top edge
-    g = QLinearGradient(0, 0, ART_W, 0)
-    g.setColorAt(0, _qc("#ffffff", 0)); g.setColorAt(.5, _qc("#ffffff", 16)); g.setColorAt(1, _qc("#ffffff", 0))
-    p.fillRect(QRectF(0, 0, ART_W, 2), QBrush(g))
-    if spec.get("grain", 11):
-        _grain(p, spec.get("grain", 11))
-    return _finish(img, p, spec.get("vignette", 120), spec.get("vcolor", "#000000"))
-
-
-_ARTISTS = {"plain": _art_plain, "mesh": _art_mesh}
-
-
-def get_art(key):
-    key = key if key in THEMES else DEFAULT_THEME
-    if key not in _ART_CACHE:
-        spec = THEMES[key]
-        if spec["art"] == "mesh":
-            _ART_CACHE[key] = _art_mesh(palette_for(key), spec)
-        else:
-            _ART_CACHE[key] = _ARTISTS[spec["art"]](palette_for(key))
-    return _ART_CACHE[key]
-
-
-STYLE = """
-* { font-family: 'Segoe UI', 'Microsoft JhengHei UI', 'Microsoft JhengHei'; color: @TEXT@; font-size: 14px; }
-QMainWindow { background: @BASE@; }
-QWidget { background: transparent; }
-QDialog, QMessageBox { background: @PANEL_S@; }
-QComboBox QFrame { background: @PANEL_S@; }
-QLabel, QCheckBox, QSlider, QWidget#row { background: transparent; }
-QToolTip { background: @RAISED_S@; color: @TEXT@; border: 1px solid @LINE_HI@; padding: 6px 8px; }
-QScrollArea { border: none; background: transparent; }
-
-QScrollBar:vertical { background: transparent; width: 10px; margin: 2px; }
-QScrollBar::handle:vertical { background: @SCROLL@; border-radius: 4px; min-height: 36px; }
-QScrollBar::handle:vertical:hover { background: @SCROLL_HI@; }
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
-QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
-QScrollBar:horizontal { background: transparent; height: 10px; margin: 2px; }
-QScrollBar::handle:horizontal { background: @SCROLL@; border-radius: 4px; min-width: 36px; }
-QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0px; }
-QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: transparent; }
-
-QFrame#nav { background: @PANEL_A@; border: 1px solid @LINE@; border-radius: 20px; }
-QFrame#nowPanel, QFrame#settingsCard { background: @PANEL_A@; border: 1px solid @LINE@; border-radius: 18px; }
-
-QLabel#brand { font-size: 19px; font-weight: 800; color: @HEAD@; }
-QLabel#brandSub { font-size: 11px; color: @FAINT@; }
-QLabel#title { font-size: 28px; font-weight: 700; color: @HEAD@; }
-QLabel#subtitle { color: @MUTED@; }
-QLabel#muted, QLabel#hint { color: @MUTED@; }
-QLabel#hint { font-size: 12px; }
-QLabel#sectionTitle { font-size: 16px; font-weight: 700; color: @HEAD@; }
-QLabel#eyebrow { color: @FAINT@; font-size: 11px; font-weight: 700; }
-QLabel#eyebrowAccent { color: @ACC_TEXT@; font-size: 11px; font-weight: 700; }
-QLabel#nowTitle { font-size: 14px; font-weight: 400; color: @TEXT2@; }
-QLabel#nowPath { font-size: 12px; color: @FAINT@; }
-QLabel#settingLabel { color: @TEXT2@; font-weight: 600; }
-QLabel#valueBadge { color: @TEXT2@; background: @RAISED_HI@; border-radius: 8px; padding: 3px 8px; font-weight: 700; }
-QLabel#tipBar { color: @MUTED@; background: @BASE_A@; border: 1px solid @LINE@; border-radius: 12px; padding: 10px 14px; font-size: 12px; }
-QLabel#privacyNote { color: @OK_FG2@; background: @OK_BG@; border-radius: 12px; padding: 12px; font-size: 12px; }
-QLabel#privacyBanner { color: @OK_FG2@; background: @OK_BG@; border-radius: 12px; padding: 14px; }
-QLabel#statusIdle { color: @OK_FG@; background: @OK_BG@; border: 1px solid @OK_LINE@; border-radius: 14px; padding: 7px 15px; font-weight: 600; }
-QLabel#statusLive { color: @LIVE_FG@; background: @LIVE_BG@; border: 1px solid @LIVE_LINE@; border-radius: 14px; padding: 7px 15px; font-weight: 600; }
-QLabel#statusPaused { color: @WARN_FG@; background: @WARN_BG@; border: 1px solid @WARN_LINE@; border-radius: 14px; padding: 7px 15px; font-weight: 600; }
-QLabel#diagOk { color: @OK_FG@; background: @OK_BG@; border-radius: 12px; padding: 4px 13px; font-weight: 600; }
-QLabel#diagOff { color: @MUTED@; background: @RAISED_S@; border-radius: 12px; padding: 4px 13px; }
-
-QPushButton { background: @RAISED_A@; border: 1px solid @LINE_HI@; border-radius: 10px; padding: 10px 16px; font-weight: 600; color: @BTN_TEXT@; }
-QPushButton:hover { background: @RAISED_HI_A@; border-color: @FOCUS@; }
-QPushButton:pressed { background: @SEL@; }
-QPushButton:disabled { color: @DISABLED@; background: @PANEL_A@; border-color: @LINE@; }
-QPushButton#navButton { text-align: left; padding: 12px 14px 12px 12px; border: none; border-left: 3px solid transparent; border-radius: 12px; background: transparent; color: @MUTED@; }
-QPushButton#navButton:hover { background: @RAISED_A@; color: @STRONG@; }
-QPushButton#navButton:checked { background: @RAISED_HI_A@; color: @STRONG@; border-left: 3px solid @FOCUS_HI@; }
-QPushButton#primary { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 @ACC_HI@, stop:1 @ACC_LO@); border: 1px solid @ACC_LINE@; color: #ffffff; font-size: 15px; padding: 6px 14px; }
-QPushButton#primary:hover { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 @ACC_HOVER_HI@, stop:1 @ACC_HOVER_LO@); }
-QPushButton#primary:pressed { background: @ACC_LO@; }
-QPushButton#primary:disabled { background: @RAISED_A@; border-color: @LINE@; color: @DISABLED@; }
-QPushButton#danger { background: @DANGER_BG@; border: 1px solid @DANGER_LINE@; color: @DANGER_FG@; font-size: 15px; padding: 6px 14px; }
-QPushButton#danger:hover { background: @DANGER_HOVER@; border-color: @DANGER_HOVER_LINE@; }
-QPushButton#danger:pressed { background: @DANGER_PRESSED@; }
-QPushButton#hotkeyEdit { background: @BASE_A@; border: 1px solid @LINE_HI@; border-bottom: 3px solid @LINE_HI@; border-radius: 9px; padding: 8px 12px; }
-QPushButton#hotkeyEdit:hover { border-color: @FOCUS@; }
-
-QListWidget#trackList { background: @PANEL_A@; border: 1px solid @LINE@; border-radius: 16px; padding: 8px; outline: none; }
-QListWidget#folderList { background: @BASE_A@; border: 1px solid @LINE_HI@; border-radius: 10px; padding: 4px; outline: none; }
-QListWidget::item { border-radius: 9px; padding: 11px 12px; margin: 1px 2px; color: @TEXT2@; }
-QListWidget::item:selected { background: @SEL@; color: @STRONG@; }
-QListWidget::item:hover:!selected { background: @RAISED_A@; }
-
-QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox { background: @BASE_A@; border: 1px solid @LINE_HI@; border-radius: 10px; padding: 9px 12px; min-height: 20px; selection-background-color: @SEL_LINE@; }
-QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus { border-color: @FOCUS_HI@; }
-QComboBox::drop-down { border: none; width: 34px; background: transparent; }
-QComboBox::down-arrow { image: url(__CHEVRON__); width: 12px; height: 8px; }
-QComboBox QAbstractItemView { background: @PANEL_S@; border: 1px solid @LINE_HI@; selection-background-color: @SEL@; outline: none; padding: 4px; }
-
-QCheckBox { spacing: 10px; padding: 4px 0; }
-QCheckBox::indicator { width: 18px; height: 18px; border-radius: 6px; border: 1px solid @LINE_HI@; background: @BASE_A@; }
-QCheckBox::indicator:hover { border-color: @FOCUS@; }
-QCheckBox::indicator:checked { background: @FOCUS@; border-color: @FOCUS@; image: url(__TICK__); }
-
-QSlider::groove:horizontal { background: @SEL@; height: 6px; border-radius: 3px; }
-QSlider::sub-page:horizontal { background: @FOCUS@; border-radius: 3px; }
-QSlider::handle:horizontal { background: #ffffff; border: 3px solid @FOCUS@; width: 12px; height: 12px; margin: -6px 0; border-radius: 9px; }
-QSlider::handle:horizontal:hover { border-color: @FOCUS_HI@; }
-
-QFrame#nowCard { background: @RAISED_A@; border: 1px solid @ACC_BORDER@; border-radius: 14px; }
-QLabel#cardTitle { font-size: 17px; font-weight: 700; color: @STRONG@; }
-QSlider#cardSeek::groove:horizontal { background: @SEL@; height: 4px; border-radius: 2px; }
-QSlider#cardSeek::sub-page:horizontal { background: @ACC_BAR@; border-radius: 2px; }
-QSlider#cardSeek[paused="true"]::sub-page:horizontal { background: #f5c26b; }
-QSlider#cardSeek::handle:horizontal { background: #ffffff; border: none; width: 10px; height: 10px; margin: -3px 0; border-radius: 5px; }
-QPushButton#segL, QPushButton#segM, QPushButton#segR { background: @BASE_A@; border: 1px solid @LINE@; color: @MUTED@; padding: 9px 18px; border-radius: 0; font-weight: 600; }
-QPushButton#segL { border-top-left-radius: 10px; border-bottom-left-radius: 10px; }
-QPushButton#segM { border-left: none; }
-QPushButton#segR { border-top-right-radius: 10px; border-bottom-right-radius: 10px; border-left: none; }
-QPushButton#segL:hover, QPushButton#segM:hover, QPushButton#segR:hover { background: @RAISED_A@; color: @STRONG@; }
-QPushButton#segL:checked, QPushButton#segM:checked, QPushButton#segR:checked { background: @SEL@; border-color: @SEL_LINE@; color: @STRONG@; }
-QPushButton#chip { background: @BASE_A@; border: 1px solid @LINE@; color: @MUTED@; padding: 0 15px; border-radius: 15px; font-weight: 600; font-size: 12px; }
-QPushButton#chip:hover { background: @RAISED_A@; color: @STRONG@; }
-QPushButton#chip:checked { background: @SEL@; border-color: @SEL_LINE@; color: @STRONG@; }
-QPushButton#chip:disabled { color: @DISABLED@; background: @PANEL_A@; }
-QPushButton#pauseBtn { background: @PAUSE_BG@; border: 1px solid @PAUSE_LINE@; color: @PAUSE_FG@; font-size: 15px; padding: 6px 10px; }
-QPushButton#pauseBtn:hover { background: @PAUSE_HOVER@; border-color: @PAUSE_HOVER_LINE@; }
-QPushButton#pauseBtn:disabled { color: @DISABLED@; background: @PANEL_A@; border-color: @LINE@; }
-QPushButton#pauseBtn[resume="true"] { background: #f5c26b; border-color: #f5c26b; color: #1a1405; }
-QPushButton#pauseBtn[resume="true"]:hover { background: #ffd283; }
-QPushButton#ghost { background: transparent; border: 1px solid @LINE_HI@; color: @MUTED@; font-size: 12px; padding: 6px 14px; }
-QPushButton#ghost:hover { background: @RAISED_A@; color: @STRONG@; }
-QPushButton#ghost:disabled { color: @DISABLED@; border-color: @LINE@; }
-QLabel#emptyState { color: @MUTED@; background: @PANEL_A@; border: 1px dashed @LINE_HI@; border-radius: 16px; padding: 28px; }
-QMenu { background: @PANEL_S@; border: 1px solid @LINE_HI@; border-radius: 12px; padding: 6px; }
-QMenu::item { padding: 9px 26px 9px 14px; border-radius: 8px; color: @BTN_TEXT@; }
-QMenu::item:selected { background: @SEL@; color: @STRONG@; }
-QMenu::item:disabled { color: @DISABLED@; }
-QMenu::separator { height: 1px; background: @LINE@; margin: 6px 8px; }
+"""
+app.py - FinNews AI v3.0
+讀 GitHub Actions 產生的 news.json · 行情條 · 頭條大圖 · 卡片網格 · 英文標題中譯
 """
 
+import html as _html
+import json
+import logging
+import os
+import re
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 
-def build_stylesheet():
-    """STYLE plus two tiny generated images (combo-box arrow, checkbox tick)."""
-    import tempfile
-    sheet = STYLE
-    for key in sorted(T, key=len, reverse=True):
-        sheet = sheet.replace(f"@{key}@", T[key])
+import pandas as pd
+import requests
+import streamlit as st
+
+ROOT = os.path.dirname(os.path.abspath(__file__))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+
+from database import (init_db, SessionLocal, get_articles_df,
+                      get_sector_counts, get_ticker_counts, import_json, TZ_TW)
+from scheduler import crawl_and_save
+from crawler import SOURCES, is_routine_revenue
+
+esc = _html.escape
+
+
+# ─────────────────────────────────────────────
+# 小工具
+# ─────────────────────────────────────────────
+def _secret(name: str, default: str = "") -> str:
     try:
-        folder = Path(tempfile.gettempdir()) / "EchoDeck_ui"
-        folder.mkdir(parents=True, exist_ok=True)
-        chevron = QPixmap(24, 16)
-        chevron.fill(Qt.GlobalColor.transparent)
-        tick = QPixmap(36, 36)
-        tick.fill(Qt.GlobalColor.transparent)
-        for pix, color, width, points in (
-            (chevron, T.get("CHEVRON", "#a3a8c3"), 3.2, [(4, 4), (12, 12), (20, 4)]),
-            (tick, "#ffffff", 5.0, [(9, 19), (15, 26), (27, 11)]),
-        ):
-            painter = QPainter(pix)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            pen = QPen(QColor(color), width)
-            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-            painter.setPen(pen)
-            path = QPainterPath(QPointF(*points[0]))
-            for point in points[1:]:
-                path.lineTo(QPointF(*point))
-            painter.drawPath(path)
-            painter.end()
-        chevron_path, tick_path = folder / "chevron.png", folder / "tick.png"
-        if not (chevron.save(str(chevron_path)) and tick.save(str(tick_path))):
-            raise OSError("could not write UI images")
-        sheet = sheet.replace("__CHEVRON__", chevron_path.as_posix()).replace("__TICK__", tick_path.as_posix())
+        v = st.secrets.get(name, "")
+        if v:
+            return str(v)
     except Exception:
-        sheet = sheet.replace("url(__CHEVRON__)", "none").replace("url(__TICK__)", "none")
-    return sheet
-
-
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    # Single-instance guard: two EchoDeck processes would both write the
-    # microphone into the virtual cable, and the old one keeps leaking voice.
-    _mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "Local\\EchoDeckSingleInstance")
-    if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
-        QMessageBox.warning(None, APP_NAME,
-            "EchoDeck 已經在執行中。\n\n請到工作管理員結束所有 EchoDeck.exe 後再重新開啟，"
-            "否則舊版會繼續把麥克風送進虛擬聲卡。")
-        sys.exit(0)
-    try:
-        set_theme(json.loads(CONFIG_PATH.read_text(encoding="utf-8")).get("theme", DEFAULT_THEME))
-    except (OSError, ValueError, AttributeError):
         pass
-    app.setStyleSheet(build_stylesheet())
-    app.setWindowIcon(make_app_icon())
-    window = EchoDeck()
-    window.show()
-    sys.exit(app.exec())
+    return os.environ.get(name, default)
+
+
+def _h(s: str) -> str:
+    """去掉每行縮排與換行：避免 Streamlit markdown 把縮排 HTML 當成程式碼區塊"""
+    return "".join(line.strip() for line in s.splitlines())
+
+
+def age_hours(dt) -> float:
+    try:
+        return max(0.0, (datetime.now(TZ_TW) - dt.astimezone(TZ_TW)).total_seconds() / 3600)
+    except Exception:
+        return 9999.0
+
+
+def relative_time(dt) -> str:
+    if dt is None:
+        return ""
+    h = age_hours(dt)
+    if h >= 9999:
+        return ""
+    secs = h * 3600
+    if secs < 60:
+        return "剛剛"
+    if secs < 3600:
+        return f"{int(secs // 60)}分鐘前"
+    if secs < 86400:
+        return f"{int(secs // 3600)}小時前"
+    if secs < 86400 * 2:
+        return "昨天"
+    return dt.astimezone(TZ_TW).strftime("%m/%d %H:%M")
+
+
+def recent(df, hours_steps=(12, 24, 48, 72), min_n=8):
+    """先取 12h，不足 min_n 則逐步放寬，絕不回傳空畫面。回傳 (df, 實際小時數)"""
+    if df is None or df.empty:
+        return df, 0
+    ages = df["published_at"].apply(age_hours)
+    for hrs in hours_steps:
+        sub = df[ages <= hrs]
+        if len(sub) >= min_n:
+            return sub, hrs
+    return df[ages <= hours_steps[-1]] if (ages <= hours_steps[-1]).any() else df, hours_steps[-1]
+
+
+def _num(v, d=0.0) -> float:
+    try:
+        f = float(v)
+        return d if f != f else f
+    except Exception:
+        return d
+
+
+# ─────────────────────────────────────────────
+# 頁面設定 + CSS（米色底 #FCF8F0，台灣紅漲綠跌）
+# ─────────────────────────────────────────────
+st.set_page_config(page_title="FinNews AI", page_icon="📈", layout="wide",
+                   initial_sidebar_state="collapsed")
+
+CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap');
+:root{
+  --bg:#FCF8F0; --card:#FFFFFF; --soft:#F5EEDF; --line:#EADFCB;
+  --tx:#2B2418; --tx2:#7A6E5A; --tx3:#A89C86;
+  --up:#C0392B; --up-bg:#FBE9E5; --dn:#1B7A34; --dn-bg:#E4F2E8;
+  --warn:#92400E; --warn-bg:#FFF3D6; --accent:#B8742A;
+}
+html,body,[class*="css"],.stApp{font-family:'Noto Sans TC',sans-serif!important;background:var(--bg)!important;color:var(--tx)!important}
+header[data-testid="stHeader"]{display:none!important}
+section[data-testid="stSidebar"],button[data-testid="collapsedControl"]{display:none!important}
+.main .block-container,[data-testid="stMain"] .block-container{padding-top:8px!important;padding-bottom:30px!important;max-width:1320px!important}
+hr{border-color:var(--line)!important;margin:10px 0!important}
+
+/* topbar */
+.topbar{display:flex;align-items:center;gap:12px;padding:8px 2px;flex-wrap:wrap}
+.logo{font-size:18px;font-weight:700;letter-spacing:.3px}
+.pill{font-size:12px;border-radius:20px;padding:2px 10px;white-space:nowrap}
+.pill-ok{background:var(--dn-bg);color:var(--dn)}
+.pill-warn{background:var(--warn-bg);color:var(--warn)}
+.tmono{font-size:12px;color:var(--tx2);font-family:'JetBrains Mono',monospace}
+
+/* 行情條 */
+.qbar{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:6px 0 12px}
+.q{display:block;text-decoration:none!important;color:inherit!important;transition:box-shadow .15s,border-color .15s;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 12px}
+.q:hover{border-color:var(--accent);box-shadow:0 4px 12px rgba(80,60,20,.12)}
+.q-n{font-size:12px;color:var(--tx2)}
+.q-p{font-size:17px;font-weight:700;font-family:'JetBrains Mono',monospace;line-height:1.3}
+.q-c{font-size:12px;font-family:'JetBrains Mono',monospace;font-weight:600}
+.up{color:var(--up)} .dn{color:var(--dn)} .flat{color:var(--tx3)}
+
+/* 指標 */
+.mrow{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:6px}
+.m{background:var(--soft);border-radius:10px;padding:8px 14px;min-width:96px}
+.m-l{font-size:11px;color:var(--tx2)} .m-v{font-size:19px;font-weight:700}
+/* 快速篩選裡的「大陸」「國際英文」兩個選項特別加大、加框，比其他選項顯眼 */
+div[role="radiogroup"][aria-label="快速篩選"] label:nth-of-type(2),
+div[role="radiogroup"][aria-label="快速篩選"] label:nth-of-type(3){
+  border:2px solid var(--accent)!important;border-radius:14px!important;
+  padding:8px 18px!important;background:var(--soft)!important;
+}
+div[role="radiogroup"][aria-label="快速篩選"] label:nth-of-type(2) p,
+div[role="radiogroup"][aria-label="快速篩選"] label:nth-of-type(3) p{
+  font-size:17px!important;font-weight:700!important;color:var(--accent)!important;
+}
+.sbar{display:flex;height:8px;border-radius:6px;overflow:hidden;margin:6px 0 2px;background:var(--line)}
+.sbar i{display:block;height:100%}
+
+.sec{font-size:13px;font-weight:700;color:var(--tx2);margin:18px 0 8px;display:flex;align-items:center;gap:8px;letter-spacing:.5px}
+.sec::after{content:'';flex:1;height:1px;background:var(--line)}
+
+/* AI 總結 */
+.ai-card{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:0 12px 12px 0;padding:14px 18px}
+.ai-badge{font-size:11px;font-weight:700;color:var(--warn);background:var(--warn-bg);border-radius:4px;padding:2px 8px;display:inline-block;margin-bottom:8px}
+.ai-dir{font-size:16px;font-weight:700}
+.ai-rsn{font-size:12px;color:var(--tx2);margin:2px 0 10px}
+.tag{display:inline-block;border-radius:6px;padding:3px 10px;font-size:12px;font-weight:500;margin:0 6px 6px 0}
+.tag-b{background:var(--up-bg);color:var(--up)} .tag-d{background:var(--dn-bg);color:var(--dn)}
+.chip-t{display:inline-block;background:var(--soft);border-radius:4px;padding:2px 8px;font-size:12px;font-family:'JetBrains Mono',monospace;margin:0 5px 5px 0}
+.ai-body{font-size:14px;line-height:1.8;border-top:1px solid var(--line);padding-top:10px;margin-top:4px}
+.ai-ft{font-size:12px;color:var(--tx3);margin-top:8px}
+
+/* 縮圖（圖片壞掉時，底下的漸層與文字佔位會露出來）*/
+.thumb{position:relative;overflow:hidden;background:linear-gradient(135deg,#E9DFC9,#D8C8A6)}
+.thumb .ph{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:700;color:rgba(255,255,255,.85);letter-spacing:1px;font-family:'JetBrains Mono',monospace}
+.thumb img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+
+/* 頭條區 */
+.hero{display:grid;grid-template-columns:1.6fr 1fr;gap:14px;margin-bottom:6px}
+@media(max-width:820px){.hero{grid-template-columns:1fr}}
+.hero-main{position:relative;display:block;border-radius:14px;overflow:hidden;min-height:330px;text-decoration:none!important}
+.hero-main .thumb{position:absolute;inset:0}
+.hero-ov{position:absolute;left:0;right:0;bottom:0;padding:60px 20px 18px;background:linear-gradient(to top,rgba(20,14,4,.88),rgba(20,14,4,0))}
+.hero-t{font-size:22px;font-weight:700;line-height:1.45;color:#fff!important}
+.hero-o{font-size:12px;color:rgba(255,255,255,.7);margin-top:4px}
+.hero-m{font-size:12px;color:rgba(255,255,255,.8);margin-top:8px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.hero-side{display:flex;flex-direction:column;gap:10px}
+.si{display:flex;gap:10px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:8px;text-decoration:none!important;color:var(--tx)!important;flex:1;align-items:center}
+.si:hover{border-color:var(--accent)}
+.si .thumb{width:96px;height:72px;border-radius:8px;flex-shrink:0}
+.si-t{font-size:13.5px;font-weight:500;line-height:1.45;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.si-m{font-size:11px;color:var(--tx3);margin-top:3px}
+
+/* 卡片網格 */
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden;display:flex;flex-direction:column;transition:box-shadow .15s,transform .15s}
+.card{box-shadow:0 1px 3px rgba(80,60,20,.06)}
+.card:hover{box-shadow:0 8px 22px rgba(80,60,20,.14);transform:translateY(-2px)}
+.card .thumb{height:150px;display:block}
+.card>a{text-decoration:none!important}
+.strip{height:30px;display:flex;align-items:center;padding:0 13px;font-size:11.5px;font-weight:700;color:rgba(255,255,255,.95);letter-spacing:.5px}
+.grid{align-items:start}
+.card.read,.si.read{opacity:.55;transition:opacity .15s} .card.read:hover,.si.read:hover{opacity:1}
+.ct:visited{color:var(--tx3)!important}
+.fn-reco-wrap{margin-top:6px}
+.fn-reco-chips{font-weight:500;color:var(--accent);margin-left:6px}
+.fn-reco-clear{margin-left:auto;font-size:11.5px;font-weight:500;color:var(--tx3)!important;text-decoration:none!important;cursor:pointer}
+.fn-reco-clear:hover{color:var(--accent)!important}
+.fn-reco-note{font-size:12.5px;color:var(--tx2);margin:-2px 0 8px}
+.fn-reco:empty{display:none}
+.card.reco{border-color:var(--accent)}
+.more{font-size:12px;color:var(--tx2);margin-top:2px}
+.more summary{cursor:pointer;color:var(--accent);font-weight:600;list-style:none}
+.more summary::-webkit-details-marker{display:none}
+.more ul{margin:6px 0 0;padding-left:16px}
+.more li{margin:4px 0;line-height:1.45}
+.more li a{color:var(--tx)!important;text-decoration:none!important}
+.more li a:hover{color:var(--accent)!important}
+.more li span{color:var(--tx3)}
+.seg{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 16px}
+.subhead{font-size:12.5px;color:var(--tx2);margin:2px 0 8px}
+.ph{font-size:20px}
+.card.bull{border-top:3px solid var(--up)} .card.bear{border-top:3px solid var(--dn)}
+.cb{padding:11px 13px 12px;display:flex;flex-direction:column;gap:6px;flex:1}
+.ct{font-size:14.5px;font-weight:700;line-height:1.5;color:var(--tx)!important;text-decoration:none!important;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.ct:hover{color:var(--accent)!important}
+.co{font-size:11.5px;color:var(--tx3);line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.cs{font-size:12.5px;color:var(--tx2);line-height:1.55;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.cm{display:flex;gap:6px;align-items:center;flex-wrap:wrap;font-size:11.5px;color:var(--tx3);margin-top:auto}
+.bd{font-size:11.5px;font-weight:700;border-radius:5px;padding:1px 8px;font-family:'JetBrains Mono',monospace;white-space:nowrap}
+.bd-b{background:var(--up-bg);color:var(--up)} .bd-d{background:var(--dn-bg);color:var(--dn)} .bd-n{background:var(--soft);color:var(--tx3)}
+.bd-g{background:var(--warn-bg);color:var(--warn)}
+.tk{font-size:11px;background:var(--soft);border-radius:4px;padding:1px 6px;font-family:'JetBrains Mono',monospace;color:var(--tx2)}
+.tr{font-size:11.5px;color:var(--accent)!important;text-decoration:none!important}
+.tr:hover{text-decoration:underline!important}
+.fav{margin-left:auto;cursor:pointer;font-size:18px;line-height:1;color:var(--tx3);user-select:none;padding:0 2px}
+.fav:hover{color:var(--accent)}
+.fav.on{color:#E0A020}
+.favc{background:var(--card);border:1px solid var(--line);border-radius:12px;box-shadow:0 1px 3px rgba(80,60,20,.06);display:flex;flex-direction:column}
+.fn-fav:empty{display:none}
+.fn-fav-note{font-size:12.5px;color:var(--tx2);margin:2px 0 10px}
+.fav-clear{cursor:pointer;color:var(--tx3);margin-left:10px;text-decoration:underline}
+.sgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}
+.sg{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:10px;padding:10px 13px}
+.sg-h{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.sg-tk{font-family:'JetBrains Mono',monospace;font-weight:700;font-size:15px}
+.sg-nm{font-size:13px;color:var(--tx2)}
+.sg-x{margin-left:auto;font-family:'JetBrains Mono',monospace;font-weight:700;font-size:15px;color:var(--accent)}
+.sg-m{font-size:11.5px;color:var(--tx3);margin:4px 0 6px}
+.sg-l{margin:0;padding-left:16px;font-size:12.5px;line-height:1.5}
+.sg-l a{color:var(--tx)!important;text-decoration:none!important}
+.sg-l a:hover{color:var(--accent)!important}
+.rkgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}
+.rk{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 13px}
+.rk-h{font-size:12.5px;font-weight:700;color:var(--tx2);margin-bottom:6px}
+.rk-e{font-size:12px;color:var(--tx3)}
+.rk-r{display:flex;align-items:center;gap:8px;font-size:12.5px;margin:4px 0}
+.rk-c{width:46px;font-family:'JetBrains Mono',monospace;font-weight:600;flex-shrink:0}
+.rk-c a{color:var(--tx)!important;text-decoration:none!important}
+.rk-c a:hover{color:var(--accent)!important}
+.rk-n{width:84px;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--tx2)}
+.rk-b{flex:1;background:var(--soft);height:10px;border-radius:5px;overflow:hidden;min-width:30px}
+.rk-b i{display:block;height:100%;border-radius:5px}
+.rk-v{width:70px;text-align:right;font-family:'JetBrains Mono',monospace;font-weight:600;flex-shrink:0}
+.tblw{overflow-x:auto;margin:6px 0}
+.tbl{width:100%;border-collapse:collapse;font-size:12.5px;background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.tbl th{background:var(--soft);color:var(--tx2);font-weight:600;text-align:right;padding:6px 10px;white-space:nowrap}
+.tbl td{padding:6px 10px;border-top:1px solid var(--line);text-align:right;font-family:'JetBrains Mono',monospace}
+.tbl th:first-child,.tbl td:first-child,.tbl td.l{text-align:left}
+.tbl td.l{font-family:inherit}
+.tbl a{color:var(--tx)!important;text-decoration:none!important}
+.parts{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:11.5px;color:var(--tx3);margin:10px 0}
+.cal-d{font-size:13px;margin:14px 0 4px;font-weight:700}
+.cal-d span{font-weight:500;color:var(--tx3);margin-left:8px;font-size:12px}
+.cal-d.today{color:var(--accent)}
+.cal-r{display:flex;gap:10px;align-items:baseline;padding:6px 10px;background:var(--card);border:1px solid var(--line);border-radius:8px;margin:4px 0;font-size:13px;flex-wrap:wrap}
+.cal-t{font-family:'JetBrains Mono',monospace;color:var(--tx3);min-width:42px;font-size:12px}
+.cal-n{font-weight:600}
+.cal-x{color:var(--tx3);font-size:12px}
+.subhead{font-size:12.5px;color:var(--tx2);margin:6px 0 4px}
+.pk{font-size:11px;padding:1px 7px;border-radius:9px;background:var(--soft);color:var(--tx2);white-space:nowrap}
+.post{display:flex;gap:8px;padding:6px 0;border-bottom:1px solid var(--line);font-size:13px;align-items:baseline}
+.post a{color:var(--tx)!important;text-decoration:none!important}
+.post a:hover{color:var(--accent)!important}
+.post .pt{color:var(--tx3);font-size:11.5px;white-space:nowrap;margin-left:auto;padding-left:8px}
+.lg{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+.fn-new:empty{display:none}
+.fn-new{display:flex;align-items:center;gap:10px;background:var(--soft);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:8px;padding:6px 12px;font-size:13px;margin:4px 0 10px}
+.fn-new .tg{margin-left:auto;cursor:pointer;color:var(--accent);font-weight:600;white-space:nowrap}
+.card.new{box-shadow:-3px 0 0 var(--accent)}
+.card.new .ct::before{content:"NEW ";color:var(--accent);font-size:10.5px;font-weight:800;letter-spacing:.5px}
+.fn-dens{display:flex;justify-content:flex-end;gap:4px;margin:2px 0 6px}
+.fn-dens span{cursor:pointer;font-size:12px;padding:3px 10px;border:1px solid var(--line);border-radius:14px;color:var(--tx2);user-select:none;background:var(--card)}
+.fn-dens span.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+html[data-fnjs] .card[data-lz]{display:none}
+body.fn-onlynew .wall .card:not(.new){display:none!important}
+body.fn-onlynew .wall .card.new[data-lz]{display:flex!important}
+.fn-sentinel{height:1px}
+body.fn-compact .grid{grid-template-columns:1fr;gap:0}
+body.fn-compact .card{flex-direction:row;border-radius:0;border-width:0 0 1px 0;box-shadow:none;transform:none!important;align-items:center}
+body.fn-compact .card:hover{box-shadow:none;background:var(--soft)}
+body.fn-compact .card.bull{border-top:0;border-left:3px solid var(--up)}
+body.fn-compact .card.bear{border-top:0;border-left:3px solid var(--dn)}
+body.fn-compact .card>a:first-child{display:none}
+body.fn-compact .cb{flex-direction:row;align-items:center;gap:10px;padding:7px 12px;flex-wrap:nowrap;flex:1;min-width:0}
+body.fn-compact .ct{-webkit-line-clamp:1;flex:1;min-width:0;font-size:14px;font-weight:600}
+body.fn-compact .co,body.fn-compact .cs,body.fn-compact .more{display:none}
+body.fn-compact .cm-a{order:-1;flex-shrink:0;margin-top:0;flex-wrap:nowrap}
+body.fn-compact .cm-a .tk~.tk{display:none}
+body.fn-compact .cm-a .bd-g{display:none}
+body.fn-compact .cm-b{flex-shrink:0;margin-top:0;white-space:nowrap}
+body.fn-compact .cm-b .tr{display:none}
+@media(max-width:700px){body.fn-compact .cb{flex-wrap:wrap}body.fn-compact .ct{flex-basis:100%;order:1}body.fn-compact .cm-a{order:0}body.fn-compact .cm-b{order:2}}
+
+/* 地緣 */
+.geo-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+@media(max-width:700px){.geo-grid{grid-template-columns:1fr}}
+.geo{background:var(--warn-bg);border:1px solid #F1DCA0;border-left:4px solid var(--warn);border-radius:8px;padding:8px 12px;font-size:13px;line-height:1.5}
+.geo a{color:var(--warn)!important;text-decoration:none!important;font-weight:500}
+
+/* 橫條圖 */
+.hb{display:flex;align-items:center;gap:8px;margin:5px 0;font-size:12.5px}
+.hb-l{width:86px;color:var(--tx);font-family:'JetBrains Mono',monospace;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hb-t{flex:1;background:var(--line);height:14px;border-radius:7px;overflow:hidden}
+.hb-t i{display:block;height:100%;border-radius:7px}
+.hb-v{width:70px;color:var(--tx2);font-family:'JetBrains Mono',monospace;font-size:12px}
+
+.empty{text-align:center;padding:40px;color:var(--tx3)}
+
+/* Streamlit 元件 */
+[role="tablist"]{gap:8px!important;padding:8px 2px 10px!important;flex-wrap:wrap;position:sticky;top:0;z-index:999;
+  background:var(--bg);border-bottom:2px solid var(--line)!important}
+[role="tab"]{height:auto!important;padding:9px 20px!important;border-radius:12px!important;background:var(--card)!important;
+  border:1px solid var(--line)!important;color:var(--tx)!important;box-shadow:0 1px 3px rgba(80,60,20,.06);transition:all .15s;cursor:pointer}
+[role="tab"]:hover{border-color:var(--accent)!important;transform:translateY(-1px)}
+[role="tab"] p{font-size:17px!important;font-weight:700!important;margin:0!important}
+[role="tab"][aria-selected="true"]{background:var(--accent)!important;border-color:var(--accent)!important;box-shadow:0 4px 12px rgba(80,60,20,.2)}
+[role="tab"][aria-selected="true"] p{color:#fff!important}
+.react-aria-SelectionIndicator,[data-baseweb="tab-highlight"],[data-baseweb="tab-border"]{display:none!important}
+@media (max-width:640px){[role="tab"]{padding:7px 12px!important}[role="tab"] p{font-size:15px!important}}
+@media (max-width:700px){
+  [data-testid="stHeader"]{height:2.2rem!important;min-height:0!important}
+  .main .block-container,[data-testid="stMain"] .block-container{padding-top:2.4rem!important;padding-left:.7rem!important;padding-right:.7rem!important;padding-bottom:20px!important}
+  .topbar{padding:0;gap:6px}.logo{font-size:15px}.pill{font-size:11px;padding:1px 8px}.tmono{display:none}
+  [data-testid="stHorizontalBlock"]:has(.topbar){flex-wrap:nowrap!important;gap:6px!important;align-items:center!important}
+  [data-testid="stHorizontalBlock"]:has(.topbar)>div{min-width:0!important;width:auto!important;flex:0 1 auto!important}
+  [data-testid="stHorizontalBlock"]:has(.topbar)>div:nth-child(1){flex:1 1 0!important}
+  [data-testid="stHorizontalBlock"]:has(.topbar)>div:nth-child(2){flex:0 0 92px!important}
+  [data-testid="stHorizontalBlock"]:has(.topbar)>div:nth-child(3){flex:0 0 84px!important}
+  .qbar{display:flex;overflow-x:auto;gap:6px;margin:2px 0 6px;scrollbar-width:none}.qbar::-webkit-scrollbar{display:none}
+  .q{flex:0 0 auto;min-width:98px;padding:4px 8px}.q-p{font-size:14px}.q-n,.q-c{font-size:11px}
+  .mrow{gap:6px}.m{padding:5px 10px;min-width:0;flex:1 1 28%}.m-v{font-size:16px}
+  [role="tab"]{padding:6px 10px!important}[role="tab"] p{font-size:14px!important}
+}
+.stButton>button{border-radius:8px;font-weight:500;border:1px solid var(--line);background:var(--card);color:var(--tx)}
+.stButton>button[kind="primary"]{background:var(--accent);border-color:var(--accent);color:#fff}
+.stSelectbox>div>div,.stTextInput>div>div>input{background:var(--card)!important;border:1px solid var(--line)!important;border-radius:8px!important}
+[data-testid="stMetric"]{background:var(--soft);border-radius:10px;padding:8px 12px}
+</style>
+"""
+st.markdown(CSS, unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────
+# 主題（顏色 + 背景圖案）。網址加 ?theme=night 可直接指定
+# ─────────────────────────────────────────────
+_LIGHT = dict(card="#FFFFFF", line="#EADFCB", tx="#2B2418", tx2="#7A6E5A", tx3="#A89C86",
+              up="#C0392B", upbg="#FBE9E5", dn="#1B7A34", dnbg="#E4F2E8", warn="#92400E", warnbg="#FFF3D6")
+THEMES = {
+    "classic": ("🟫 經典米色", dict(_LIGHT, bg="#FCF8F0", soft="#F5EEDF", accent="#B8742A"), "none"),
+    "dots":    ("⚪ 米色點點", dict(_LIGHT, bg="#FCF8F0", soft="#F5EEDF", accent="#B8742A"),
+                "radial-gradient(rgba(184,116,42,.16) 1.2px,transparent 1.2px) 0 0/22px 22px"),
+    "grid":    ("📐 方格紙", dict(_LIGHT, bg="#FBF8F1", soft="#F3EDDF", accent="#9A6B2F"),
+                "linear-gradient(rgba(120,100,60,.09) 1px,transparent 1px) 0 0/28px 28px,"
+                "linear-gradient(90deg,rgba(120,100,60,.09) 1px,transparent 1px) 0 0/28px 28px"),
+    "forest":  ("🌲 森林", dict(_LIGHT, bg="#F1F6EE", soft="#E4EEDF", line="#D3E2CB", accent="#2F7D4F",
+                                tx="#1F2A21", tx2="#5C6E5F", tx3="#8DA090"),
+                "radial-gradient(circle at 12% 8%,rgba(120,180,120,.22),transparent 40%),"
+                "radial-gradient(circle at 90% 85%,rgba(160,210,150,.25),transparent 45%)"),
+    "ocean":   ("🌊 海洋", dict(_LIGHT, bg="#EEF5FA", soft="#DFEBF4", line="#CFE0EC", accent="#2E6FB5",
+                                tx="#1B2733", tx2="#587186", tx3="#8AA1B3"),
+                "linear-gradient(160deg,rgba(120,180,230,.28),transparent 45%),"
+                "radial-gradient(circle at 95% 90%,rgba(90,150,210,.2),transparent 40%)"),
+    "sakura":  ("🌸 櫻花", dict(_LIGHT, bg="#FDF2F4", soft="#F9E3E8", line="#F0D2D9", accent="#C2527A",
+                                tx="#33212A", tx2="#7E5C69", tx3="#B398A3"),
+                "radial-gradient(circle at 8% 12%,rgba(240,150,180,.28),transparent 38%),"
+                "radial-gradient(circle at 92% 80%,rgba(250,190,205,.3),transparent 42%)"),
+    "aurora":  ("🌌 極光", dict(_LIGHT, bg="#F4F2FB", soft="#E8E4F6", line="#DAD4EE", accent="#6C5CE7",
+                                tx="#241F3A", tx2="#625B85", tx3="#9A94BB"),
+                "radial-gradient(circle at 10% 10%,rgba(130,110,240,.25),transparent 38%),"
+                "radial-gradient(circle at 85% 20%,rgba(80,170,240,.22),transparent 40%),"
+                "radial-gradient(circle at 60% 95%,rgba(240,130,200,.18),transparent 40%)"),
+    "night":   ("🌙 夜間", dict(bg="#15120E", card="#211C16", soft="#2B251D", line="#3A3228", tx="#F2EBDD",
+                                tx2="#BDB19B", tx3="#8C816E", up="#FF6F5E", upbg="#3C211C", dn="#4FD27F",
+                                dnbg="#17321F", warn="#F5C16C", warnbg="#3A2E12", accent="#E0A458"),
+                "radial-gradient(circle at 15% 0%,rgba(224,164,88,.10),transparent 40%)"),
+}
+DEFAULT_THEME = "classic"
+_qt = st.query_params.get("theme", DEFAULT_THEME)
+st.session_state.setdefault("theme_sel", _qt if _qt in THEMES else DEFAULT_THEME)
+_tv, _pat = THEMES[st.session_state["theme_sel"]][1], THEMES[st.session_state["theme_sel"]][2]
+THEME_CSS = f"""<style>
+:root{{--bg:{_tv['bg']};--card:{_tv['card']};--soft:{_tv['soft']};--line:{_tv['line']};--tx:{_tv['tx']};--tx2:{_tv['tx2']};
+--tx3:{_tv['tx3']};--up:{_tv['up']};--up-bg:{_tv['upbg']};--dn:{_tv['dn']};--dn-bg:{_tv['dnbg']};--warn:{_tv['warn']};
+--warn-bg:{_tv['warnbg']};--accent:{_tv['accent']}}}
+.stApp{{background:{_pat + ',' if _pat != 'none' else ''}{_tv['bg']}!important;background-attachment:fixed!important}}
+.stApp p,.stApp label,.stApp span,.stApp li,[data-testid="stMarkdownContainer"]{{color:var(--tx)}}
+[data-testid="stCaptionContainer"],[data-testid="stCaptionContainer"] *{{color:var(--tx2)!important}}
+.stSelectbox [data-baseweb="select"]>div,.stTextInput input{{background:var(--card)!important;color:var(--tx)!important}}
+div[data-baseweb="popover"] ul,div[data-baseweb="popover"] li{{background:var(--card)!important;color:var(--tx)!important}}
+.stButton>button{{background:var(--card);color:var(--tx)}}
+div[data-baseweb="select"] *,[data-testid="stSelectbox"] *{{color:var(--tx)!important}}
+div[data-baseweb="select"] svg{{fill:var(--tx)!important}}
+[data-testid="stAlert"],[data-testid="stAlert"]>div,[data-testid="stAlertContainer"]{{background:var(--soft)!important;border:1px solid var(--line)!important;border-radius:10px}}
+[data-testid="stAlert"] *,[data-testid="stAlertContainer"] *{{color:var(--tx)!important}}
+.thumb .ph,.strip,.hero-t,.hero-m,.hero-o{{color:#fff}}
+.q-p,.m-v{{color:var(--tx)}} .m-v.up,.up{{color:var(--up)!important}} .m-v.dn,.dn{{color:var(--dn)!important}}
+</style>"""
+st.markdown(THEME_CSS, unsafe_allow_html=True)
+
+
+def _row_tickers(row) -> list:
+    raw = str(row.get("ai_affected_tickers", "") or row.get("tickers", "") or "")
+    return [x.strip() for x in raw.split(",") if x.strip()]
+
+
+# ─────────────────────────────────────────────
+# 初始化 + 從 GitHub 同步 news.json
+# ─────────────────────────────────────────────
+if "initialized" not in st.session_state:
+    init_db()
+    st.session_state.update({
+        "initialized":  True,
+        "last_update":  "—",
+        "enabled_srcs": [s["name"] for s in SOURCES if s["enabled"]],
+        "n_show":       24,
+    })
+
+GROQ_OK  = bool(_secret("GROQ_API_KEY"))
+DATA_URL = _secret("NEWS_DATA_URL")
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def sync_remote(url: str) -> dict:
+    """每 5 分鐘從 GitHub raw 讀一次 news.json 併入本機 SQLite"""
+    if not url:
+        return {"ok": False, "added": 0, "generated_at": "", "error": "未設定 NEWS_DATA_URL"}
+    try:
+        r = requests.get(url, timeout=20)
+        r.raise_for_status()
+        payload = r.json()
+        db = SessionLocal()
+        try:
+            added = import_json(db, payload)
+        finally:
+            db.close()
+        return {"ok": True, "added": added,
+                "generated_at": payload.get("generated_at", ""), "error": ""}
+    except Exception as e:
+        return {"ok": False, "added": 0, "generated_at": "", "error": f"{type(e).__name__}: {e}"}
+
+
+sync = sync_remote(DATA_URL)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def load_all():
+    db = SessionLocal()
+    try:
+        return get_articles_df(db, limit=800)
+    finally:
+        db.close()
+
+
+LIFE_CATS = ("運動", "娛樂", "電玩")
+
+
+def clean_images(df):
+    """同一張圖出現 3 次以上＝網站 logo / 預設圖，當作沒圖；明顯是 logo/icon 的網址也清掉"""
+    if df is None or df.empty or "image_url" not in df.columns:
+        return df
+    df = df.copy()
+    img = df["image_url"].fillna("").astype(str)
+    vc = img[img != ""].value_counts()
+    bad = set(vc[vc >= 3].index)
+    low = img.str.lower()
+    mask = img.isin(bad) | low.str.contains(r"logo|favicon|icon|placeholder|default[-_]?(?:image|img)|/ads/", regex=True)
+    df.loc[mask, "image_url"] = ""
+    return df
+
+
+df_all = clean_images(load_all())
+if not st.session_state.get("show_rev", False) and not df_all.empty:
+    df_all = df_all[~df_all["title"].fillna("").apply(is_routine_revenue)]
+
+# 保險：資料庫是空的（第一次部署 / Actions 還沒跑過）→ 自動抓一次，不讓畫面空白
+if df_all.empty and not st.session_state.get("auto_crawled"):
+    st.session_state["auto_crawled"] = True
+    with st.spinner("資料庫是空的，正在自動抓取第一批新聞（約 30 秒）…"):
+        crawl_and_save(enabled_names=st.session_state["enabled_srcs"], use_ai=False)
+    st.cache_data.clear()
+    df_all = clean_images(load_all())
+    if not st.session_state.get("show_rev", False) and not df_all.empty:
+        df_all = df_all[~df_all["title"].fillna("").apply(is_routine_revenue)]
+
+
+# ─────────────────────────────────────────────
+# 行情條（Yahoo Finance chart API；失敗就不顯示）
+# ─────────────────────────────────────────────
+QUOTE_SYMS = [("^TWII", "加權指數"), ("2330.TW", "台積電"), ("^SOX", "費城半導體"),
+              ("^IXIC", "那斯達克"), ("^N225", "日經 225"), ("^KS11", "韓國 KOSPI"), ("TWD=X", "美元/台幣")]
+
+
+def quote_url(sym: str) -> str:
+    """點行情卡跳到 Yahoo 報價頁：台股用奇摩股市，其餘用 Yahoo Finance"""
+    if sym in ("^TWII", "2330.TW"):
+        return f"https://tw.stock.yahoo.com/quote/{quote(sym)}"
+    return f"https://finance.yahoo.com/quote/{quote(sym)}"
+_UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36"}
+
+
+def _one_quote(sym_name):
+    sym, name = sym_name
+    try:
+        r = requests.get(
+            f"https://query1.finance.yahoo.com/v8/finance/chart/{quote(sym)}?range=5d&interval=1d",
+            headers=_UA, timeout=6)
+        res = r.json()["chart"]["result"][0]
+        price = float(res["meta"]["regularMarketPrice"])
+        closes = [c for c in res["indicators"]["quote"][0]["close"] if c is not None]
+        if len(closes) >= 2 and abs(closes[-1] - price) <= max(1e-4 * price, 1e-6):
+            prev = closes[-2]
+        elif closes:
+            prev = closes[-1]
+        else:
+            return None
+        return {"sym": sym, "name": name, "price": price, "chg": price - prev,
+                "pct": (price - prev) / prev * 100 if prev else 0.0}
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def fetch_quotes():
+    with ThreadPoolExecutor(max_workers=7) as ex:
+        return [q for q in ex.map(_one_quote, QUOTE_SYMS) if q]
+
+
+def quotes_html(qs) -> str:
+    if not qs:
+        return ""
+    cells = []
+    for q in qs:
+        cls = "up" if q["chg"] > 0 else ("dn" if q["chg"] < 0 else "flat")
+        arrow = "▲" if q["chg"] > 0 else ("▼" if q["chg"] < 0 else "–")
+        cells.append(
+            f'<a class="q" href="{esc(quote_url(q["sym"]), quote=True)}" target="_blank" rel="noopener">'
+            f'<div class="q-n">{esc(q["name"])}</div>'
+            f'<div class="q-p">{q["price"]:,.2f}</div>'
+            f'<div class="q-c {cls}">{arrow} {abs(q["chg"]):,.2f} ({q["pct"]:+.2f}%)</div></a>')
+    return f'<div class="qbar">{"".join(cells)}</div>'
+
+
+# ─────────────────────────────────────────────
+# 卡片渲染
+# ─────────────────────────────────────────────
+SECTOR_GRAD = {
+    "半導體": ("#6C5CE7", "#8E7CF0"), "AI": ("#2E86DE", "#5DADE2"), "伺服器": ("#2E86DE", "#48A9C5"),
+    "電動車": ("#27AE60", "#58D68D"), "綠能": ("#27AE60", "#7FCB8A"), "金融": ("#C98A2B", "#E5B25D"),
+    "航運": ("#16A0A8", "#5CC6CC"), "傳產": ("#8C7B63", "#B3A48C"), "科技": ("#4A6FA5", "#7C9BC9"),
+    "戰爭/國防": ("#B03A2E", "#D9695F"), "地緣政治": ("#B03A2E", "#D9695F"), "能源": ("#CA6F1E", "#E59866"),
+}
+
+
+CAT_GRAD = {"AI": ("#2E86DE", "#6C5CE7"), "運動": ("#27AE60", "#16A0A8"), "娛樂": ("#D35D8C", "#E8A0BF"),
+            "電玩": ("#6C5CE7", "#A29BFE"), "科技": ("#4A6FA5", "#7C9BC9"), "國際": ("#8C7B63", "#B3A48C"),
+            "大陸": ("#B03A2E", "#E08A6F")}
+
+
+def _first_sector(row) -> str:
+    for s in str(row.get("sectors", "") or "").split(","):
+        if s.strip():
+            return s.strip()
+    return ""
+
+
+def _css_url(u: str) -> str:
+    return esc(u.replace("'", "%27").replace('"', "%22").replace(" ", "%20"), quote=True)
+
+
+def thumb_html(row, extra_cls="") -> str:
+    sec = _first_sector(row)
+    cat0 = str(row.get("category", "") or "")
+    g1, g2 = SECTOR_GRAD.get(sec) or CAT_GRAD.get(cat0) or ("#B9A988", "#D8C8A6")
+    traw = str(row.get("ai_affected_tickers", "") or row.get("tickers", "") or "")
+    first_tk = next((t.strip() for t in traw.split(",") if t.strip()), "")
+    ph = first_tk or sec or str(row.get("category", "") or "NEWS")
+    img = str(row.get("image_url", "") or "")
+    img_tag = (f'<img src="{_css_url(img)}" loading="lazy" referrerpolicy="no-referrer" alt="">'
+               if img.startswith("http") else "")
+    return (f'<div class="thumb {extra_cls}" style="background:linear-gradient(135deg,{g1},{g2})">'
+            f'<span class="ph">{esc(ph)}</span>{img_tag}</div>')
+
+
+CAT_ICON = {"AI": "🤖", "運動": "⚽", "娛樂": "🎬", "電玩": "🎮", "科技": "💡", "國際": "🌐", "財經": "💹", "大陸": "🏮"}
+
+
+def strip_html(row) -> str:
+    """沒有縮圖時用「細色帶 + 標籤」取代大塊空白漸層"""
+    sec = _first_sector(row)
+    cat = str(row.get("category", "") or "")
+    g1, g2 = SECTOR_GRAD.get(sec) or CAT_GRAD.get(cat) or ("#B9A988", "#D8C8A6")
+    traw = str(row.get("ai_affected_tickers", "") or row.get("tickers", "") or "")
+    first_tk = next((t.strip() for t in traw.split(",") if t.strip()), "")
+    label = " · ".join(x for x in (CAT_ICON.get(cat, "") + " " + cat if cat else "", sec, first_tk) if x.strip())
+    return (f'<div class="strip" style="background:linear-gradient(90deg,{g1},{g2})">'
+            f'<span>{esc(label.strip() or "NEWS")}</span></div>')
+
+
+def eff_sent(row):
+    if (str(row.get("category", "")) == "AI" and str(row.get("ai_summary", "") or "")
+            and not str(row.get("ai_sentiment", "") or "")):
+        return "neutral", 0.0          # AI 專區技術摘要：不顯示利多/利空
+    ai_s = str(row.get("ai_sentiment", "") or "")
+    if ai_s in ("bullish", "bearish", "neutral"):
+        return ai_s, _num(row.get("ai_score"))
+    return str(row.get("sentiment", "neutral")), _num(row.get("sentiment_score")) * 10
+
+
+def badge_html(sent, sv) -> str:
+    if sent == "bullish":
+        return f'<span class="bd bd-b">利多 {sv:+.1f}</span>'
+    if sent == "bearish":
+        return f'<span class="bd bd-d">利空 {sv:+.1f}</span>'
+    return '<span class="bd bd-n">中性</span>'
+
+
+def titles(row):
+    """回傳 (主標題, 原文標題或空字串)：有中譯顯示中文，原文放小字"""
+    orig = str(row.get("title", "") or "")
+    zh = str(row.get("title_zh", "") or "")
+    return (zh, orig) if zh else (orig, "")
+
+
+def translate_link(row) -> str:
+    if str(row.get("language", "zh")) != "en":
+        return ""
+    url = str(row.get("url", "") or "")
+    if not url.startswith("http"):
+        return ""
+    return (f'<a class="tr" href="https://translate.google.com/translate?sl=auto&tl=zh-TW&u={quote(url, safe="")}" '
+            f'target="_blank" rel="noopener">🌐 翻譯全文</a>')
+
+
+def tickers_chips(row, n=3) -> str:
+    names = {}
+    try:
+        for it in json.loads(row.get("ticker_details") or "[]"):
+            names[it.get("code")] = it.get("name")
+    except Exception:
+        pass
+    traw = str(row.get("ai_affected_tickers", "") or row.get("tickers", "") or "")
+    out = []
+    for t in [x.strip() for x in traw.split(",") if x.strip()][:n]:
+        nm = names.get(t)
+        label = f"{t} {nm}" if nm and nm != t and not str(nm).startswith("台股") else t
+        out.append(f'<span class="tk">{esc(label)}</span>')
+    return "".join(out)
+
+
+# ── 搜尋新聞模式（即時查 Google News，不存資料庫）─────────────────────────────
+@st.cache_data(ttl=600, show_spinner=False)
+def live_search(q: str, lang: str, days: int):
+    from crawler import fetch_rss, _gnews
+    from analyzer import Analyzer
+    from scheduler import translate_titles
+    srcs = []
+    if lang in ("中文", "中英文都找"):
+        srcs.append({"name": "GN-搜尋", "url": _gnews(q, en=False, when=f"{days}d"), "language": "zh",
+                     "category": "財經", "strip_suffix": True, "max_items": 40})
+    if lang in ("英文（標題自動翻中文）", "中英文都找"):
+        srcs.append({"name": "GN-搜尋EN", "url": _gnews(q, en=True, when=f"{days}d"), "language": "en",
+                     "category": "國際", "strip_suffix": True, "max_items": 40})
+    items = []
+    for s in srcs:
+        items.extend(fetch_rss(s))
+    seen, uniq = set(), []
+    for it in items:
+        if it["url"] in seen:
+            continue
+        seen.add(it["url"])
+        uniq.append(it)
+    an = Analyzer()
+    for it in uniq:
+        r = an.analyze(it["title"], it.get("summary", ""), it["language"])
+        it.update({"sentiment": r.sentiment, "sentiment_score": r.sentiment_score,
+                   "tickers": ",".join(r.tickers), "sectors": ",".join(r.sectors), "is_geo": r.is_geo,
+                   "ticker_details": json.dumps([{"code": t.code, "name": t.name} for t in r.ticker_details],
+                                                ensure_ascii=False),
+                   "ai_sentiment": "", "ai_score": 0.0, "ai_summary": "", "ai_affected_tickers": "",
+                   "importance_score": 0.0, "title_zh": "", "image_url": ""})
+    translate_titles(uniq, limit=40, api_key=_secret("GROQ_API_KEY"))
+    df = pd.DataFrame(uniq)
+    if not df.empty:
+        df = df.sort_values("published_at", ascending=False).reset_index(drop=True)
+    return df
+
+
+# ── 同一事件合併 ──────────────────────────────────────────────────────────────
+_NUMTOK = re.compile(r"\d+\.\d+[%％兆億萬]?|\d{2,}[%％兆億萬點]")
+
+
+def _sig(row):
+    t = titles(row)[0]
+    s = re.sub(r"[\W_]+", "", t.lower())
+    grams = {s[i:i + 2] for i in range(len(s) - 1)}
+    tk = {x.strip() for x in str(row.get("ai_affected_tickers", "") or row.get("tickers", "") or "").split(",") if x.strip()}
+    nums = set(_NUMTOK.findall(t))
+    for p in re.findall(r"(\d+(?:\.\d+)?)[%％]", t):      # 9.26% 與 9% 視為同一個數字
+        nums.add(f"{int(float(p))}%")
+    return grams, nums, tk
+
+
+def _sim(a, b) -> float:
+    ga, na, ta = a
+    gb, nb, tb = b
+    if len(ga) < 4 or len(gb) < 4:
+        return 0.0
+    j = len(ga & gb) / len(ga | gb)
+    return j + (0.25 if na & nb else 0.0) + (0.2 if ta & tb else 0.0)
+
+
+def cluster_events(df, threshold=0.4, window_h=48):
+    """把「同一事件、多家報導」合成一組。回傳 [(代表列, [其他列…])]。
+    代表 = 有圖 > 有 AI 摘要 > 重要度高 > 較新。"""
+    if df is None or df.empty:
+        return []
+    d = df.copy()
+    d["_k"] = ((d["image_url"].fillna("") != "").astype(int) * 4
+               + (d["ai_summary"].fillna("") != "").astype(int) * 2
+               + d["importance_score"].fillna(0).astype(float) / 10.0)
+    order = list(df.index)                        # 保持呼叫端排序（例如最新優先）
+    groups = []                                    # [{"rep":idx, "sig":sig, "ts":ts, "members":[idx]}]
+    for idx in order:
+        r = d.loc[idx]
+        sg = _sig(r)
+        ts = r.get("published_at")
+        hit = None
+        for g in groups:
+            try:
+                near = abs((ts - g["ts"]).total_seconds()) <= window_h * 3600
+            except Exception:
+                near = True
+            if near and g["src"] != str(r.get("source", "")) or (near and g["src"] == str(r.get("source", "")) and False):
+                pass
+            if near and _sim(sg, g["sig"]) >= threshold:
+                hit = g
+                break
+        if hit is None:
+            groups.append({"sig": sg, "ts": ts, "src": str(r.get("source", "")), "members": [idx]})
+        else:
+            hit["members"].append(idx)
+    out = []
+    for g in groups:
+        mem = d.loc[g["members"]].sort_values("_k", ascending=False)
+        out.append((mem.iloc[0], [m for _, m in mem.iloc[1:].iterrows()]))
+    return out
+
+
+def card_html(row, others=None) -> str:
+    sent, sv = eff_sent(row)
+    cls = {"bullish": "bull", "bearish": "bear"}.get(sent, "")
+    main, orig = titles(row)
+    url = str(row.get("url", "") or "")
+    href = esc(url, quote=True) if url else "#"
+    summ = str(row.get("ai_summary", "") or "")
+    geo = '<span class="bd bd-g">⚑ 地緣</span>' if row.get("is_geo") else ""
+    has_img = str(row.get("image_url", "") or "").startswith("http")
+    others = others or []
+    more_h = ""
+    if others:
+        li = "".join(
+            f'<li><a href="{esc(str(o.get("url", "#")), quote=True)}" target="_blank" rel="noopener">'
+            f'{esc(titles(o)[0])}</a> <span>· {esc(str(o.get("source", "")))}</span></li>' for o in others[:8])
+        more_h = (f'<details class="more"><summary>📚 另有 {len(others)} 則相關報導</summary><ul>{li}</ul></details>')
+    orig_h = f'<div class="co">{esc(orig)}</div>' if orig else ""
+    summ_h = f'<div class="cs">✦ {esc(summ)}</div>' if summ else ""
+    _sec = ",".join(x.strip() for x in str(row.get("sectors", "") or "").split(",") if x.strip())
+    _tk = ",".join(x.strip() for x in str(row.get("ai_affected_tickers", "") or row.get("tickers", "") or "").split(",") if x.strip())
+    try:
+        _ts = int(row.get("published_at").timestamp())
+    except Exception:
+        _ts = 0
+    _sent_lbl = {"bullish": f"利多 {sv:+.1f}", "bearish": f"利空 {sv:+.1f}"}.get(sent, "中性")
+    _attrs = (f'data-tk="{esc(_tk, quote=True)}" data-sec="{esc(_sec, quote=True)}" '
+              f'data-ts="{_ts}" data-sent="{esc(_sent_lbl, quote=True)}" '
+              f'data-cat="{esc(str(row.get("category", "") or ""), quote=True)}" '
+              f'data-src="{esc(str(row.get("source", "") or ""), quote=True)}" '
+              f'data-age="{min(age_hours(row.get("published_at")), 999):.0f}" '
+              f'data-imp="{_num(row.get("importance_score")):.1f}"')
+    return _h(f"""
+    <div class="card {cls}" {_attrs}>
+      <a href="{href}" target="_blank" rel="noopener">{thumb_html(row) if has_img else strip_html(row)}</a>
+      <div class="cb">
+        <a class="ct" href="{href}" target="_blank" rel="noopener">{esc(main)}</a>
+        {orig_h}{summ_h}{more_h}
+        <div class="cm cm-a">{badge_html(sent, sv)}{geo}{tickers_chips(row)}</div>
+        <div class="cm cm-b"><span>{esc(str(row.get("source", "")))}</span><span>· {relative_time(row.get("published_at"))}</span>{translate_link(row)}<span class="fav" role="button" title="收藏">☆</span></div>
+      </div>
+    </div>""")
+
+
+def render_grid(df, max_items=60, merge=True, lazy=0, cls=""):
+    """lazy>0：全部卡片一次輸出，但第 lazy 張之後先隱藏（data-lz），由瀏覽器端 JS 捲到底再分批顯示＝無限捲動。
+    沒有 JS 時（html 沒有 data-fnjs）CSS 不會隱藏任何卡片，所以不會卡住。cls="wall" 會啟用「自上次造訪新增」橫幅。"""
+    if df is None or df.empty:
+        st.markdown('<div class="empty">📭 沒有符合條件的新聞</div>', unsafe_allow_html=True)
+        return
+    note = ""
+    if merge and st.session_state.get("merge_events", True):
+        groups = cluster_events(df.head(400))
+        cards = [card_html(rep, oth) for rep, oth in groups[:max_items]]
+        merged = len(df.head(400)) - len(groups)
+        if len(groups) > max_items:
+            note = f"顯示前 {max_items} 組事件，共 {len(groups)} 組（已把 {merged} 則重複報導合併）"
+        elif merged:
+            note = f"已把 {merged} 則重複報導合併進對應卡片"
+    else:
+        cards = [card_html(r) for _, r in df.head(max_items).iterrows()]
+        if len(df) > max_items:
+            note = f"顯示前 {max_items} 則，共 {len(df)} 則"
+    if lazy:
+        cards = [c if i < lazy else c.replace('<div class="card', '<div data-lz="1" class="card', 1)
+                 for i, c in enumerate(cards)]
+    sentinel = '<div class="fn-sentinel"></div>' if lazy and len(cards) > lazy else ""
+    newbar = '<div class="fn-new"></div>' if cls == "wall" else ""
+    st.markdown(f'{newbar}<div class="{("grid " + cls).strip()}">{"".join(cards)}</div>{sentinel}',
+                unsafe_allow_html=True)
+    if note:
+        st.caption(note)
+
+
+def hero_html(df) -> str:
+    d = df.copy()
+    d["_rank"] = (d["importance_score"].fillna(0)
+                  + (d["image_url"].fillna("") != "").astype(float) * 4.0
+                  + d["published_at"].apply(lambda x: max(0.0, 2 - age_hours(x) / 6)))
+    d = d.sort_values("_rank", ascending=False)
+    main = d.iloc[0]
+    side = d.iloc[1:4]
+    sent, sv = eff_sent(main)
+    mt, mo = titles(main)
+    href = esc(str(main.get("url", "") or "#"), quote=True)
+    mo_h = f'<div class="hero-o">{esc(mo)}</div>' if mo else ""
+    side_h = ""
+    for _, r in side.iterrows():
+        s2, v2 = eff_sent(r)
+        t2, _o = titles(r)
+        h2 = esc(str(r.get("url", "") or "#"), quote=True)
+        side_h += (f'<a class="si" href="{h2}" target="_blank" rel="noopener">{thumb_html(r)}'
+                   f'<div><div class="si-t">{esc(t2)}</div>'
+                   f'<div class="si-m">{badge_html(s2, v2)} {esc(str(r.get("source", "")))} · '
+                   f'{relative_time(r.get("published_at"))}</div></div></a>')
+    return _h(f"""
+    <div class="hero">
+      <a class="hero-main" href="{href}" target="_blank" rel="noopener">
+        {thumb_html(main)}
+        <div class="hero-ov">
+          <div class="hero-t">{esc(mt)}</div>{mo_h}
+          <div class="hero-m">{badge_html(sent, sv)}<span>{esc(str(main.get("source", "")))}</span>
+          <span>{relative_time(main.get("published_at"))}</span></div>
+        </div>
+      </a>
+      <div class="hero-side">{side_h}</div>
+    </div>""")
+
+
+def hbars(items) -> str:
+    """items: [(label, value, color, text)] → CSS 橫條圖"""
+    if not items:
+        return ""
+    mx = max(abs(v) for _, v, _, _ in items) or 1
+    rows = "".join(
+        f'<div class="hb"><span class="hb-l">{esc(str(l))}</span>'
+        f'<span class="hb-t"><i style="width:{abs(v) / mx * 100:.0f}%;background:{c}"></i></span>'
+        f'<span class="hb-v">{esc(t)}</span></div>' for l, v, c, t in items)
+    return rows
+
+
+# ─────────────────────────────────────────────
+# 提及量暴增偵測：某檔股票「最近 N 小時」被提及次數 ≥ 過去平均同長度時段的 K 倍
+# 參數都在這裡，想更敏感就調低 SURGE_RATIO / SURGE_MIN_N
+# ─────────────────────────────────────────────
+SURGE_WIN_H = 3            # 觀察窗（小時）
+SURGE_RATIO = 3.0          # 超過平均幾倍才算暴增
+SURGE_MIN_N = 3            # 觀察窗內至少幾則（避免 1→3 這種小數字亂跳）
+SURGE_MIN_SRC = 2          # 至少幾家媒體（避免單一來源洗版）
+SURGE_MIN_HISTORY_H = 12   # 資料至少涵蓋幾小時才有「平均」可比
+
+
+def detect_surge(df, top=6):
+    """回傳 (暴增清單, 資料涵蓋小時數)。基準 = 觀察窗之前的所有文章，換算成每個觀察窗的平均數。"""
+    if df is None or df.empty:
+        return [], 0.0
+    d = df[~df["category"].isin(LIFE_CATS + ("大陸生活",))]
+    if d.empty:
+        return [], 0.0
+    recs = d.to_dict("records")
+    ages = [age_hours(r.get("published_at")) for r in recs]
+    span = min(72.0, max(ages))
+    if span < SURGE_MIN_HISTORY_H:
+        return [], span
+    blocks = max((span - SURGE_WIN_H) / SURGE_WIN_H, 1.0)
+    rec, base, names = {}, {}, {}
+    for r, a in zip(recs, ages):
+        if a > 72:
+            continue
+        try:
+            for it in json.loads(r.get("ticker_details") or "[]"):
+                nm = str(it.get("name") or "")
+                if it.get("code") and nm and nm != it.get("code") and not nm.startswith("台股"):
+                    names.setdefault(it["code"], nm)
+        except Exception:
+            pass
+        for t in _row_tickers(r):
+            if a <= SURGE_WIN_H:
+                rec.setdefault(t, []).append(r)
+            else:
+                base[t] = base.get(t, 0) + 1
+    out = []
+    for t, rows in rec.items():
+        n = len(rows)
+        srcs = {str(x.get("source", "")) for x in rows}
+        if n < SURGE_MIN_N or len(srcs) < SURGE_MIN_SRC:
+            continue
+        expected = base.get(t, 0) / blocks
+        ratio = n / max(expected, 1.0)
+        if ratio < SURGE_RATIO:
+            continue
+        sents = [eff_sent(x)[0] for x in rows]
+        bull, bear = sents.count("bullish"), sents.count("bearish")
+        if bull and bull >= 2 * bear:
+            tone, tcls = "偏多", "up"
+        elif bear and bear >= 2 * bull:
+            tone, tcls = "偏空", "dn"
+        elif bull or bear:
+            tone, tcls = "多空分歧", "flat"
+        else:
+            tone, tcls = "中性", "flat"
+        seen_t, heads = set(), []
+        for x in sorted(rows, key=lambda z: age_hours(z.get("published_at"))):
+            ttl, _o = titles(x)
+            if ttl not in seen_t:
+                seen_t.add(ttl)
+                heads.append((ttl, str(x.get("url", "") or "#")))
+            if len(heads) >= 2:
+                break
+        nm = names.get(t, "")
+        out.append({"code": t, "name": nm, "n": n, "nsrc": len(srcs), "exp": expected, "ratio": ratio,
+                    "tone": tone, "tcls": tcls, "heads": heads})
+    out.sort(key=lambda z: (z["ratio"], z["n"]), reverse=True)
+    return out[:top], span
+
+
+def surge_html(items) -> str:
+    cards = ""
+    for it in items:
+        li = "".join(f'<li><a href="{esc(u, quote=True)}" target="_blank" rel="noopener">{esc(t)}</a></li>'
+                     for t, u in it["heads"])
+        cards += (f'<div class="sg">'
+                  f'<div class="sg-h"><span class="sg-tk">{esc(it["code"])}</span>'
+                  f'<span class="sg-nm">{esc(it["name"])}</span>'
+                  f'<span class="sg-x">×{it["ratio"]:.1f}</span></div>'
+                  f'<div class="sg-m">近 {SURGE_WIN_H} 小時 {it["n"]} 則（平均 {it["exp"]:.1f} 則）· {it["nsrc"]} 家媒體 · '
+                  f'<span class="{it["tcls"]}">{it["tone"]}</span></div>'
+                  f'<ul class="sg-l">{li}</ul></div>')
+    return f'<div class="sgrid">{cards}</div>'
+
+
+# ─────────────────────────────────────────────
+# AI 市場總結（Groq）
+# ─────────────────────────────────────────────
+def get_daily_ai_summary(ai_news_df):
+    from groq_analyzer import _is_rate_limited, _set_rate_limited
+    groq_key = _secret("GROQ_API_KEY")
+    if not groq_key:
+        return "", "找不到 GROQ_API_KEY"
+    if _is_rate_limited():
+        return "", "Groq 冷卻中，請稍後點「重新生成」"
+    lines = []
+    for _, r in ai_news_df.head(15).iterrows():
+        label = {"bullish": "利多", "bearish": "利空"}.get(r.get("ai_sentiment", ""), "中性")
+        lines.append(f"[{label}] {r.get('ai_summary') or r.get('title', '')}")
+    news_text = "\n".join(lines)
+    if not news_text.strip():
+        return "", "沒有可用的 AI 新聞素材"
+    prompt = f"""以下是近期財經新聞的 AI 分析摘要：
+
+{news_text}
+
+請用繁體中文輸出台股 AI 總結，嚴格按以下 JSON 格式回應，不要有任何其他文字：
+
+{{
+  "direction": "偏多/偏空/震盪（三擇一）",
+  "direction_reason": "一句話說明整體方向原因（30字內）",
+  "bull_themes": ["利多主題1（20字內）", "利多主題2（20字內）"],
+  "bear_themes": ["利空主題1（20字內）", "利空主題2（20字內）"],
+  "key_tickers": ["2330", "NVDA"],
+  "summary": "一段客觀總結（60至100字，財經播報員語氣）"
+}}"""
+    from groq_analyzer import groq_chat, parse_json_loose
+    for attempt in range(2):
+        try:
+            raw = groq_chat(prompt, groq_key, max_tokens=1500, temperature=0.2, timeout=45)
+            data = parse_json_loose(raw)
+            if isinstance(data, dict):
+                return data, ""
+            return "", "AI 回傳格式不是 JSON 物件，請按重試"
+        except requests.exceptions.HTTPError as e:
+            status = e.response.status_code if e.response is not None else 0
+            if status == 429:
+                _set_rate_limited()
+                if attempt == 0:
+                    time.sleep(5)
+                    continue
+                return "", "Groq 速率限制（429），請稍後點「重新生成」"
+            body = ""
+            try:
+                body = e.response.text[:120]
+            except Exception:
+                pass
+            return "", f"Groq HTTP {status}：{body}"
+        except json.JSONDecodeError:
+            if attempt == 0:
+                continue
+            return "", "AI 回傳內容無法解析，請按重試"
+        except Exception as e:
+            return "", f"生成失敗：{type(e).__name__}: {e}"
+    return "", "多次重試後仍失敗"
+
+
+# ─────────────────────────────────────────────
+# 頂部
+# ─────────────────────────────────────────────
+def _gen_time_str(iso: str):
+    try:
+        t = datetime.fromisoformat(iso).astimezone(TZ_TW)
+        return t.strftime("%m/%d %H:%M"), (datetime.now(TZ_TW) - t).total_seconds() / 3600
+    except Exception:
+        return "—", None
+
+
+# ═══════════════════════════════════════════════
+# 擴充資料：extras.json（籌碼 / 行事曆 / 社群）＋ health.json（來源健康度）
+# 兩個檔案都由 GitHub Actions 產生，放在 news.json 旁邊（同一個 data 分支）
+# ═══════════════════════════════════════════════
+@st.cache_data(ttl=300, show_spinner=False)
+def load_remote_json(name: str, data_url: str):
+    if not data_url:
+        return None
+    try:
+        r = requests.get(data_url.rsplit("/", 1)[0] + "/" + name, timeout=15)
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return None
+
+
+EXTRAS = load_remote_json("extras.json", DATA_URL) or {}
+HEALTH = load_remote_json("health.json", DATA_URL) or {}
+WEEK = "一二三四五六日"
+
+
+def yahoo_tw(code) -> str:
+    return f"https://tw.stock.yahoo.com/quote/{quote(str(code))}"
+
+
+def rel_epoch(ts) -> str:
+    try:
+        s = datetime.now(TZ_TW).timestamp() - float(ts)
+    except Exception:
+        return ""
+    if s < 90:
+        return "剛剛"
+    if s < 3600:
+        return f"{int(s // 60)}分鐘前"
+    if s < 86400:
+        return f"{int(s // 3600)}小時前"
+    return f"{int(s // 86400)}天前"
+
+
+def _iso_age_h(iso) -> float:
+    try:
+        return (datetime.now(TZ_TW) - datetime.fromisoformat(str(iso))).total_seconds() / 3600
+    except Exception:
+        return 9999.0
+
+
+def _vcls(v) -> str:
+    return "up" if v > 0 else ("dn" if v < 0 else "flat")
+
+
+def _parts_html(parts: dict) -> str:
+    if not parts:
+        return ""
+    li = "".join(f'<span class="{"dn" if str(v).startswith("error") else "flat"}">{esc(k)}：{esc(str(v))}</span>'
+                 for k, v in parts.items())
+    return f'<div class="parts">{li}</div>'
+
+
+# ── 來源健康度 ──────────────────────────────
+def health_rows() -> list:
+    rows = []
+    for name, h in (HEALTH.get("sources") or {}).items():
+        hist = h.get("hist") or []
+        rec = [x for x in hist if _iso_age_h(x[0]) <= 24]
+        rate = (sum(x[1] for x in rec) / len(rec) * 100) if rec else None
+        fails = 0
+        for x in reversed(hist):
+            if x[1]:
+                break
+            fails += 1
+        rows.append({"name": name, "rate": rate, "n": len(rec), "fails": fails,
+                     "last_ok": h.get("last_ok", ""), "cnt": (hist[-1][2] if hist else 0)})
+    rows.sort(key=lambda r: (-r["fails"], r["rate"] if r["rate"] is not None else 101))
+    return rows
+
+
+def health_html(rows) -> str:
+    if not rows:
+        return '<div class="empty">還沒有健康度資料（部署新版 scheduler.py 後，下一次自動抓取就會開始記錄）</div>'
+    body = ""
+    for r in rows:
+        if r["fails"] >= 3:
+            dot, cls = "🔴", "dn"
+        elif r["rate"] is not None and r["rate"] < 80:
+            dot, cls = "🟡", "flat"
+        else:
+            dot, cls = "🟢", "up"
+        rate = f'{r["rate"]:.0f}%（{r["n"]} 次）' if r["rate"] is not None else "—"
+        last = relative_time(datetime.fromisoformat(r["last_ok"])) if r["last_ok"] else "—"
+        body += (f'<tr><td class="l">{dot} {esc(r["name"])}</td><td class="{cls}">{rate}</td>'
+                 f'<td>{r["fails"] if r["fails"] else "—"}</td><td>{r["cnt"]}</td><td>{esc(last)}</td></tr>')
+    return ('<div class="tblw"><table class="tbl"><tr><th>來源</th><th>近 24 小時成功率</th><th>連續失敗</th>'
+            f'<th>最近篇數</th><th>最近成功</th></tr>{body}</table></div>')
+
+
+# ── 籌碼分頁 ──────────────────────────────
+def rank_html(title, items) -> str:
+    if not items:
+        return f'<div class="rk"><div class="rk-h">{esc(title)}</div><div class="rk-e">（無）</div></div>'
+    mx = max(abs(x["v"]) for x in items) or 1
+    rows = "".join(
+        f'<div class="rk-r"><span class="rk-c"><a href="{esc(yahoo_tw(x["c"]), quote=True)}" target="_blank" '
+        f'rel="noopener">{esc(x["c"])}</a></span><span class="rk-n">{esc(x.get("n", ""))}</span>'
+        f'<span class="rk-b"><i style="width:{abs(x["v"]) / mx * 100:.0f}%;background:var(--{"up" if x["v"] > 0 else "dn"})"></i></span>'
+        f'<span class="rk-v {_vcls(x["v"])}">{x["v"]:+,}</span></div>' for x in items)
+    return f'<div class="rk"><div class="rk-h">{esc(title)}</div>{rows}</div>'
+
+
+def _tbl_ann(items, cols) -> str:
+    if not items:
+        return '<div class="rk-e">（目前沒有資料）</div>'
+    head = "".join(f"<th>{esc(h)}</th>" for _, h in cols)
+    body = ""
+    for it in items[:40]:
+        tds = ""
+        for k, _h2 in cols:
+            v = it.get(k, "")
+            if k == "c":
+                v = f'<a href="{esc(yahoo_tw(v), quote=True)}" target="_blank" rel="noopener">{esc(v)}</a>'
+            else:
+                v = esc(str(v))
+            tds += f'<td class="l">{v}</td>'
+        body += f"<tr>{tds}</tr>"
+    return f'<div class="tblw"><table class="tbl"><tr>{head}</tr>{body}</table></div>'
+
+
+def chips_html(ch: dict) -> str:
+    out = []
+    mk = ch.get("market")
+    out.append(f'<div class="sec">🏦 三大法人（大盤，億元）<span class="fn-reco-chips">資料日期 {esc(ch.get("asof", "—"))}</span></div>')
+    if mk:
+        cells = "".join(
+            f'<div class="m"><div class="m-l">{lab}</div><div class="m-v {_vcls(mk.get(k, 0))}">{mk.get(k, 0):+,.1f}</div></div>'
+            for k, lab in (("foreign", "外資"), ("trust", "投信"), ("dealer", "自營商"), ("total", "合計")))
+        out.append(f'<div class="mrow">{cells}</div>')
+    hist = ch.get("history") or {}
+    if hist:
+        rows = ""
+        for k in sorted(hist.keys(), reverse=True)[:10]:
+            h = hist[k]
+            dd = f"{k[4:6]}/{k[6:]}"
+            rows += (f'<tr><td class="l">{dd}</td>' + "".join(
+                f'<td class="{_vcls(h.get(x, 0))}">{h.get(x, 0):+,.1f}</td>' for x in ("foreign", "trust", "dealer", "total"))
+                + "</tr>")
+        out.append('<div class="tblw"><table class="tbl"><tr><th>日期</th><th>外資</th><th>投信</th><th>自營商</th>'
+                   f'<th>合計</th></tr>{rows}</table></div>')
+    out.append('<div class="sec">📊 個股買賣超前 10（張）</div>')
+    out.append('<div class="rkgrid">' + rank_html("外資買超", ch.get("foreign_buy")) + rank_html("外資賣超", ch.get("foreign_sell"))
+               + rank_html("投信買超", ch.get("trust_buy")) + rank_html("投信賣超", ch.get("trust_sell")) + "</div>")
+    mg = ch.get("margin")
+    if mg:
+        amt = mg.get("amt")
+        extra = (f'<span class="fn-reco-chips">大盤融資餘額 {amt["bal"]:,.0f} 億（{amt["chg"]:+,.1f} 億）</span>' if amt else "")
+        out.append(f'<div class="sec">💳 融資融券增減前 10（張）· {esc(mg.get("date", ""))}{extra}</div>')
+        out.append('<div class="rkgrid">' + rank_html("融資增加", mg.get("fin_up")) + rank_html("融資減少", mg.get("fin_down"))
+                   + rank_html("融券增加", mg.get("short_up")) + "</div>")
+    return "".join(out)
+
+
+# ── 行事曆分頁 ──────────────────────────────
+CAL_KIND = {"macro": ("🏛", "總經"), "exdiv": ("💰", "除權息"), "earn": ("📊", "美股財報"),
+            "holiday": ("🏖", "休市"), "other": ("📌", "其他")}
+
+
+def cal_html(events, kind="全部") -> str:
+    today = datetime.now(TZ_TW).date()
+    keep = [e for e in events if kind == "全部" or e.get("kind") == kind]
+    by = {}
+    for e in keep:
+        by.setdefault(e["date"], []).append(e)
+    if not by:
+        return '<div class="empty">📭 這個類別近期沒有事件</div>'
+    out = []
+    for ds in sorted(by.keys()):
+        try:
+            dt = datetime.strptime(ds, "%Y-%m-%d").date()
+        except Exception:
+            continue
+        delta = (dt - today).days
+        rel = "今天" if delta == 0 else ("明天" if delta == 1 else (f"{delta} 天後" if delta > 1 else "已過"))
+        out.append(f'<div class="cal-d{" today" if delta == 0 else ""}">{dt.month}/{dt.day}（{WEEK[dt.weekday()]}）<span>{rel}</span></div>')
+        rows = []
+        for e in by[ds]:
+            ic = CAL_KIND.get(e.get("kind"), CAL_KIND["other"])[0]
+            note = f'<span class="cal-x">{esc(e["note"])}</span>' if e.get("note") else ""
+            rows.append(f'<div class="cal-r"><span>{ic}</span><span class="cal-t">{esc(e.get("time") or "")}</span>'
+                        f'<span class="cal-n">{esc(e["title"])}</span>{note}</div>')
+        if len(rows) > 8:
+            out.append("".join(rows[:8]) + f'<details class="more"><summary>另外 {len(rows) - 8} 筆</summary>'
+                       + "".join(rows[8:]) + "</details>")
+        else:
+            out.append("".join(rows))
+    return "".join(out)
+
+
+# ── 社群分頁 ──────────────────────────────
+def _post_list(posts, n=40, show_k=True) -> str:
+    if not posts:
+        return '<div class="rk-e">（目前沒有資料）</div>'
+    rows = ""
+    for p in posts[:n]:
+        k = f'<span class="pk">{esc(p["k"])}</span>' if (show_k and p.get("k")) else ""
+        rows += (f'<div class="post">{k}<a href="{esc(p["u"], quote=True)}" target="_blank" rel="noopener">{esc(p["t"])}</a>'
+                 f'<span class="pt">{rel_epoch(p.get("p"))}</span></div>')
+    return rows
+
+
+def _rank_list(rows, n=15) -> str:
+    """rows: [(標題, 連結, 右側小字[, 原文])]"""
+    if not rows:
+        return '<div class="rk-e">（目前沒有資料）</div>'
+    out = ""
+    for r in rows[:n]:
+        t, u, x = r[0], r[1], r[2]
+        sub = f'<div style="font-size:11.5px;color:var(--tx3);font-weight:400">{esc(r[3])}</div>' if len(r) > 3 and r[3] else ""
+        out += (f'<div class="post"><div style="flex:1;min-width:0"><a href="{esc(u, quote=True)}" target="_blank" '
+                f'rel="noopener">{esc(t)}</a>{sub}</div><span class="pt">{esc(x)}</span></div>')
+    return out
+
+
+def social_html(sc: dict) -> tuple:
+    """回傳 (左欄 html, 右欄 html)：左＝Reddit（美國），右＝微博（大陸）"""
+    left = ""
+    rd = ""
+    for sub, lst in (sc.get("reddit") or {}).items():
+        rd += f'<div class="subhead"><b>r/{esc(sub)}</b></div>' + _rank_list(
+            [(p.get("z") or p["t"], p["u"], rel_epoch(p.get("p")), p["t"] if p.get("z") else "") for p in lst], 12)
+    rd = rd or '<div class="rk-e">（Reddit 目前連不上）</div>'
+    left += '<div class="sec">👽 Reddit（美國）</div>' + rd
+    wb = sc.get("weibo") or []
+    wb_h = _rank_list([(f'{i}. {p["t"]}', p["u"], (p.get("tag") or "") + (f' · {p["n"]:,}' if p.get("n") else ""))
+                       for i, p in enumerate(wb, 1)], 20)
+    right = '<div class="sec">🇨🇳 微博熱搜（大陸）</div>' + wb_h
+    return left, right
+
+
+gen_str, gen_age = _gen_time_str(sync.get("generated_at", ""))
+if sync["ok"] and gen_age is not None and gen_age <= 3:
+    status = f'<span class="pill pill-ok">● 自動更新正常</span>'
+elif sync["ok"]:
+    status = '<span class="pill pill-warn">⚠ 自動更新已超過 3 小時</span>'
+else:
+    status = '<span class="pill pill-warn">⚠ 未連到 GitHub 資料</span>'
+
+_hbad = [r for r in health_rows() if r["fails"] >= 3]
+if _hbad:
+    status += (f'<span class="pill pill-warn" title="{esc("、".join(r["name"] for r in _hbad), quote=True)}">'
+               f'⚠ {len(_hbad)} 個來源連續抓不到</span>')
+
+tb1, tb3, tb2 = st.columns([5, 1.3, 1])
+with tb1:
+    st.markdown(_h(f"""
+    <div class="topbar"><span class="logo">📈 FinNews AI</span>{status}
+    <span class="tmono">資料產生 {gen_str} · 本頁載入 {datetime.now(TZ_TW).strftime("%H:%M")}</span></div>"""),
+                unsafe_allow_html=True)
+with tb3:
+    _keys = list(THEMES.keys())
+    st.selectbox("主題", _keys, key="theme_sel", format_func=lambda k: THEMES[k][0],
+                 label_visibility="collapsed")
+    if st.query_params.get("theme") != st.session_state["theme_sel"]:
+        st.query_params["theme"] = st.session_state["theme_sel"]
+with tb2:
+    if st.button("🔄 立即抓取", type="primary", use_container_width=True):
+        with st.spinner("抓取中，約 30～60 秒…"):
+            res = crawl_and_save(enabled_names=st.session_state["enabled_srcs"],
+                                 use_ai=GROQ_OK, max_ai_per_run=10)
+            st.session_state["last_update"] = res["time"]
+            st.cache_data.clear()
+        st.success(f"新增 {res['saved']} 則｜AI {res['ai_count']} 則｜翻譯 {res['translated']} 則")
+        st.rerun()
+
+if not sync["ok"] and not DATA_URL:
+    st.info("尚未設定 NEWS_DATA_URL（Streamlit Secrets），目前只顯示本機手動抓取的資料。設定方式見教學步驟。")
+elif not sync["ok"]:
+    st.warning(f"讀取 GitHub 資料失敗：{sync['error']}")
+
+qs = fetch_quotes()
+if qs:
+    st.markdown(quotes_html(qs), unsafe_allow_html=True)
+
+tab_home, tab_ai, tab_sports, tab_ent, tab_game, tab_cal, tab_search, tab_cfg = st.tabs(
+    ["📰 今日新聞", "🤖 AI 專區", "⚽ 運動", "🎬 娛樂", "🎮 電玩", "📅 行事曆", "🔎 搜尋", "⚙️ 設定"])
+
+# ═══════════════════════════════════════════════
+# TAB 1：今日新聞
+# ═══════════════════════════════════════════════
+with tab_home:
+    if df_all.empty:
+        st.markdown('<div class="empty">📭 還沒有任何新聞，請按右上角「立即抓取」</div>', unsafe_allow_html=True)
+    else:
+        df_fin = df_all[~df_all["category"].isin(LIFE_CATS + ("AI", "大陸生活"))]
+        df_r, used_h = recent(df_fin if not df_fin.empty else df_all)
+        if used_h > 12:
+            st.caption(f"ℹ️ 12 小時內新聞太少，已自動放寬到 {used_h} 小時")
+
+        eff_all = df_r.apply(lambda r: eff_sent(r)[0], axis=1)
+        bull_n = int((eff_all == "bullish").sum())
+        bear_n = int((eff_all == "bearish").sum())
+        neu_n = len(df_r) - bull_n - bear_n
+        ai_df_all = df_r[df_r["ai_summary"].fillna("") != ""]
+        geo_df = df_r[df_r["is_geo"] == True]
+        tot = max(len(df_r), 1)
+
+        st.markdown(_h(f"""
+        <div class="mrow">
+          <div class="m"><div class="m-l">📰 新聞</div><div class="m-v">{len(df_r)}</div></div>
+          <div class="m"><div class="m-l">📈 利多</div><div class="m-v up">{bull_n}</div></div>
+          <div class="m"><div class="m-l">📉 利空</div><div class="m-v dn">{bear_n}</div></div>
+          <div class="m"><div class="m-l">✦ AI 分析</div><div class="m-v">{len(ai_df_all)}</div></div>
+          <div class="m"><div class="m-l">⚑ 地緣</div><div class="m-v">{len(geo_df)}</div></div>
+        </div>
+        <div class="sbar" title="利多 / 中性 / 利空">
+          <i style="width:{bull_n / tot * 100:.1f}%;background:var(--up)"></i>
+          <i style="width:{neu_n / tot * 100:.1f}%;background:#D9CDB3"></i>
+          <i style="width:{bear_n / tot * 100:.1f}%;background:var(--dn)"></i>
+        </div>"""), unsafe_allow_html=True)
+
+        # ── 題材升溫（提及量暴增）──
+        _sg, _span = detect_surge(df_all)
+        if _sg:
+            st.markdown(f'<div class="sec">📈 題材升溫 <span class="fn-reco-chips">近 {SURGE_WIN_H} 小時被提及次數 ≥ 平均的 '
+                        f'{SURGE_RATIO:g} 倍</span></div>' + surge_html(_sg), unsafe_allow_html=True)
+        elif _span < SURGE_MIN_HISTORY_H:
+            st.caption(f"📈 題材升溫：資料只涵蓋 {_span:.0f} 小時，累積到 {SURGE_MIN_HISTORY_H} 小時以上才會開始偵測")
+        else:
+            st.caption(f"📈 題材升溫：近 {SURGE_WIN_H} 小時沒有個股的提及量超過平均 {SURGE_RATIO:g} 倍")
+
+        # ── 頭條 ──
+        st.markdown('<div class="sec">🔥 今日頭條</div>', unsafe_allow_html=True)
+        st.markdown(hero_html(df_r), unsafe_allow_html=True)
+
+        # ── ✨ 為你推薦（內容由瀏覽器端依你的點擊紀錄挑選，這裡只放容器與候選池）──
+        st.markdown(_h("""
+        <div class="fn-reco-wrap"><div class="sec">✨ 為你推薦 <span class="fn-reco-chips"></span>
+        <a href="#" class="fn-reco-clear">清除偏好</a></div>
+        <div class="fn-reco-note"></div><div class="grid fn-reco"></div></div>"""), unsafe_allow_html=True)
+        _pool_src = df_all[df_all["published_at"].apply(age_hours) <= 48]
+        _pool_src = _pool_src.sort_values("published_at", ascending=False).head(160)
+        _pool_cards = "".join(card_html(rep_, oth_) for rep_, oth_ in cluster_events(_pool_src)[:80])
+        st.markdown(f'<div class="fn-pool" style="display:none">{_pool_cards}</div>', unsafe_allow_html=True)
+
+        # ── AI 市場總結 ──
+        st.markdown('<div class="sec">✦ AI 市場總結</div>', unsafe_allow_html=True)
+        if not GROQ_OK:
+            st.info("需要設定 GROQ_API_KEY 才能顯示 AI 市場總結")
+        elif ai_df_all.empty:
+            st.info("近期還沒有 AI 分析資料（等下一次 GitHub Actions 執行，或按「立即抓取」）")
+        else:
+            cache_key = f"{len(ai_df_all)}_{ai_df_all.iloc[0].get('published_at')}"
+            if st.session_state.get("_sum_key") != cache_key:
+                with st.spinner("AI 正在生成市場總結…"):
+                    sdata, serr = get_daily_ai_summary(
+                        ai_df_all.sort_values("importance_score", ascending=False))
+                st.session_state.update({"_sdata": sdata, "_serr": serr, "_sum_key": cache_key,
+                                         "_stime": datetime.now(TZ_TW).strftime("%H:%M")})
+            sdata, serr = st.session_state.get("_sdata", ""), st.session_state.get("_serr", "")
+            if sdata and isinstance(sdata, dict):
+                direction = sdata.get("direction", "震盪")
+                dcls = "up" if direction == "偏多" else ("dn" if direction == "偏空" else "flat")
+                icon = "↗" if direction == "偏多" else ("↘" if direction == "偏空" else "→")
+                bt = "".join(f'<span class="tag tag-b">📈 {esc(t)}</span>' for t in sdata.get("bull_themes", []))
+                dt = "".join(f'<span class="tag tag-d">📉 {esc(t)}</span>' for t in sdata.get("bear_themes", []))
+                kt = "".join(f'<span class="chip-t">{esc(str(t))}</span>' for t in sdata.get("key_tickers", []))
+                st.markdown(_h(f"""
+                <div class="ai-card"><span class="ai-badge">Groq AI · 市場總結</span>
+                <div class="ai-dir {dcls}">{icon} 整體{esc(direction)}</div>
+                <div class="ai-rsn">{esc(sdata.get("direction_reason", ""))}</div>
+                <div>{bt}{dt}</div><div>{kt}</div>
+                <div class="ai-body">{esc(sdata.get("summary", ""))}</div>
+                <div class="ai-ft">根據 {len(ai_df_all)} 則 AI 分析新聞 · {st.session_state.get("_stime", "")} 台灣時間</div></div>"""),
+                            unsafe_allow_html=True)
+                if st.button("🔄 重新生成總結", key="regen"):
+                    st.session_state.pop("_sum_key", None)
+                    st.rerun()
+            elif serr:
+                st.warning(f"⏳ {serr}")
+                if st.button("🔄 重試", key="regen_err"):
+                    st.session_state.pop("_sum_key", None)
+                    st.rerun()
+
+        # ── 地緣 ──
+        if not geo_df.empty:
+            st.markdown('<div class="sec">⚑ 地緣政治警示</div>', unsafe_allow_html=True)
+            g = ""
+            for _, r in geo_df.head(6).iterrows():
+                s, _v = eff_sent(r)
+                imp = "利多" if s == "bullish" else ("利空" if s == "bearish" else "中性")
+                t, _o = titles(r)
+                g += (f'<div class="geo"><a href="{esc(str(r.get("url", "#")), quote=True)}" target="_blank" '
+                      f'rel="noopener">{esc(t)}</a> <span style="color:var(--tx3)">· {imp}</span></div>')
+            st.markdown(f'<div class="geo-grid">{g}</div>', unsafe_allow_html=True)
+
+        # ── 新聞牆 ──
+        st.markdown('<div class="sec">📋 最新新聞</div>', unsafe_allow_html=True)
+        chip = st.radio("快速篩選", ["全部", "🏮 大陸", "🌐 國際英文", "📈 利多", "📉 利空", "✦ AI 精選", "⚑ 地緣"],
+                        horizontal=True, label_visibility="collapsed", key="chip")
+        f1, f2, f3, f4 = st.columns([1.2, 2.4, 1, 1])
+        with f1:
+            src_list = sorted(df_r["source"].unique().tolist())
+            src_f = st.selectbox("來源", ["全部"] + src_list, key="d_src")
+        with f2:
+            kw = st.text_input("搜尋標題（中英文皆可）", placeholder="台積電 / Nvidia …", key="d_kw")
+        with f3:
+            sort_f = st.selectbox("排序", ["最新優先", "重要度"], key="d_sort")
+        with f4:
+            hide_neu = st.checkbox("隱藏中性", value=False, key="d_hide")
+
+        ddf = df_r.copy()
+        effs = ddf.apply(lambda r: eff_sent(r)[0], axis=1)
+        if chip == "📈 利多":
+            ddf = ddf[effs == "bullish"]
+        elif chip == "📉 利空":
+            ddf = ddf[effs == "bearish"]
+        elif chip == "✦ AI 精選":
+            ddf = ddf[(ddf["ai_summary"].fillna("") != "") & (ddf["ai_score"].abs() >= 5)]
+        elif chip == "⚑ 地緣":
+            ddf = ddf[ddf["is_geo"] == True]
+        elif chip == "🏮 大陸":
+            # 「大陸生活」（娛樂/電玩/旅遊）平常不進新聞牆，只在這個篩選底下才併進來顯示
+            life_cn = df_all[df_all["category"] == "大陸生活"]
+            ddf = pd.concat([ddf[ddf["category"] == "大陸"], life_cn]).drop_duplicates(subset=["url"])
+            ddf = ddf.sort_values("published_at", ascending=False)
+        elif chip == "🌐 國際英文":
+            ddf = ddf[ddf["language"] == "en"]
+        if hide_neu:
+            ddf = ddf[ddf.apply(lambda r: eff_sent(r)[0] != "neutral", axis=1)]
+        if src_f != "全部":
+            ddf = ddf[ddf["source"] == src_f]
+        if kw:
+            m = (ddf["title"].str.contains(kw, case=False, na=False)
+                 | ddf["title_zh"].fillna("").str.contains(kw, case=False, na=False))
+            ddf = ddf[m]
+        if sort_f == "重要度":
+            ddf = ddf.sort_values(["importance_score", "published_at"], ascending=False)
+
+        st.markdown('<div class="fn-dens"><span data-dens="card">▦ 卡片</span><span data-dens="list">☰ 列表</span></div>',
+                    unsafe_allow_html=True)
+        st.caption(f"共 {len(ddf)} 則（往下捲會自動載入更多）")
+        render_grid(ddf, max_items=240, lazy=24, cls="wall")
+
+
+# ═══════════════════════════════════════════════
+# TAB：籌碼 / 行事曆 / 社群（資料來自 extras.json）
+# ═══════════════════════════════════════════════
+_NO_EXTRAS = ("這一塊的資料還沒產生。請確認 GitHub Actions 已部署新版（extras.py、calendar_manual.json、fetch_news.yml），"
+              "下一次自動抓取後就會出現；也可以到 Actions 頁面手動按一次 Run workflow。")
+with tab_cal:
+    # ① 籌碼（最上）
+    _ch = EXTRAS.get("chips")
+    if not _ch or not (_ch.get("foreign_buy") or _ch.get("market")):
+        st.markdown(f'<div class="empty">📊 {_NO_EXTRAS}</div>', unsafe_allow_html=True)
+        if _ch:
+            st.markdown(_parts_html(_ch.get("parts")), unsafe_allow_html=True)
+    else:
+        st.markdown(chips_html(_ch), unsafe_allow_html=True)
+        st.caption("資料來源：臺灣證券交易所（三大法人買賣超日報、融資融券彙總）。"
+                   "三大法人約 15:00～16:30 公布，融資融券通常更晚；紅色＝買超／增加，綠色＝賣超／減少。")
+
+    # ② 行事曆（只留總經 / 休市 / NVDA 財報，未來約 2 個月，不分頁）
+    st.markdown('<div class="sec">📅 行事曆（未來 2 個月）</div>', unsafe_allow_html=True)
+    _cal = EXTRAS.get("calendar")
+    _today = datetime.now(TZ_TW).date()
+    _evs = []
+    for _e in ((_cal or {}).get("events") or []):
+        try:
+            _d = datetime.strptime(_e["date"], "%Y-%m-%d").date()
+        except Exception:
+            continue
+        if 0 <= (_d - _today).days <= 62 and (_e.get("kind") in ("macro", "holiday")
+                                                  or (_e.get("kind") == "earn" and ("NVDA" in _e.get("title", "") or "輝達" in _e.get("title", "")))):
+            _evs.append(_e)
+    if _evs:
+        st.markdown(cal_html(_evs), unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="empty">📭 未來 2 個月沒有事件（請更新 calendar_manual.json）</div>', unsafe_allow_html=True)
+    st.caption("自動更新：休市日用規則計算，FOMC 來自 Fed 官網，非農／CPI 來自 FRED／BLS，輝達財報來自 Nasdaq；時間已換成台灣時間，只顯示今天起 62 天內。")
+
+    # ③ 社群（最下）：Reddit、微博
+    st.markdown('<div class="sec">💬 社群熱門話題</div>', unsafe_allow_html=True)
+    _sc = EXTRAS.get("social")
+    if not _sc:
+        st.markdown(f'<div class="empty">💬 {_NO_EXTRAS}</div>', unsafe_allow_html=True)
+    else:
+        _l, _r = social_html(_sc)
+        _c1, _c2 = st.columns(2)
+        with _c1:
+            st.markdown(_l, unsafe_allow_html=True)
+        with _c2:
+            st.markdown(_r, unsafe_allow_html=True)
+        st.markdown(_parts_html(_sc.get("parts")), unsafe_allow_html=True)
+        st.caption("社群內容只代表網友討論熱度，不是消息來源，也不是買賣依據。")
+
+
+# ═══════════════════════════════════════════════
+# TAB：搜尋新聞（即時查 Google News）
+# ═══════════════════════════════════════════════
+with tab_search:
+    st.caption("輸入任何關鍵字，現場去 Google News 查（不限於資料庫裡已有的新聞），結果不會存起來。")
+    with st.form("search_form", clear_on_submit=False):
+        sc1, sc2, sc3, sc4 = st.columns([3, 1.3, 1.3, 0.8])
+        with sc1:
+            sq = st.text_input("關鍵字", placeholder="例：台積電 2奈米 / Nvidia Rubin / 聯準會 降息", label_visibility="collapsed")
+        with sc2:
+            slang = st.selectbox("語言", ["中文", "英文（標題自動翻中文）", "中英文都找"], label_visibility="collapsed")
+        with sc3:
+            sdays = st.selectbox("時間", [1, 3, 7, 30], index=2, format_func=lambda d: f"近 {d} 天", label_visibility="collapsed")
+        with sc4:
+            go = st.form_submit_button("🔎 搜尋", type="primary", use_container_width=True)
+    if go and sq.strip():
+        st.session_state["last_search"] = (sq.strip(), slang, int(sdays))
+    ls = st.session_state.get("last_search")
+    if ls:
+        with st.spinner(f"正在搜尋「{ls[0]}」…"):
+            try:
+                sdf = live_search(*ls)
+            except Exception as e:
+                sdf = None
+                st.warning(f"搜尋失敗：{type(e).__name__}: {e}")
+        if sdf is not None:
+            if sdf.empty:
+                st.markdown('<div class="empty">找不到結果，換個關鍵字或放寬時間試試</div>', unsafe_allow_html=True)
+            else:
+                st.caption(f"「{ls[0]}」共 {len(sdf)} 則")
+                render_grid(sdf, max_items=40)
+    else:
+        st.markdown('<div class="empty">🔎 在上面輸入關鍵字開始搜尋</div>', unsafe_allow_html=True)
+
+
+# ═══════════════════════════════════════════════
+# TAB：AI 專區（美國 / 中國 / 台灣供應鏈）
+# ═══════════════════════════════════════════════
+AI_SEGMENTS = [
+    ("🧠 AI 晶片／GPU",   ["nvidia", "輝達", "amd", "超微", "gpu", "blackwell", "rubin", "chip", "晶片", "broadcom", "博通"]),
+    ("🏭 晶圓代工／封裝",  ["tsmc", "台積電", "cowos", "hbm", "先進封裝", "foundry", "samsung", "sk hynix", "micron", "美光", "asml"]),
+    ("🖥️ 伺服器／ODM",    ["server", "伺服器", "廣達", "緯創", "鴻海", "foxconn", "supermicro", "dell", "wiwynn", "緯穎"]),
+    ("☁️ 雲端大廠／資料中心", ["microsoft", "google", "amazon", "aws", "meta", "oracle", "data center", "資料中心", "capex", "azure"]),
+    ("💬 模型／應用",      ["openai", "anthropic", "claude", "chatgpt", "gemini", "llama", "grok", "model", "模型", "agent"]),
+    ("🇨🇳 中國 AI",        ["deepseek", "alibaba", "qwen", "huawei", "ascend", "baidu", "tencent", "moonshot", "kimi", "china", "中國", "大陸"]),
+    ("🛡️ 管制／政策",      ["export control", "export", "tariff", "ban", "restriction", "sanction", "出口管制", "關稅", "禁令", "制裁"]),
+    ("⚡ 電力／散熱",      ["power", "electricity", "cooling", "liquid", "散熱", "液冷", "電力", "nuclear", "核電"]),
+]
+CN_SRC = {"GN-中國AI", "SCMP Tech", "GN-大陸AI模型"}
+CN_AI_RE = (r"\bai\b|人工智慧|人工智能|大模型|大語言|大语言|生成式|算力|晶片|芯片|半導體|半导体|gpu|deepseek|"
+            r"輝達|英偉達|英伟达|華為|华为|昇騰|昇腾|機器人|机器人|智駕|自駕|openai|chatgpt|通義|文心|智譜|月之暗面")
+STOCK_RE = r"stock|shares|\bsell|investor|etf|earnings|market cap|valuation|wall street|nasdaq|s&p|股|美股|財報|市值|估值|漲|跌|買進|賣出|投資人|營收"
+
+
+def _blob(df):
+    return (df["title"].fillna("") + " " + df["title_zh"].fillna("") + " " + df["summary"].fillna("")).str.lower()
+
+
+with tab_ai:
+    ai_zone = df_all[df_all["category"] == "AI"]
+    tw_chain = df_all[(df_all["category"] != "AI") & df_all["sectors"].fillna("").str.contains("AI|伺服器|半導體", regex=True)]
+    _cn_all = df_all[df_all["category"] == "大陸"]
+    cn_ai = _cn_all[_blob(_cn_all).str.contains(CN_AI_RE, regex=True)] if not _cn_all.empty else _cn_all
+    if ai_zone.empty and tw_chain.empty and cn_ai.empty:
+        st.markdown('<div class="empty">🤖 AI 專區還沒有資料。等下一次 GitHub Actions 抓取（新來源會在下一輪出現），'
+                    '或按右上角「立即抓取」。</div>', unsafe_allow_html=True)
+    else:
+        pool = pd.concat([ai_zone, tw_chain, cn_ai]).drop_duplicates(subset=["url"])
+        pool, hrs = recent(pool, hours_steps=(24, 48, 72, 168), min_n=10)
+        region = st.radio("地區", ["🧪 模型與技術", "🇺🇸 美國／全球", "🇨🇳 中國", "🇹🇼 台灣供應鏈", "🌐 全部"], horizontal=True,
+                          label_visibility="collapsed", key="ai_region")
+        if region == "🧪 模型與技術":
+            # 只留「產品／模型／技術」：排除標題或摘要偏股價、財報、投資的文章
+            view = pool[(pool["category"] == "AI") & ~_blob(pool).str.contains(STOCK_RE, regex=True)]
+        elif region == "🇺🇸 美國／全球":
+            view = pool[(pool["category"] == "AI") & ~pool["source"].isin(CN_SRC)]
+        elif region == "🇨🇳 中國":
+            blob = _blob(pool)
+            cn_kw = "deepseek|alibaba|qwen|huawei|ascend|baidu|tencent|moonshot|kimi|china|chinese|中國|大陸"
+            view = pool[pool["source"].isin(CN_SRC) | (pool["category"] == "大陸")
+                        | ((pool["category"] == "AI") & blob.str.contains(cn_kw, regex=True))]
+        elif region == "🇹🇼 台灣供應鏈":
+            view = pool[~pool["category"].isin(["AI", "大陸"])]
+        else:
+            view = pool
+        if view.empty:
+            view = pool
+
+        effs_ai = view.apply(lambda r: eff_sent(r)[0], axis=1)
+        b_n, d_n = int((effs_ai == "bullish").sum()), int((effs_ai == "bearish").sum())
+        st.markdown(_h(f"""
+        <div class="mrow">
+          <div class="m"><div class="m-l">🤖 AI 新聞</div><div class="m-v">{len(view)}</div></div>
+          <div class="m"><div class="m-l">📈 利多</div><div class="m-v up">{b_n}</div></div>
+          <div class="m"><div class="m-l">📉 利空</div><div class="m-v dn">{d_n}</div></div>
+          <div class="m"><div class="m-l">🇺🇸 美國</div><div class="m-v">{int(((pool['category'] == 'AI') & ~pool['source'].isin(CN_SRC)).sum())}</div></div>
+          <div class="m"><div class="m-l">🇨🇳 中國</div><div class="m-v">{int((pool['source'].isin(CN_SRC) | (pool['category'] == '大陸')).sum())}</div></div>
+        </div>"""), unsafe_allow_html=True)
+        if hrs > 24:
+            st.caption(f"ℹ️ 近 24 小時 AI 新聞較少，已放寬到 {hrs} 小時")
+
+        st.markdown('<div class="sec">🔥 AI 頭條</div>', unsafe_allow_html=True)
+        st.markdown(hero_html(view), unsafe_allow_html=True)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown('<div class="sec">🧬 產業鏈熱度（提及篇數）</div>', unsafe_allow_html=True)
+            blob = _blob(pool)
+            segs = []
+            for name, kws in AI_SEGMENTS:
+                pat = "|".join(re.escape(k) for k in kws)
+                m = blob.str.contains(pat, regex=True)
+                n = int(m.sum())
+                if n:
+                    e = pool[m].apply(lambda r: eff_sent(r)[0], axis=1)
+                    segs.append((name, float(n), "#B8742A",
+                                 f"{n} 篇 ↑{int((e == 'bullish').sum())}↓{int((e == 'bearish').sum())}"))
+            segs.sort(key=lambda x: -x[1])
+            st.markdown(f'<div class="seg">{hbars(segs)}</div>' if segs else '<div class="empty">資料不足</div>',
+                        unsafe_allow_html=True)
+            st.caption("↑利多篇數 ↓利空篇數（關鍵字＋AI 判斷）；一篇文章可能同時屬於多個環節")
+        with c2:
+            st.markdown('<div class="sec">🎯 被點名最多的股票</div>', unsafe_allow_html=True)
+            cnt = {}
+            for _, r in pool.iterrows():
+                for t in str(r.get("ai_affected_tickers", "") or r.get("tickers", "") or "").split(","):
+                    t = t.strip()
+                    if t:
+                        cnt[t] = cnt.get(t, 0) + 1
+            top = sorted(cnt.items(), key=lambda x: -x[1])[:8]
+            st.markdown(f'<div class="seg">{hbars([(k, float(v), "#2E86DE", f"{v} 篇") for k, v in top])}</div>'
+                        if top else '<div class="empty">還沒有個股被點名</div>', unsafe_allow_html=True)
+
+        st.markdown('<div class="sec">📋 AI 新聞</div>', unsafe_allow_html=True)
+        render_grid(view.sort_values("published_at", ascending=False), max_items=200, lazy=18)
+
+
+# ═══════════════════════════════════════════════
+# TAB：運動 / 娛樂 / 電玩（輕量，不做股市判斷）
+# ═══════════════════════════════════════════════
+def render_life_tab(cat: str, icon: str):
+    d0 = df_all[df_all["category"] == cat]
+    if d0.empty:
+        st.markdown(f'<div class="empty">{icon} {cat}還沒有資料，等下一次自動抓取就會出現。</div>', unsafe_allow_html=True)
+        return
+    d0, _ = recent(d0, hours_steps=(24, 48, 72, 168), min_n=6)
+    st.caption(f"共 {len(d0)} 則（只保留精華，每個來源 8～12 則）")
+    render_grid(d0.sort_values("published_at", ascending=False), max_items=200, lazy=18)
+
+
+with tab_sports:
+    render_life_tab("運動", "⚽")
+with tab_ent:
+    render_life_tab("娛樂", "🎬")
+with tab_game:
+    render_life_tab("電玩", "🎮")
+
+
+# ═══════════════════════════════════════════════
+# TAB 3：設定
+# ═══════════════════════════════════════════════
+with tab_cfg:
+    st.markdown("#### ⭐ 收藏")
+    # 內容由瀏覽器端 JS 依 localStorage 畫出；收藏的是標題/連結快照，不受 72 小時限制
+    st.markdown('<div class="fn-fav-wrap"><div class="fn-fav-note"></div><div class="grid fn-fav"></div></div>',
+                unsafe_allow_html=True)
+    st.markdown("#### 🧹 顯示內容")
+    st.checkbox("把同一事件的多家報導合併成一張卡片", value=True, key="merge_events")
+    st.checkbox("顯示例行「月營收公布」快訊（預設隱藏）", key="show_rev",
+                help="像「聯詠10月營收100億元」這類每月大量出現的制式公告。勾選後下次重新整理生效。")
+    st.markdown("#### 📦 資料狀態")
+    st.caption(f"資料來源網址：{DATA_URL or '（未設定）'}")
+    st.write(f"最近同步：{'成功' if sync['ok'] else '失敗 – ' + sync['error']}｜本次併入 {sync['added']} 則｜"
+             f"JSON 產生時間 {gen_str}｜資料庫目前 {len(df_all)} 則")
+    if not df_all.empty:
+        cnt = df_all.groupby("source").size().sort_values(ascending=False).head(20)
+        mx = float(cnt.max())
+        st.markdown(hbars([(s, float(n), "#B8742A", f"{int(n)} 則") for s, n in cnt.items()]),
+                    unsafe_allow_html=True)
+        st.caption("各來源在資料庫裡的文章數（某來源是 0 或不見，代表該 RSS 目前抓不到，可去 crawler.py 換網址）")
+
+    st.markdown("#### 🩺 來源健康度")
+    st.markdown(health_html(health_rows()), unsafe_allow_html=True)
+    st.caption("每次自動抓取記一筆，保留最近約 2 天。「連續失敗」≥ 3 會在頁面最上方出現警示；"
+               "失敗＝該來源這次抓到 0 篇（網址壞了、被擋、或 RSS 真的沒新東西）。")
+    if EXTRAS:
+        st.markdown("**籌碼 / 行事曆 / 社群 資料狀態**")
+        for _k, _lab in (("chips", "籌碼"), ("calendar", "行事曆"), ("social", "社群")):
+            _e = EXTRAS.get(_k) or {}
+            st.markdown(f'{_lab}：`{_e.get("status", "沒有資料")}`　更新於 {esc(str(_e.get("fetched_at", "—"))[:16])}'
+                        + _parts_html(_e.get("parts")), unsafe_allow_html=True)
+    st.divider()
+    st.markdown("#### 📡「立即抓取」要用哪些來源")
+    st.caption("GitHub Actions 的自動抓取固定用 crawler.py 裡 enabled=True 的來源；這裡只影響頁面上的手動按鈕。")
+    enabled = []
+    for src in SOURCES:
+        if st.checkbox(f"**{src['name']}**　`{src['category']}`　`{src['language']}`",
+                       value=(src["name"] in st.session_state["enabled_srcs"]), key=f"src_{src['name']}"):
+            enabled.append(src["name"])
+    if st.button("💾 儲存來源設定", type="primary", key="save_srcs"):
+        st.session_state["enabled_srcs"] = enabled
+        st.success(f"已儲存，啟用 {len(enabled)} 個來源")
+
+
+# ─────────────────────────────────────────────
+# 已讀變淡：點過的新聞記在「你這個瀏覽器」的 localStorage，之後自動變淡
+# （腳本放在 iframe 裡，透過 parent 操作頁面；每次重跑會先清掉舊的監聽器避免重複）
+# ─────────────────────────────────────────────
+_READ_JS = """
+<script>
+(function(){
+  var P = window.parent, D, K = 'finnews_read', PK = 'finnews_prof', CK = 'finnews_clicks', S;
+  try { D = P.document; } catch(e) { return; }
+  if (P.__fnCleanup) { try { P.__fnCleanup(); } catch(e) {} }
+  function jget(k, d){ try { return JSON.parse(P.localStorage.getItem(k) || d); } catch(e) { return JSON.parse(d); } }
+  function jset(k, v){ try { P.localStorage.setItem(k, JSON.stringify(v)); } catch(e) {} }
+  try { P.localStorage.removeItem('finnews_wl'); } catch(e) {}
+  S = new Set(jget(K, '[]'));
+  function saveRead(){ jset(K, Array.from(S).slice(-2000)); }
+  function mainLink(el){
+    if (el.classList.contains('card')) return el.querySelector('a.ct');
+    return el.tagName === 'A' ? el : el.querySelector('a');
+  }
+  function markRead(){
+    D.querySelectorAll('.card, .si').forEach(function(el){
+      var a = mainLink(el);
+      if (a && S.has(a.href)) el.classList.add('read');
+    });
+  }
+  // ── 偏好：每次點擊替該卡片的股票/類股/類別/來源加分，半衰期 14 天 ──
+  var HALF = 14 * 864e5;
+  function eff(p, k){ var e = p[k]; return e ? e[0] * Math.pow(0.5, (Date.now() - e[1]) / HALF) : 0; }
+  function feats(el){
+    var f = [], d = el.dataset || {};
+    (d.tk || '').split(',').forEach(function(t){ if (t) f.push(['tk:' + t, 1]); });
+    (d.sec || '').split(',').forEach(function(t){ if (t) f.push(['sec:' + t, 1]); });
+    if (d.cat) f.push(['cat:' + d.cat, 0.6]);
+    if (d.src) f.push(['src:' + d.src, 0.3]);
+    return f;
+  }
+  function learn(card){
+    var p = jget(PK, '{}'), now = Date.now();
+    feats(card).forEach(function(x){
+      p[x[0]] = [eff(p, x[0]) + x[1], now];
+    });
+    var keys = Object.keys(p);
+    if (keys.length > 300) {   // 太多就丟掉最弱的
+      keys.sort(function(a, b){ return eff(p, b) - eff(p, a); });
+      keys.slice(300).forEach(function(k){ delete p[k]; });
+    }
+    jset(PK, p); jset(CK, (jget(CK, '0') | 0) + 1);
+  }
+  function score(el, p){
+    var s = 0, d = el.dataset || {};
+    feats(el).forEach(function(x){ s += x[1] * eff(p, x[0]); });
+    var age = parseFloat(d.age || '99');
+    return s + 0.8 * Math.max(0, 1 - age / 36) + 0.05 * parseFloat(d.imp || '0');
+  }
+  function label(k){ return k.replace(/^(tk|sec|cat):/, ''); }
+  function buildReco(){
+    var wrap = D.querySelector('.fn-reco-wrap'), box = D.querySelector('.fn-reco'), pool = D.querySelector('.fn-pool');
+    if (!wrap || !box || !pool) return;
+    var note = wrap.querySelector('.fn-reco-note'), chips = wrap.querySelector('.fn-reco-chips');
+    var clicks = jget(CK, '0') | 0, p = jget(PK, '{}');
+    function setText(el, txt){ if (el.textContent !== txt) el.textContent = txt; }
+    if (clicks < 3) {
+      if (box.children.length) box.innerHTML = '';
+      setText(chips, '');
+      setText(note, '多點幾則你有興趣的新聞（目前 ' + clicks + '/3），這裡就會開始學你的喜好。記錄只存在你的瀏覽器。');
+      return;
+    }
+    var top = Object.keys(p).filter(function(k){ return !/^src:/.test(k); })
+      .sort(function(a, b){ return eff(p, b) - eff(p, a); }).slice(0, 4).map(label);
+    setText(chips, top.length ? '· 你常看：' + top.join('、') : '');
+    var cards = Array.prototype.slice.call(pool.querySelectorAll('.card')).filter(function(c){
+      var a = mainLink(c); return a && !S.has(a.href);
+    });
+    var scored = cards.map(function(c){ return {c: c, s: score(c, p)}; }).sort(function(a, b){ return b.s - a.s; });
+    var pick = [], secCount = {};
+    for (var i = 0; i < scored.length && pick.length < 5; i++) {
+      var sec = (scored[i].c.dataset.sec || '').split(',')[0] || '-';
+      if ((secCount[sec] || 0) >= 2) continue;     // 同類股最多 2 張，避免一面倒
+      secCount[sec] = (secCount[sec] || 0) + 1; pick.push(scored[i].c);
+    }
+    var rest = scored.map(function(x){ return x.c; }).filter(function(c){ return pick.indexOf(c) < 0; });
+    rest.sort(function(a, b){ return parseFloat(b.dataset.imp || 0) - parseFloat(a.dataset.imp || 0); });
+    if (rest.length) pick.push(rest[0]);            // 第 6 張：不看偏好的「重要新聞」，保留探索
+    var sig = pick.map(function(c){ var a = mainLink(c); return a ? a.href : ''; }).join('|');
+    setText(note, '依你的點擊紀錄挑選（最近的點擊權重較高，14 天減半）；最後一張是不看偏好的重要新聞。');
+    if (box.getAttribute('data-sig') === sig && box.children.length) return;
+    box.setAttribute('data-sig', sig);
+    box.innerHTML = '';
+    pick.forEach(function(c){ var n = c.cloneNode(true); n.classList.add('reco'); box.appendChild(n); });
+    markRead();
+  }
+  // ── 收藏：存標題/連結/來源/時間的快照到 localStorage（上限 300 則）──
+  var FK = 'finnews_fav';
+  function favs(){ return jget(FK, '[]'); }
+  function saveFavs(a){ jset(FK, a.slice(0, 300)); }
+  function markFav(){
+    var set = new Set(favs().map(function(f){ return f.u; }));
+    D.querySelectorAll('.card .fav').forEach(function(el){
+      var c = el.closest('.card'), a = c && c.querySelector('a.ct');
+      var on = !!(a && set.has(a.href));
+      if (el.classList.contains('on') !== on) { el.classList.toggle('on', on); el.textContent = on ? '★' : '☆'; }
+    });
+  }
+  function toggleFav(card){
+    var a = card.querySelector('a.ct'); if (!a) return;
+    var d = card.dataset || {}, list = favs(), i = -1;
+    list.forEach(function(f, k){ if (f.u === a.href) i = k; });
+    if (i >= 0) list.splice(i, 1);
+    else list.unshift({u: a.href, t: a.textContent.trim(), s: d.src || '', p: parseInt(d.ts || '0', 10), b: d.sent || '', a: Date.now()});
+    saveFavs(list); markFav(); buildFav();
+  }
+  function removeFav(u){ saveFavs(favs().filter(function(f){ return f.u !== u; })); markFav(); buildFav(); }
+  function rel(ts){
+    if (!ts) return '';
+    var s = Date.now() / 1000 - ts;
+    if (s < 3600) return Math.max(1, Math.floor(s / 60)) + '分鐘前';
+    if (s < 86400) return Math.floor(s / 3600) + '小時前';
+    return Math.floor(s / 86400) + '天前';
+  }
+  function mk(tag, cls, txt){ var n = D.createElement(tag); if (cls) n.className = cls; if (txt) n.textContent = txt; return n; }
+  function buildFav(){
+    var box = D.querySelector('.fn-fav'), note = D.querySelector('.fn-fav-note');
+    if (!box || !note) return;
+    var list = favs();
+    var sig = list.map(function(f){ return f.u; }).join('|');
+    if (box.getAttribute('data-sig') === sig && note.textContent) return;
+    box.setAttribute('data-sig', sig);
+    note.textContent = '';
+    if (!list.length) {
+      note.textContent = '還沒有收藏。在新聞卡片右下角按 ☆ 就會收藏到這裡（只存在你這個瀏覽器，不受 72 小時限制）。';
+      box.innerHTML = ''; return;
+    }
+    note.appendChild(D.createTextNode('共收藏 ' + list.length + ' 則（只存在你這個瀏覽器）'));
+    var clr = mk('span', 'fav-clear', '清除全部'); clr.setAttribute('data-clear', '1'); note.appendChild(clr);
+    box.innerHTML = '';
+    list.forEach(function(f){
+      var c = mk('div', 'favc'), b = mk('div', 'cb');
+      var a = mk('a', 'ct', f.t); a.href = f.u; a.target = '_blank'; a.rel = 'noopener';
+      var m = mk('div', 'cm');
+      if (f.b) m.appendChild(mk('span', 'bd ' + (f.b.indexOf('利多') === 0 ? 'bd-b' : (f.b.indexOf('利空') === 0 ? 'bd-d' : 'bd-n')), f.b));
+      m.appendChild(mk('span', '', f.s));
+      if (f.p) m.appendChild(mk('span', '', '· ' + rel(f.p)));
+      var x = mk('span', 'fav on', '★'); x.setAttribute('data-rm', f.u); x.title = '取消收藏';
+      m.appendChild(x); b.appendChild(a); b.appendChild(m); c.appendChild(b); box.appendChild(c);
+    });
+  }
+  // ── 列表 / 卡片密度（存在 localStorage，不需要重新整理）──
+  var DK = 'finnews_dens';
+  function applyDens(){
+    var list = false;
+    try { list = P.localStorage.getItem(DK) === 'list'; } catch(e) {}
+    if (D.body.classList.contains('fn-compact') !== list) D.body.classList.toggle('fn-compact', list);
+    D.querySelectorAll('.fn-dens span').forEach(function(sp){
+      var on = (sp.getAttribute('data-dens') === 'list') === list;
+      if (sp.classList.contains('on') !== on) sp.classList.toggle('on', on);
+    });
+  }
+  // ── 自上次造訪新增 N 則：基準＝上一次造訪最後活躍的時間（存在 localStorage）──
+  var LV = 'finnews_last_seen', BASE = 0;
+  function initBase(){
+    try {
+      var b = parseInt(P.sessionStorage.getItem('fn_base') || '', 10);
+      if (isNaN(b)) { b = parseInt(P.localStorage.getItem(LV) || '0', 10) || 0; P.sessionStorage.setItem('fn_base', String(b)); }
+      BASE = b;
+    } catch(e) { BASE = 0; }
+  }
+  function touch(){
+    if (D.visibilityState === 'visible') { try { P.localStorage.setItem(LV, String(Date.now())); } catch(e) {} }
+  }
+  function fmtT(ms){
+    var d = new Date(ms), p2 = function(n){ return (n < 10 ? '0' : '') + n; };
+    var t = p2(d.getHours()) + ':' + p2(d.getMinutes());
+    return new Date().toDateString() === d.toDateString() ? '今天 ' + t : (d.getMonth() + 1) + '/' + d.getDate() + ' ' + t;
+  }
+  function markNew(force){
+    var banner = D.querySelector('.fn-new'); if (!banner) return;
+    var cards = D.querySelectorAll('.wall .card'), n = 0;
+    cards.forEach(function(c){
+      var isNew = BASE > 0 && parseInt((c.dataset || {}).ts || '0', 10) * 1000 > BASE;
+      if (isNew) n++;
+      if (c.classList.contains('new') !== isNew) c.classList.toggle('new', isNew);
+    });
+    var only = D.body.classList.contains('fn-onlynew');
+    var sig = BASE + '|' + n + '|' + only + '|' + cards.length;
+    if (!force && banner.getAttribute('data-sig') === sig) return;
+    banner.setAttribute('data-sig', sig);
+    banner.innerHTML = '';
+    if (BASE <= 0 || !cards.length) return;
+    banner.appendChild(D.createTextNode(n ? '🆕 自上次造訪（' + fmtT(BASE) + '）新增 ' + n + ' 則'
+                                          : '✓ 自上次造訪（' + fmtT(BASE) + '）沒有新的新聞'));
+    if (n) { var tg = mk('span', 'tg', only ? '看全部' : '只看新增'); tg.setAttribute('data-onlynew', '1'); banner.appendChild(tg); }
+    else if (only) { D.body.classList.remove('fn-onlynew'); }
+  }
+  function onVis(){
+    if (D.visibilityState !== 'visible') return;
+    var last = 0;
+    try { last = parseInt(P.localStorage.getItem(LV) || '0', 10) || 0; } catch(e) {}
+    if (last && Date.now() - last > 30 * 60 * 1000) {          // 離開超過 30 分鐘再回來：基準更新成「離開前最後活躍的時間」
+      BASE = last;
+      try { P.sessionStorage.setItem('fn_base', String(BASE)); } catch(e) {}
+      markNew(true);
+    }
+    touch();
+  }
+  // ── 無限捲動：卡片先全部輸出、第 N 張之後隱藏（data-lz），捲到底部哨兵時分批顯示 ──
+  var io = null, sents = [];
+  function reveal(grid){
+    var hid = grid.querySelectorAll(':scope > .card[data-lz]');
+    for (var i = 0; i < hid.length && i < 24; i++) hid[i].removeAttribute('data-lz');
+    return hid.length > 24;
+  }
+  function ensureLazy(){
+    var now = Array.prototype.slice.call(D.querySelectorAll('.fn-sentinel'));
+    var same = now.length === sents.length && now.every(function(x, i){ return x === sents[i]; });
+    if (same) return;
+    if (io) io.disconnect();
+    sents = now;
+    io = new P.IntersectionObserver(function(es){
+      es.forEach(function(e){
+        if (!e.isIntersecting) return;
+        var g = e.target.previousElementSibling;
+        if (g && reveal(g)) { io.unobserve(e.target); io.observe(e.target); }   // 還有沒顯示的：重新觀察，哨兵仍在畫面內會再觸發
+      });
+    }, {rootMargin: '900px 0px'});
+    sents.forEach(function(x){ io.observe(x); });
+  }
+  // ── 切換分頁：捲到「該分頁內容的最上面」（分頁列是 sticky，所以內容頂端剛好貼在分頁列下方）──
+  function scrollerOf(el){
+    for (var n = el.parentElement; n && n !== D.body; n = n.parentElement) {
+      var oy = P.getComputedStyle(n).overflowY;
+      if ((oy === 'auto' || oy === 'scroll') && n.scrollHeight > n.clientHeight) return n;
+    }
+    return D.scrollingElement || D.documentElement;
+  }
+  function scrollToTabTop(tab){
+    var list = tab.closest('[role="tablist"]');
+    if (!list || list !== D.querySelector('[role="tablist"]')) return;     // 只處理最上面那排主分頁
+    var panel = D.querySelector('[role="tabpanel"]:not([hidden])');
+    var sc = scrollerOf(list);
+    var isDoc = (sc === D.scrollingElement || sc === D.documentElement);
+    var base = isDoc ? 0 : sc.getBoundingClientRect().top;
+    var cur = isDoc ? (P.pageYOffset || sc.scrollTop) : sc.scrollTop;
+    var target = 0;
+    if (panel) target = Math.max(0, panel.getBoundingClientRect().top - base + cur - list.getBoundingClientRect().height);
+    if (cur > target) { if (isDoc) P.scrollTo(0, target); else sc.scrollTop = target; }
+  }
+  function onClick(e){
+    var tg = e.target, cl = function(sel){ return tg && tg.closest ? tg.closest(sel) : null; };
+    var dn = cl('[data-dens]');
+    if (dn) { e.preventDefault(); try { P.localStorage.setItem(DK, dn.getAttribute('data-dens')); } catch(x) {} applyDens(); return; }
+    if (cl('[data-onlynew]')) { e.preventDefault(); D.body.classList.toggle('fn-onlynew'); markNew(true); return; }
+    var tabEl = cl('[role="tab"]');
+    if (tabEl) { setTimeout(function(){ scrollToTabTop(tabEl); }, 80); setTimeout(function(){ scrollToTabTop(tabEl); }, 300); }
+    var fv = cl('.card .fav');
+    if (fv) { e.preventDefault(); e.stopPropagation(); toggleFav(fv.closest('.card')); return; }
+    var rm = cl('[data-rm]');
+    if (rm) { e.preventDefault(); removeFav(rm.getAttribute('data-rm')); return; }
+    if (cl('[data-clear]')) {
+      e.preventDefault();
+      if (P.confirm('確定清除全部收藏？')) { saveFavs([]); markFav(); buildFav(); }
+      return;
+    }
+    var a = e.target.closest ? e.target.closest('a[href^="http"]') : null;
+    var clr = e.target.closest ? e.target.closest('.fn-reco-clear') : null;
+    if (clr) {
+      e.preventDefault();
+      try { P.localStorage.removeItem(PK); P.localStorage.removeItem(CK); } catch(x) {}
+      var b = D.querySelector('.fn-reco'); if (b) b.removeAttribute('data-sig');
+      buildReco(); return;
+    }
+    if (!a) return;
+    var box = a.closest('.card, .si');
+    if (!box) return;
+    var m = mainLink(box);
+    S.add(a.href); if (m) S.add(m.href);
+    saveRead();
+    if (box.classList.contains('card')) learn(box);
+    markRead();
+    setTimeout(buildReco, 400);
+  }
+  var t = null;
+  var obs = new MutationObserver(function(){ clearTimeout(t); t = setTimeout(function(){ markRead(); buildReco(); markFav(); buildFav(); applyDens(); markNew(); ensureLazy(); }, 200); });
+  obs.observe(D.body, {childList: true, subtree: true});
+  D.addEventListener('click', onClick, true);
+  P.__fnCleanup = function(){ obs.disconnect(); D.removeEventListener('click', onClick, true); D.removeEventListener('visibilitychange', onVis); clearInterval(tt); if (io) io.disconnect(); D.documentElement.removeAttribute('data-fnjs'); };
+  D.documentElement.setAttribute('data-fnjs', '1');
+  initBase(); touch();
+  var tt = setInterval(touch, 60000);
+  D.addEventListener('visibilitychange', onVis);
+  markRead(); buildReco(); markFav(); buildFav(); applyDens(); markNew(); ensureLazy();
+})();
+</script>
+"""
+try:                                   # 新版 Streamlit 用 st.iframe；舊版退回 components.html
+    st.iframe(_READ_JS, height=1)
+except Exception:
+    try:
+        import streamlit.components.v1 as components
+        components.html(_READ_JS, height=0)
+    except Exception:
+        pass                           # 已讀功能失敗不影響頁面其他功能
