@@ -138,7 +138,7 @@ hr{border-color:var(--line)!important;margin:10px 0!important}
 .mrow{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:6px}
 .m{background:var(--soft);border-radius:10px;padding:8px 14px;min-width:96px}
 .m-l{font-size:11px;color:var(--tx2)} .m-v{font-size:19px;font-weight:700}
-/* 快速篩選：「大陸」（紅）「國際英文」（藍）做成醒目的大按鈕——粗框、彩色陰影、字更大更粗，選中時整顆填色。
+/* 快速篩選：「大陸」（紅）「國際英文」（藍）——尺寸跟上面分頁按鈕差不多，只靠顏色、細框、輕陰影區分，選中時整顆填色。
    標記方式有兩層：① 瀏覽器端 JS 依文字加上 .fn-chip-cn / .fn-chip-en（不怕選項順序改動）；
    ② 沒跑 JS 時用 nth-of-type 當備援（第 2、3 個）。若你改了選項順序，備援的數字要一起改。 */
 .fn-chip-cn,
@@ -155,30 +155,40 @@ div[role="radiogroup"][aria-label="快速篩選"] label:nth-of-type(3){
 .st-key-chip [role="radiogroup"] label:nth-of-type(2),.st-key-chip [role="radiogroup"] label:nth-of-type(3),
 div[role="radiogroup"][aria-label="快速篩選"] label:nth-of-type(2),
 div[role="radiogroup"][aria-label="快速篩選"] label:nth-of-type(3){
-  border:2.5px solid var(--chip-c)!important;border-radius:16px!important;
-  padding:8px 22px!important;margin:4px 8px 6px 2px!important;
+  border:1.5px solid var(--chip-c)!important;border-radius:12px!important;
+  padding:3px 12px!important;margin:2px 6px 2px 0!important;
   background:var(--chip-bg)!important;
-  box-shadow:0 4px 14px var(--chip-sh)!important;
+  box-shadow:0 2px 6px var(--chip-sh)!important;
   transition:transform .12s,box-shadow .12s,background .12s!important;cursor:pointer;
 }
 .fn-chip-cn:hover,.fn-chip-en:hover,
 .st-key-chip [role="radiogroup"] label:nth-of-type(2):hover,.st-key-chip [role="radiogroup"] label:nth-of-type(3):hover,
 div[role="radiogroup"][aria-label="快速篩選"] label:nth-of-type(2):hover,
 div[role="radiogroup"][aria-label="快速篩選"] label:nth-of-type(3):hover{
-  transform:translateY(-2px);box-shadow:0 8px 20px var(--chip-sh)!important;
+  transform:translateY(-1px);box-shadow:0 3px 9px var(--chip-sh)!important;
 }
 .fn-chip-cn p,.fn-chip-en p,
 .st-key-chip [role="radiogroup"] label:nth-of-type(2) p,.st-key-chip [role="radiogroup"] label:nth-of-type(3) p,
 div[role="radiogroup"][aria-label="快速篩選"] label:nth-of-type(2) p,
 div[role="radiogroup"][aria-label="快速篩選"] label:nth-of-type(3) p{
-  font-size:19px!important;font-weight:800!important;letter-spacing:.5px;color:var(--chip-c)!important;
+  font-size:15px!important;font-weight:700!important;color:var(--chip-c)!important;
+}
+@media(max-width:700px){
+  .fn-chip-cn,.fn-chip-en,
+  .st-key-chip [role="radiogroup"] label:nth-of-type(2),.st-key-chip [role="radiogroup"] label:nth-of-type(3),
+  div[role="radiogroup"][aria-label="快速篩選"] label:nth-of-type(2),
+  div[role="radiogroup"][aria-label="快速篩選"] label:nth-of-type(3){padding:2px 9px!important;margin:2px 4px 2px 0!important;border-radius:10px!important}
+  .fn-chip-cn p,.fn-chip-en p,
+  .st-key-chip [role="radiogroup"] label:nth-of-type(2) p,.st-key-chip [role="radiogroup"] label:nth-of-type(3) p,
+  div[role="radiogroup"][aria-label="快速篩選"] label:nth-of-type(2) p,
+  div[role="radiogroup"][aria-label="快速篩選"] label:nth-of-type(3) p{font-size:14px!important}
 }
 /* 選中：整顆填色、白字 */
 .fn-chip-cn:has(input:checked),.fn-chip-en:has(input:checked),
 .st-key-chip [role="radiogroup"] label:nth-of-type(2):has(input:checked),.st-key-chip [role="radiogroup"] label:nth-of-type(3):has(input:checked),
 div[role="radiogroup"][aria-label="快速篩選"] label:nth-of-type(2):has(input:checked),
 div[role="radiogroup"][aria-label="快速篩選"] label:nth-of-type(3):has(input:checked){
-  background:var(--chip-c)!important;box-shadow:0 6px 18px var(--chip-sh)!important;
+  background:var(--chip-c)!important;box-shadow:0 2px 8px var(--chip-sh)!important;
 }
 .fn-chip-cn:has(input:checked) p,.fn-chip-en:has(input:checked) p,
 .st-key-chip [role="radiogroup"] label:nth-of-type(2):has(input:checked) p,.st-key-chip [role="radiogroup"] label:nth-of-type(3):has(input:checked) p,
