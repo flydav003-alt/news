@@ -172,6 +172,15 @@ SOURCES = [
      "language": "en", "category": "大陸", "enabled": True, "max_items": 15},
     {"name": "SCMP China Biz 2", "url": "https://www.scmp.com/rss/523082/feed",
      "language": "en", "category": "大陸", "enabled": True, "max_items": 15},
+    # ── 🏮 大陸生活（娛樂／電玩／旅遊）：category 刻意跟「大陸」分開，
+    #    不會進今日新聞主牆、不算頭條/利多利空統計、不送 AI、不進 AI 專區中國分頁，
+    #    只在「🏮 大陸」篩選按鈕底下的子分類才看得到 ──
+    {"name": "GN-大陸娛樂", "url": _gnews("娱乐 明星 OR 电影票房 OR 综艺 OR 春晚", cn=True),
+     "language": "zh", "category": "大陸生活", "enabled": True, "strip_suffix": True, "s2t": True, "max_items": 15},
+    {"name": "GN-大陸電玩", "url": _gnews("游戏 腾讯游戏 OR 网易游戏 OR 原神 OR 黑神话 OR 米哈游", cn=True),
+     "language": "zh", "category": "大陸生活", "enabled": True, "strip_suffix": True, "s2t": True, "max_items": 15},
+    {"name": "GN-大陸旅遊", "url": _gnews("旅游 OR 景区 OR 免签 OR 出境游 OR 文旅", cn=True),
+     "language": "zh", "category": "大陸生活", "enabled": True, "strip_suffix": True, "s2t": True, "max_items": 15},
     # 以下網址我沒辦法確認是否還有效，預設關閉；想試的話改成 True，再到設定頁「來源健康度」看有沒有抓到
     {"name": "FT中文網",     "url": "https://www.ftchinese.com/rss/feed",
      "language": "zh", "category": "大陸", "enabled": False, "s2t": True, "max_items": 20},
