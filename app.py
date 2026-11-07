@@ -138,15 +138,53 @@ hr{border-color:var(--line)!important;margin:10px 0!important}
 .mrow{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:6px}
 .m{background:var(--soft);border-radius:10px;padding:8px 14px;min-width:96px}
 .m-l{font-size:11px;color:var(--tx2)} .m-v{font-size:19px;font-weight:700}
-/* 快速篩選裡的「大陸」「國際英文」兩個選項特別加大、加框，比其他選項顯眼 */
+/* 快速篩選：「大陸」（紅）「國際英文」（藍）做成醒目的大按鈕——粗框、彩色陰影、字更大更粗，選中時整顆填色。
+   標記方式有兩層：① 瀏覽器端 JS 依文字加上 .fn-chip-cn / .fn-chip-en（不怕選項順序改動）；
+   ② 沒跑 JS 時用 nth-of-type 當備援（第 2、3 個）。若你改了選項順序，備援的數字要一起改。 */
+.fn-chip-cn,
+.st-key-chip [role="radiogroup"] label:nth-of-type(2),
+div[role="radiogroup"][aria-label="快速篩選"] label:nth-of-type(2){
+  --chip-c:#D94B3A;--chip-bg:rgba(217,75,58,.13);--chip-sh:rgba(217,75,58,.38);
+}
+.fn-chip-en,
+.st-key-chip [role="radiogroup"] label:nth-of-type(3),
+div[role="radiogroup"][aria-label="快速篩選"] label:nth-of-type(3){
+  --chip-c:#2F7BD0;--chip-bg:rgba(47,123,208,.13);--chip-sh:rgba(47,123,208,.38);
+}
+.fn-chip-cn,.fn-chip-en,
+.st-key-chip [role="radiogroup"] label:nth-of-type(2),.st-key-chip [role="radiogroup"] label:nth-of-type(3),
 div[role="radiogroup"][aria-label="快速篩選"] label:nth-of-type(2),
 div[role="radiogroup"][aria-label="快速篩選"] label:nth-of-type(3){
-  border:2px solid var(--accent)!important;border-radius:14px!important;
-  padding:8px 18px!important;background:var(--soft)!important;
+  border:2.5px solid var(--chip-c)!important;border-radius:16px!important;
+  padding:8px 22px!important;margin:4px 8px 6px 2px!important;
+  background:var(--chip-bg)!important;
+  box-shadow:0 4px 14px var(--chip-sh)!important;
+  transition:transform .12s,box-shadow .12s,background .12s!important;cursor:pointer;
 }
+.fn-chip-cn:hover,.fn-chip-en:hover,
+.st-key-chip [role="radiogroup"] label:nth-of-type(2):hover,.st-key-chip [role="radiogroup"] label:nth-of-type(3):hover,
+div[role="radiogroup"][aria-label="快速篩選"] label:nth-of-type(2):hover,
+div[role="radiogroup"][aria-label="快速篩選"] label:nth-of-type(3):hover{
+  transform:translateY(-2px);box-shadow:0 8px 20px var(--chip-sh)!important;
+}
+.fn-chip-cn p,.fn-chip-en p,
+.st-key-chip [role="radiogroup"] label:nth-of-type(2) p,.st-key-chip [role="radiogroup"] label:nth-of-type(3) p,
 div[role="radiogroup"][aria-label="快速篩選"] label:nth-of-type(2) p,
 div[role="radiogroup"][aria-label="快速篩選"] label:nth-of-type(3) p{
-  font-size:17px!important;font-weight:700!important;color:var(--accent)!important;
+  font-size:19px!important;font-weight:800!important;letter-spacing:.5px;color:var(--chip-c)!important;
+}
+/* 選中：整顆填色、白字 */
+.fn-chip-cn:has(input:checked),.fn-chip-en:has(input:checked),
+.st-key-chip [role="radiogroup"] label:nth-of-type(2):has(input:checked),.st-key-chip [role="radiogroup"] label:nth-of-type(3):has(input:checked),
+div[role="radiogroup"][aria-label="快速篩選"] label:nth-of-type(2):has(input:checked),
+div[role="radiogroup"][aria-label="快速篩選"] label:nth-of-type(3):has(input:checked){
+  background:var(--chip-c)!important;box-shadow:0 6px 18px var(--chip-sh)!important;
+}
+.fn-chip-cn:has(input:checked) p,.fn-chip-en:has(input:checked) p,
+.st-key-chip [role="radiogroup"] label:nth-of-type(2):has(input:checked) p,.st-key-chip [role="radiogroup"] label:nth-of-type(3):has(input:checked) p,
+div[role="radiogroup"][aria-label="快速篩選"] label:nth-of-type(2):has(input:checked) p,
+div[role="radiogroup"][aria-label="快速篩選"] label:nth-of-type(3):has(input:checked) p{
+  color:#fff!important;
 }
 .sbar{display:flex;height:8px;border-radius:6px;overflow:hidden;margin:6px 0 2px;background:var(--line)}
 .sbar i{display:block;height:100%}
@@ -1888,6 +1926,15 @@ _READ_JS = """
     });
   }
   // ── 列表 / 卡片密度（存在 localStorage，不需要重新整理）──
+  // ── 快速篩選：依文字標記「大陸」「國際英文」兩顆，讓 CSS 把它們做成醒目的大按鈕 ──
+  function tagChips(){
+    D.querySelectorAll('[role="radiogroup"] label').forEach(function(l){
+      var t = l.textContent || '';
+      var cn = t.indexOf('大陸') >= 0 && t.indexOf('🏮') >= 0, en = t.indexOf('國際英文') >= 0;
+      if (l.classList.contains('fn-chip-cn') !== cn) l.classList.toggle('fn-chip-cn', cn);
+      if (l.classList.contains('fn-chip-en') !== en) l.classList.toggle('fn-chip-en', en);
+    });
+  }
   var DK = 'finnews_dens';
   function applyDens(){
     var list = false;
@@ -2022,7 +2069,7 @@ _READ_JS = """
     setTimeout(buildReco, 400);
   }
   var t = null;
-  var obs = new MutationObserver(function(){ clearTimeout(t); t = setTimeout(function(){ markRead(); buildReco(); markFav(); buildFav(); applyDens(); markNew(); ensureLazy(); }, 200); });
+  var obs = new MutationObserver(function(){ clearTimeout(t); t = setTimeout(function(){ markRead(); buildReco(); markFav(); buildFav(); applyDens(); markNew(); ensureLazy(); tagChips(); }, 200); });
   obs.observe(D.body, {childList: true, subtree: true});
   D.addEventListener('click', onClick, true);
   P.__fnCleanup = function(){ obs.disconnect(); D.removeEventListener('click', onClick, true); D.removeEventListener('visibilitychange', onVis); clearInterval(tt); if (io) io.disconnect(); D.documentElement.removeAttribute('data-fnjs'); };
@@ -2030,7 +2077,7 @@ _READ_JS = """
   initBase(); touch();
   var tt = setInterval(touch, 60000);
   D.addEventListener('visibilitychange', onVis);
-  markRead(); buildReco(); markFav(); buildFav(); applyDens(); markNew(); ensureLazy();
+  markRead(); buildReco(); markFav(); buildFav(); applyDens(); markNew(); ensureLazy(); tagChips();
 })();
 </script>
 """
