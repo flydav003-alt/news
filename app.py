@@ -886,7 +886,7 @@ def detect_surge(df, top=6):
     """回傳 (暴增清單, 資料涵蓋小時數)。基準 = 觀察窗之前的所有文章，換算成每個觀察窗的平均數。"""
     if df is None or df.empty:
         return [], 0.0
-    d = df[~df["category"].isin(LIFE_CATS)]
+    d = df[~df["category"].isin(LIFE_CATS + ("大陸生活",))]
     if d.empty:
         return [], 0.0
     recs = d.to_dict("records")
@@ -1328,7 +1328,7 @@ with tab_home:
     if df_all.empty:
         st.markdown('<div class="empty">📭 還沒有任何新聞，請按右上角「立即抓取」</div>', unsafe_allow_html=True)
     else:
-        df_fin = df_all[~df_all["category"].isin(LIFE_CATS + ("AI",))]
+        df_fin = df_all[~df_all["category"].isin(LIFE_CATS + ("AI", "大陸生活"))]
         df_r, used_h = recent(df_fin if not df_fin.empty else df_all)
         if used_h > 12:
             st.caption(f"ℹ️ 12 小時內新聞太少，已自動放寬到 {used_h} 小時")
@@ -1456,7 +1456,10 @@ with tab_home:
         elif chip == "⚑ 地緣":
             ddf = ddf[ddf["is_geo"] == True]
         elif chip == "🏮 大陸":
-            ddf = ddf[ddf["category"] == "大陸"]
+            # 「大陸生活」（娛樂/電玩/旅遊）平常不進新聞牆，只在這個篩選底下才併進來顯示
+            life_cn = df_all[df_all["category"] == "大陸生活"]
+            ddf = pd.concat([ddf[ddf["category"] == "大陸"], life_cn]).drop_duplicates(subset=["url"])
+            ddf = ddf.sort_values("published_at", ascending=False)
         elif chip == "🌐 國際英文":
             ddf = ddf[ddf["language"] == "en"]
         if hide_neu:
