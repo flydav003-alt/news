@@ -796,7 +796,11 @@ class Settings:
     yt_after: str = "next"        # what to do when a YouTube song ends: stop / next / loop
     yt_cookies_browser: str = ""  # "", "chrome", "edge", "firefox" (only needed when YouTube asks for a login)
     tools_dir: str = ""           # where yt-dlp.exe / deno.exe live; "" = default (%APPDATA%\\EchoDeck\\tools)
-    viz_style: str = "bars"       # playing visualiser: off / bars / mirror / wave
+    viz_style: str = "bars"       # playing visualiser: off / bars / mirror / wave / circle
+    viz_size: str = "normal"      # in-page visualiser size: normal / large / fill
+    viz_ambient: str = "soft"     # whole-window bass glow: off / soft / strong
+    viz_glow: int = 60            # bass glow strength 0-100
+    viz_flow: bool = True         # colours drift slowly
     playlists: list = field(default_factory=list)       # [{id, name, tracks: [full paths]}]
     last_pl_tracks: dict = field(default_factory=dict)  # playlist id -> last selected song
     yt_fav_dir: str = ""          # where favourite YouTube songs are saved; "" = default (%APPDATA%\\EchoDeck\\YouTube最愛)
@@ -2270,38 +2274,148 @@ class TrackListWidget(QListWidget):
         self.order_changed.emit()
 
 
+class Backdrop(QWidget):
+    """Central widget: paints the active theme's artwork behind every panel."""
+
+    def __init__(self):
+        super().__init__()
+        self._key = None
+        self._pm = None
+        self._amb_level = 0.0      # 0 = off, .55 = soft, 1 = strong
+        self._amb_bass = 0.0
+        self._amb_pulse = 0.0
+
+    def set_ambient_level(self, level):
+        self._amb_level = float(level)
+        if level <= 0:
+            self._amb_bass = self._amb_pulse = 0.0
+        self.update()
+
+    def feed_ambient(self, bass, pulse):
+        """Bass level / kick pulse (0..1) from the music; repaint only when it visibly changed."""
+        changed = abs(bass - self._amb_bass) > .02 or abs(pulse - self._amb_pulse) > .03 \
+            or ((bass == 0 and pulse == 0) and (self._amb_bass or self._amb_pulse))
+        self._amb_bass, self._amb_pulse = bass, pulse
+        if changed:
+            self.update()
+
+    def paintEvent(self, _event):
+        size = self.size()
+        key = (CURRENT_THEME[0], size.width(), size.height())
+        if self._key != key:
+            art = get_art(CURRENT_THEME[0]).scaled(size, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                                                   Qt.TransformationMode.SmoothTransformation)
+            self._pm = art.copy((art.width() - size.width()) // 2, (art.height() - size.height()) // 2,
+                                size.width(), size.height())
+            self._key = key
+        painter = QPainter(self)
+        painter.drawPixmap(0, 0, self._pm)
+        amount = self._amb_level * (self._amb_bass * .45 + self._amb_pulse * .6)
+        if amount > .01:                          # soft glow bleeding through the glass panels
+            w, h = size.width(), size.height()
+            strength = min(1.0, amount)
+            g = QRadialGradient(QPointF(w * .5, h * 1.04), max(w, h) * .78)
+            c0 = QColor(T["ACC_BAR"]); c0.setAlpha(int(150 * strength))
+            c1 = QColor(T["ACC_BAR"]); c1.setAlpha(0)
+            g.setColorAt(0, c0); g.setColorAt(1, c1)
+            painter.fillRect(self.rect(), QBrush(g))
+            g2 = QRadialGradient(QPointF(w * .92, -h * .05), max(w, h) * .5)
+            d0 = QColor(T["ACC_HI"]); d0.setAlpha(int(90 * strength))
+            d1 = QColor(T["ACC_HI"]); d1.setAlpha(0)
+            g2.setColorAt(0, d0); g2.setColorAt(1, d1)
+            painter.fillRect(self.rect(), QBrush(g2))
+
+
 class VisualizerWidget(QWidget):
-    """Soft spectrum display drawn in the active theme's accent colours (FFT of the playing song)."""
-    BARS = 44
+    """Spectrum display in the active theme's colours: bars / mirror / wave / circle, with a bass glow
+    and slowly flowing colours. Click it to open the big full-screen view."""
+    expand_requested = Signal()
     N = 2048
     TILT_DB = 15.0          # high notes are naturally quieter; lift them so the right side moves too
 
-    def __init__(self, source):
+    def __init__(self, source, bars=44, big=False, expandable=True):
         super().__init__()
         self._source = source
+        self.BARS = bars
+        self.big = big
         self.style_name = "bars"
-        self._vals = np.zeros(self.BARS)
-        self._peaks = np.zeros(self.BARS)
+        self.glow = .6          # 0..1 strength of the bass glow
+        self.flow = True        # colours drift slowly around the accent hue
+        self._expandable = expandable
+        self.size_mode = "normal"   # normal / large / fill (only for the in-page widgets)
+        self._vals = np.zeros(bars)
+        self._peaks = np.zeros(bars)
         self._win = np.hanning(self.N).astype(np.float32)
         freqs = np.fft.rfftfreq(self.N, 1.0 / 48000)
-        edges = np.geomspace(45, 15000, self.BARS + 1)
+        edges = np.geomspace(45, 15000, bars + 1)
         self._bands = []
-        for i in range(self.BARS):
-            a = int(np.searchsorted(freqs, edges[i]))
-            b = max(int(np.searchsorted(freqs, edges[i + 1])), a + 1)
-            self._bands.append((a, b))
-        self._tilt = np.linspace(0, self.TILT_DB, self.BARS)
+        for i in range(bars):
+            lo = int(np.searchsorted(freqs, edges[i]))
+            hi = max(int(np.searchsorted(freqs, edges[i + 1])), lo + 1)
+            self._bands.append((lo, hi))
+        self._tilt = np.linspace(0, self.TILT_DB, bars)
         self._idle = True
+        self._avg = 0.0         # slow average of the bass level (beat detection baseline)
+        self._bass = 0.0        # smoothed bass level 0..1
+        self._pulse = 0.0       # short kick-drum pulse 0..1
+        self._phase = 0.0       # colour-flow position 0..1
         self._timer = QTimer(self)
         self._timer.setInterval(33)
         self._timer.timeout.connect(self._tick)
-        self.setFixedHeight(92)
-        self.setToolTip("播放中視覺化（可在「設定 → 外觀」更換樣式或關閉）")
+        if expandable:
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.setToolTip("播放中視覺化　點一下放大（樣式在「設定 → 外觀」）")
+        self._apply_height()
+
+    def sizeHint(self):
+        return QSize(240, getattr(self, "_pref", 92))
+
+    def minimumSizeHint(self):
+        return QSize(120, 60)
+
+    def _apply_height(self):
+        """Preferred height by style/size mode, but it may shrink (never forces the window taller)."""
+        if self.big:
+            self.setMinimumHeight(240)
+            return
+        circle = self.style_name == "circle"
+        base = 150 if circle else 92
+        large = 260 if circle else 180
+        self.setMinimumHeight(60)
+        if self.size_mode == "large":
+            self._pref = large
+            self.setMaximumHeight(large)
+            self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        elif self.size_mode == "fill":
+            self._pref = base
+            self.setMaximumHeight(16777215)
+            self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+        else:
+            self._pref = base
+            self.setMaximumHeight(base)
+            self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        self.updateGeometry()
+
+    def set_size_mode(self, mode):
+        self.size_mode = mode if mode in ("normal", "large", "fill") else "normal"
+        self._apply_height()
+        self.update()
 
     def set_style(self, name):
-        self.style_name = name if name in ("bars", "mirror", "wave") else "bars"
+        self.style_name = name if name in ("bars", "mirror", "wave", "circle") else "bars"
+        self._apply_height()
         self.setVisible(name != "off")
         self.update()
+
+    def set_options(self, glow, flow):
+        self.glow = max(0.0, min(1.0, float(glow)))
+        self.flow = bool(flow)
+        self.update()
+
+    def mouseReleaseEvent(self, event):
+        if self._expandable and event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.position().toPoint()):
+            self.expand_requested.emit()
+        super().mouseReleaseEvent(event)
 
     def showEvent(self, event):
         self._timer.start()
@@ -2317,13 +2431,13 @@ class VisualizerWidget(QWidget):
         except Exception:
             return
         silent = float(np.max(np.abs(x))) < 1e-4
-        if silent and self._idle and not self._vals.any():
+        if silent and self._idle and not self._vals.any() and self._pulse < .01 and self._bass < .01:
             return                                           # nothing playing and nothing left to fade out
         if silent:
             norm = np.zeros(self.BARS)
         else:
             spec = np.abs(np.fft.rfft(x * self._win)) / (self.N / 4)
-            level = np.array([spec[a:b].max() for a, b in self._bands])
+            level = np.array([spec[lo:hi].max() for lo, hi in self._bands])
             db = 20 * np.log10(level + 1e-7) + self._tilt
             norm = np.clip((db + 72.0) / 62.0, 0.0, 1.0)
             norm = np.convolve(np.pad(norm, 1, mode="edge"), [.2, .6, .2], mode="valid")
@@ -2331,8 +2445,41 @@ class VisualizerWidget(QWidget):
         self._vals = np.where(norm > v, v + (norm - v) * .6, v + (norm - v) * .14)
         self._vals[self._vals < .004] = 0.0
         self._peaks = np.maximum(self._peaks - .014, self._vals)
+        # bass level, kick pulse and colour flow
+        k = max(3, self.BARS // 8)
+        bass = float(norm[:k].mean())
+        self._avg = self._avg * .96 + bass * .04
+        kick = max(0.0, bass - self._avg * 1.08)
+        self._pulse = max(self._pulse * .86, min(1.0, kick * 3.4))
+        self._bass += (bass - self._bass) * .35
+        if self._bass < .004:
+            self._bass = 0.0
+        self._phase = (self._phase + .0011 + .0012 * self._bass) % 1.0       # one slow cycle roughly every 25-30 s
         self._idle = silent
         self.update()
+
+    def _col(self, token, frac=.5, alpha=255):
+        """Theme colour; with colour-flow on its hue drifts over time and along the spectrum."""
+        c = QColor(T[token])
+        if self.flow:
+            h, sat, light, _a = c.getHslF()
+            if h >= 0:
+                # drift gently back and forth around the theme colour (about +-36 degrees), never a rainbow
+                shift = .10 * math.sin(self._phase * 2 * math.pi) + (frac - .5) * .09
+                c = QColor.fromHslF((h + shift) % 1.0, sat, light)
+        c.setAlpha(alpha)
+        return c
+
+    def _paint_glow(self, p, cx, cy, radius):
+        amount = self.glow * (self._bass * .5 + self._pulse * .75)
+        if amount < .02 or radius <= 1:
+            return
+        g = QRadialGradient(QPointF(cx, cy), radius)
+        g.setColorAt(0, self._col("ACC_BAR", .5, int(255 * min(.85, amount))))
+        g.setColorAt(1, self._col("ACC_BAR", .5, 0))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(g))
+        p.drawEllipse(QPointF(cx, cy), radius, radius)
 
     def paintEvent(self, _event):
         p = QPainter(self)
@@ -2340,54 +2487,44 @@ class VisualizerWidget(QWidget):
         w, h = self.width(), self.height()
         base = QColor(T["BASE"])
         base.setAlpha(110)
-        p.setPen(QPen(QColor(T["LINE"]), 1))
-        p.setBrush(base)
-        p.drawRoundedRect(QRectF(.5, .5, w - 1, h - 1), 14, 14)
-        pad = 14
-        area = QRectF(pad, 10, w - pad * 2, h - 20)
+        frame = QRectF(.5, .5, w - 1, h - 1)
+        if not self.big:                       # the full-screen view floats straight on the theme backdrop
+            p.setPen(QPen(QColor(T["LINE"]), 1))
+            p.setBrush(base)
+            p.drawRoundedRect(frame, 14, 14)
+            clip = QPainterPath()
+            clip.addRoundedRect(frame, 14, 14)
+            p.setClipPath(clip)
+        pad = 24 if self.big else 14
+        area = QRectF(pad, pad * .7, w - pad * 2, h - pad * 1.4)
+        if self.style_name == "circle":
+            self._paint_circle(p, w, h)
+        else:
+            self._paint_glow(p, w / 2, h, max(w, h) * .62)
+            if self.style_name == "wave":
+                self._paint_wave(p, area)
+            else:
+                self._paint_bars(p, area, self.style_name == "mirror")
+
+    def _paint_bars(self, p, area, mirror):
         n = self.BARS
-        top_col, bot_col = QColor(T["ACC_BAR"]), QColor(T["ACC_LO"])
-        cap_col = QColor(T["FOCUS_HI"])
         vals = self._vals
-        if self.style_name == "wave":
-            pts = [QPointF(area.left() + area.width() * i / (n - 1), area.bottom() - max(.03, vals[i]) * area.height())
-                   for i in range(n)]
-            path = QPainterPath(QPointF(area.left(), area.bottom()))
-            path.lineTo(pts[0])
-            for a, b in zip(pts, pts[1:]):
-                mid = QPointF((a.x() + b.x()) / 2, (a.y() + b.y()) / 2)
-                path.quadTo(a, mid)
-            path.lineTo(pts[-1])
-            path.lineTo(QPointF(area.right(), area.bottom()))
-            path.closeSubpath()
-            g = QLinearGradient(0, area.top(), 0, area.bottom())
-            c1, c2 = QColor(top_col), QColor(bot_col)
-            c1.setAlpha(190); c2.setAlpha(25)
-            g.setColorAt(0, c1); g.setColorAt(1, c2)
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QBrush(g))
-            p.drawPath(path)
-            line = QPainterPath(pts[0])
-            for a, b in zip(pts, pts[1:]):
-                line.quadTo(a, QPointF((a.x() + b.x()) / 2, (a.y() + b.y()) / 2))
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            p.setPen(QPen(cap_col, 1.8))
-            p.drawPath(line)
-            return
-        gap = 3.0
+        gap = 4.0 if self.big else 3.0
         bw = max(2.0, (area.width() - gap * (n - 1)) / n)
-        mirror = self.style_name == "mirror"
         half = area.height() / 2
         p.setPen(Qt.PenStyle.NoPen)
         for i in range(n):
+            frac = i / max(1, n - 1)
             x = area.left() + i * (bw + gap)
             v = vals[i]
+            top_col, bot_col = self._col("ACC_BAR", frac), self._col("ACC_LO", frac)
             if mirror:
                 bh = max(2.0, v * half)
                 rect = QRectF(x, area.center().y() - bh, bw, bh * 2)
                 g = QLinearGradient(0, rect.top(), 0, rect.bottom())
                 c_out, c_mid = QColor(top_col), QColor(bot_col)
-                c_out.setAlpha(230 if v > 0 else 70); c_mid.setAlpha(120 if v > 0 else 40)
+                c_out.setAlpha(230 if v > 0 else 70)
+                c_mid.setAlpha(120 if v > 0 else 40)
                 g.setColorAt(0, c_out); g.setColorAt(.5, c_mid); g.setColorAt(1, c_out)
                 p.setBrush(QBrush(g))
                 p.drawRoundedRect(rect, bw / 2, bw / 2)
@@ -2395,18 +2532,137 @@ class VisualizerWidget(QWidget):
                 bh = max(3.0, v * area.height())
                 rect = QRectF(x, area.bottom() - bh, bw, bh)
                 g = QLinearGradient(0, rect.top(), 0, area.bottom())
-                c_top, c_bot = QColor(top_col), QColor(bot_col)
                 if v <= 0:
-                    c_top.setAlpha(80); c_bot.setAlpha(80)
-                g.setColorAt(0, c_top); g.setColorAt(1, c_bot)
+                    top_col.setAlpha(80); bot_col.setAlpha(80)
+                g.setColorAt(0, top_col); g.setColorAt(1, bot_col)
                 p.setBrush(QBrush(g))
                 p.drawRoundedRect(rect, min(bw / 2, 3), min(bw / 2, 3))
                 pk = self._peaks[i]
                 if pk > .06:
-                    cap = QColor(cap_col)
-                    cap.setAlpha(170)
-                    p.setBrush(cap)
+                    p.setBrush(self._col("FOCUS_HI", frac, 170))
                     p.drawRoundedRect(QRectF(x, area.bottom() - pk * area.height() - 4, bw, 2.2), 1, 1)
+
+    def _paint_wave(self, p, area):
+        n = self.BARS
+        vals = self._vals
+        pts = [QPointF(area.left() + area.width() * i / (n - 1), area.bottom() - max(.03, vals[i]) * area.height())
+               for i in range(n)]
+        path = QPainterPath(QPointF(area.left(), area.bottom()))
+        path.lineTo(pts[0])
+        for a, b in zip(pts, pts[1:]):
+            path.quadTo(a, QPointF((a.x() + b.x()) / 2, (a.y() + b.y()) / 2))
+        path.lineTo(pts[-1])
+        path.lineTo(QPointF(area.right(), area.bottom()))
+        path.closeSubpath()
+        g = QLinearGradient(0, area.top(), 0, area.bottom())
+        g.setColorAt(0, self._col("ACC_BAR", .5, 190))
+        g.setColorAt(1, self._col("ACC_LO", .5, 25))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(g))
+        p.drawPath(path)
+        line = QPainterPath(pts[0])
+        for a, b in zip(pts, pts[1:]):
+            line.quadTo(a, QPointF((a.x() + b.x()) / 2, (a.y() + b.y()) / 2))
+        lg = QLinearGradient(area.left(), 0, area.right(), 0)
+        for stop in (0, .25, .5, .75, 1):
+            lg.setColorAt(stop, self._col("FOCUS_HI", stop))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(QBrush(lg), 2.0 if self.big else 1.8))
+        p.drawPath(line)
+
+    def _paint_circle(self, p, w, h):
+        cx, cy = w / 2, h / 2
+        radius = min(w, h) / 2 - (14 if self.big else 8)
+        r0 = radius * (.40 + .035 * self._bass + .07 * self._pulse)
+        span = radius - r0 - 3
+        self._paint_glow(p, cx, cy, radius * 1.25)
+        n = self.BARS
+        n2 = n * 2
+        bw = max(2.0, 2 * math.pi * r0 / n2 * .55)
+        vals = self._vals
+        for k in range(n2):
+            idx = k if k < n else n2 - 1 - k          # left/right mirrored; low notes at the bottom
+            v = vals[idx]
+            ang = math.pi / 2 + (k + .5) * 2 * math.pi / n2
+            ca, sa = math.cos(ang), math.sin(ang)
+            ln = 3 + v * span
+            pen = QPen(self._col("ACC_BAR", idx / max(1, n - 1), int(110 + 145 * min(1.0, v * 1.4))), bw)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            p.setPen(pen)
+            p.drawLine(QPointF(cx + r0 * ca, cy + r0 * sa), QPointF(cx + (r0 + ln) * ca, cy + (r0 + ln) * sa))
+        disc = QRadialGradient(QPointF(cx, cy), r0)
+        disc.setColorAt(0, self._col("ACC_BAR", .5, int(28 + 90 * self._pulse)))
+        disc.setColorAt(1, self._col("ACC_BAR", .5, 8))
+        p.setPen(QPen(self._col("ACC_BAR", .5, int(120 + 100 * self._pulse)), 1.6))
+        p.setBrush(QBrush(disc))
+        p.drawEllipse(QPointF(cx, cy), r0 * .94, r0 * .94)
+
+
+class VizWindow(Backdrop):
+    """Full-screen visualiser: the theme backdrop, a big visualiser and the current song's name."""
+    closed = Signal()
+
+    def __init__(self, source, info_source, style, glow, flow):
+        super().__init__()
+        self._info = info_source
+        self.setWindowTitle("EchoDeck 視覺化")
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(56, 36, 56, 30)
+        lay.setSpacing(14)
+        top = QHBoxLayout()
+        names = QVBoxLayout()
+        names.setSpacing(2)
+        self.title = ElideLabel("")
+        self.title.setObjectName("title")
+        self.sub = ElideLabel("")
+        self.sub.setObjectName("subtitle")
+        names.addWidget(self.title)
+        names.addWidget(self.sub)
+        top.addLayout(names, 1)
+        self.time = QLabel("")
+        self.time.setObjectName("subtitle")
+        top.addWidget(self.time, 0, Qt.AlignmentFlag.AlignTop)
+        close = QPushButton("✕")
+        close.setFixedSize(40, 40)
+        close.setCursor(Qt.CursorShape.PointingHandCursor)
+        close.setToolTip("離開（Esc）")
+        close.clicked.connect(self.close)
+        top.addWidget(close, 0, Qt.AlignmentFlag.AlignTop)
+        lay.addLayout(top)
+        self.viz = VisualizerWidget(source, bars=72, big=True, expandable=False)
+        self.viz.set_style(style if style != "off" else "circle")
+        self.viz.set_options(glow, flow)
+        lay.addWidget(self.viz, 1)
+        hint = QLabel("按 Esc、雙擊畫面或右上角 ✕ 離開")
+        hint.setObjectName("hint")
+        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(hint)
+        self._timer = QTimer(self)
+        self._timer.setInterval(400)
+        self._timer.timeout.connect(self._refresh)
+        self._timer.start()
+        self._refresh()
+
+    def _refresh(self):
+        title, sub, elapsed = self._info()
+        self.title.setText(title)
+        self.sub.setText(sub)
+        self.time.setText(elapsed)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.close()
+            return
+        super().keyPressEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        self.close()
+
+    def closeEvent(self, event):
+        self._timer.stop()
+        self.closed.emit()
+        super().closeEvent(event)
 
 
 class Signals(QObject):
@@ -2502,6 +2758,7 @@ class EchoDeck(QMainWindow):
         self._hold_deadline.setSingleShot(True)
         self._hold_deadline.timeout.connect(self.stop_hold)
         self._extra_viz = []                 # visualisers of the radio / YouTube pages
+        self._viz_window = None
         self.mixer = AudioMixer(lambda message: self.signals.audio_error.emit(message))
         self.effect_was_playing = False
         self._starting = False
@@ -2601,7 +2858,15 @@ class EchoDeck(QMainWindow):
 
     def build_ui(self):
         root = Backdrop()
+        self.backdrop = root
         self.setCentralWidget(root)
+        self._amb_win = np.hanning(2048).astype(np.float32)
+        self._amb_avg = self._amb_bass = self._amb_pulse = 0.0
+        root.set_ambient_level(self._ambient_level())
+        self._amb_timer = QTimer(self)
+        self._amb_timer.setInterval(50)                 # about 20 updates per second
+        self._amb_timer.timeout.connect(self._ambient_tick)
+        self._amb_timer.start()
         layout = QHBoxLayout(root)
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(18)
@@ -2815,8 +3080,11 @@ class EchoDeck(QMainWindow):
         k.addWidget(self.progress)
         p.addWidget(card)
         self.viz = VisualizerWidget(lambda: self.mixer.viz_samples())
+        self.viz.set_options(self.settings.viz_glow / 100, self.settings.viz_flow)
         self.viz.set_style(self.settings.viz_style)
-        p.addWidget(self.viz)
+        self.viz.expand_requested.connect(self.open_viz_fullscreen)
+        self.viz.set_size_mode(self.settings.viz_size)
+        p.addWidget(self.viz, 10)
 
         # ---- volume (below the card) ----
         vol_row = QHBoxLayout()
@@ -3613,11 +3881,38 @@ class EchoDeck(QMainWindow):
         grid.addWidget(self.theme_combo, 0, 1)
         grid.addWidget(QLabel("播放中視覺化", objectName="settingLabel"), 1, 0)
         self.viz_combo = QComboBox()
-        for label, key in (("柱狀頻譜", "bars"), ("鏡像頻譜", "mirror"), ("柔和曲線", "wave"), ("關閉", "off")):
+        for label, key in (("柱狀頻譜", "bars"), ("鏡像頻譜", "mirror"), ("柔和曲線", "wave"), ("圓形頻譜", "circle"), ("關閉", "off")):
             self.viz_combo.addItem(label, key)
         self.viz_combo.setCurrentIndex(max(0, self.viz_combo.findData(self.settings.viz_style)))
         self.viz_combo.currentIndexChanged.connect(self.viz_style_changed)
         grid.addWidget(self.viz_combo, 1, 1)
+        grid.addWidget(QLabel("低音光暈", objectName="settingLabel"), 2, 0)
+        self.viz_glow_slider = QSlider(Qt.Orientation.Horizontal)
+        self.viz_glow_slider.setRange(0, 100)
+        self.viz_glow_slider.setValue(self.settings.viz_glow)
+        self.viz_glow_slider.setToolTip("鼓點／低音出現時，視覺化背景發光的強度（0 = 不發光）")
+        self.viz_glow_slider.valueChanged.connect(self.viz_options_changed)
+        glow_wrap, _glow_badge = self.slider_with_value(self.viz_glow_slider, "%")
+        grid.addWidget(glow_wrap, 2, 1)
+        self.viz_flow_check = QCheckBox("顏色隨音樂緩緩流動（關閉則固定用主題色）")
+        self.viz_flow_check.setChecked(self.settings.viz_flow)
+        self.viz_flow_check.toggled.connect(self.viz_options_changed)
+        grid.addWidget(self.viz_flow_check, 3, 1)
+        grid.addWidget(QLabel("視覺化大小", objectName="settingLabel"), 4, 0)
+        self.viz_size_combo = QComboBox()
+        for label, key in (("標準", "normal"), ("加大", "large"), ("填滿右側剩餘空間", "fill")):
+            self.viz_size_combo.addItem(label, key)
+        self.viz_size_combo.setCurrentIndex(max(0, self.viz_size_combo.findData(self.settings.viz_size)))
+        self.viz_size_combo.currentIndexChanged.connect(self.viz_layout_changed)
+        grid.addWidget(self.viz_size_combo, 4, 1)
+        grid.addWidget(QLabel("視窗氛圍光", objectName="settingLabel"), 5, 0)
+        self.viz_ambient_combo = QComboBox()
+        for label, key in (("關閉", "off"), ("柔和", "soft"), ("強烈", "strong")):
+            self.viz_ambient_combo.addItem(label, key)
+        self.viz_ambient_combo.setCurrentIndex(max(0, self.viz_ambient_combo.findData(self.settings.viz_ambient)))
+        self.viz_ambient_combo.setToolTip("整個視窗的背景隨低音／鼓點發光（透過半透明面板透出來）。如果覺得畫面不順可以關閉。")
+        self.viz_ambient_combo.currentIndexChanged.connect(self.viz_layout_changed)
+        grid.addWidget(self.viz_ambient_combo, 5, 1)
         box.addWidget(card)
 
         # -- output device --
@@ -4304,6 +4599,66 @@ class EchoDeck(QMainWindow):
         restyle(self.mic_button)
     def ptt_changed(self):
         self.settings.ptt_key = self.ptt_input.text().strip().lower(); self.save_settings(); self.install_hotkeys()
+    def _ambient_level(self):
+        return {"off": 0.0, "soft": .55, "strong": 1.0}.get(self.settings.viz_ambient, 0.0)
+
+    def _ambient_tick(self):
+        """Feeds the window-wide bass glow (cheap: one 2048-point FFT, only the low bands are used)."""
+        level = self._ambient_level()
+        if level <= 0 or not self.isVisible() or self.isMinimized():
+            return
+        x = self.mixer.viz_samples()
+        if float(np.max(np.abs(x))) < 1e-4:
+            bass = 0.0
+        else:
+            spec = np.abs(np.fft.rfft(x * self._amb_win)) / 512.0
+            db = 20 * np.log10(float(spec[2:10].max()) + 1e-7) + 4.0       # about 47-230 Hz
+            bass = max(0.0, min(1.0, (db + 66.0) / 56.0))
+        self._amb_avg = self._amb_avg * .96 + bass * .04
+        kick = max(0.0, bass - self._amb_avg * 1.08)
+        self._amb_pulse = max(self._amb_pulse * .84, min(1.0, kick * 3.4))
+        self._amb_bass += (bass - self._amb_bass) * .35
+        if self._amb_bass < .01:
+            self._amb_bass = 0.0
+        if self._amb_pulse < .01:
+            self._amb_pulse = 0.0
+        self.backdrop.feed_ambient(self._amb_bass, self._amb_pulse)
+
+    def viz_layout_changed(self, *_):
+        self.settings.viz_size = self.viz_size_combo.currentData()
+        self.settings.viz_ambient = self.viz_ambient_combo.currentData()
+        for v in [self.viz] + list(self._extra_viz):
+            v.set_size_mode(self.settings.viz_size)
+        self.backdrop.set_ambient_level(self._ambient_level())
+        self.save_settings()
+
+    def _all_viz(self):
+        return [self.viz] + list(self._extra_viz) + ([self._viz_window.viz] if self._viz_window is not None else [])
+
+    def viz_options_changed(self, *_):
+        self.settings.viz_glow = self.viz_glow_slider.value()
+        self.settings.viz_flow = self.viz_flow_check.isChecked()
+        for v in self._all_viz():
+            v.set_options(self.settings.viz_glow / 100, self.settings.viz_flow)
+        self.save_settings()
+
+    def open_viz_fullscreen(self):
+        if self._viz_window is not None:
+            self._viz_window.raise_()
+            self._viz_window.activateWindow()
+            return
+
+        def info():
+            return (self.card_title._full or "尚未播放", self.card_sub._full or "", self.time_label.text())
+
+        win = VizWindow(lambda: self.mixer.viz_samples(), info, self.settings.viz_style,
+                        self.settings.viz_glow / 100, self.settings.viz_flow)
+        win.closed.connect(lambda: setattr(self, "_viz_window", None))
+        self._viz_window = win
+        win.showFullScreen()
+        win.activateWindow()
+        win.setFocus()
+
     def viz_style_changed(self, _index):
         self.settings.viz_style = self.viz_combo.currentData()
         self.viz.set_style(self.settings.viz_style)
@@ -4537,9 +4892,12 @@ class EchoDeck(QMainWindow):
         k.addWidget(w["progress"])
         p.addWidget(card)
         viz = VisualizerWidget(lambda: self.mixer.viz_samples())
+        viz.set_options(self.settings.viz_glow / 100, self.settings.viz_flow)
         viz.set_style(self.settings.viz_style)
+        viz.expand_requested.connect(self.open_viz_fullscreen)
+        viz.set_size_mode(self.settings.viz_size)
         self._extra_viz.append(viz)
-        p.addWidget(viz)
+        p.addWidget(viz, 10)
 
         vol_row = QHBoxLayout()
         vol_row.setSpacing(10)
@@ -6019,8 +6377,17 @@ class EchoDeck(QMainWindow):
         _YT_FAV_CUSTOM[0] = settings.yt_fav_dir
         settings.tools_dir = settings.tools_dir if isinstance(settings.tools_dir, str) else ""
         _TOOLS_CUSTOM[0] = settings.tools_dir
-        if settings.viz_style not in ("off", "bars", "mirror", "wave"):
+        if settings.viz_style not in ("off", "bars", "mirror", "wave", "circle"):
             settings.viz_style = "bars"
+        try:
+            settings.viz_glow = max(0, min(100, int(settings.viz_glow)))
+        except (TypeError, ValueError):
+            settings.viz_glow = 60
+        settings.viz_flow = bool(settings.viz_flow)
+        if settings.viz_size not in ("normal", "large", "fill"):
+            settings.viz_size = "normal"
+        if settings.viz_ambient not in ("off", "soft", "strong"):
+            settings.viz_ambient = "soft"
         pls = []
         for pl in (settings.playlists if isinstance(settings.playlists, list) else []):
             if isinstance(pl, dict) and isinstance(pl.get("id"), str) and str(pl.get("name", "")).strip():
@@ -6042,6 +6409,8 @@ class EchoDeck(QMainWindow):
             pass
 
     def closeEvent(self, event):
+        if getattr(self, "_viz_window", None) is not None:
+            self._viz_window.close()
         self.clicker.stop()
         self.hold_action.stop()
         self.stop()
@@ -6987,27 +7356,6 @@ def get_art(key):
         else:
             _ART_CACHE[key] = _ARTISTS[spec["art"]](palette_for(key))
     return _ART_CACHE[key]
-
-
-class Backdrop(QWidget):
-    """Central widget: paints the active theme's artwork behind every panel."""
-
-    def __init__(self):
-        super().__init__()
-        self._key = None
-        self._pm = None
-
-    def paintEvent(self, _event):
-        size = self.size()
-        key = (CURRENT_THEME[0], size.width(), size.height())
-        if self._key != key:
-            art = get_art(CURRENT_THEME[0]).scaled(size, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                                                   Qt.TransformationMode.SmoothTransformation)
-            self._pm = art.copy((art.width() - size.width()) // 2, (art.height() - size.height()) // 2,
-                                size.width(), size.height())
-            self._key = key
-        painter = QPainter(self)
-        painter.drawPixmap(0, 0, self._pm)
 
 
 STYLE = """
