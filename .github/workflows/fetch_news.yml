@@ -61,7 +61,6 @@ jobs:
           PROXY_KEY: ${{ secrets.PROXY_KEY }}                          # Worker 的通關密碼
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}                    # Reddit 標題翻成中文用（跟新聞翻譯同一把）
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}                    # 選填：非農 / CPI 日期更穩（沒有就改抓 BLS 官網）
-          THREADS_ACCESS_TOKEN: ${{ secrets.THREADS_ACCESS_TOKEN }}    # 選填：沒設定時 Threads 區塊會顯示未設定
           EXTRAS_FORCE: ${{ github.event_name == 'workflow_dispatch' && '1' || '' }}   # 手動按 Run workflow 時強制全部重抓
         run: python extras.py data_out/extras.json
 
