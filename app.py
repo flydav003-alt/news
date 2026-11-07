@@ -137,6 +137,8 @@ hr{border-color:var(--line)!important;margin:10px 0!important}
 /* 指標 */
 .mrow{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:6px}
 .m{background:var(--soft);border-radius:10px;padding:8px 14px;min-width:96px}
+a.m{display:block;color:inherit!important;cursor:pointer;transition:box-shadow .15s}
+a.m:hover{box-shadow:0 2px 8px rgba(80,60,20,.12)}
 .m-l{font-size:11px;color:var(--tx2)} .m-v{font-size:19px;font-weight:700}
 .sbar{display:flex;height:8px;border-radius:6px;overflow:hidden;margin:6px 0 2px;background:var(--line)}
 .sbar i{display:block;height:100%}
@@ -1335,11 +1337,17 @@ with tab_home:
         neu_n = len(df_r) - bull_n - bear_n
         ai_df_all = df_r[df_r["ai_summary"].fillna("") != ""]
         geo_df = df_r[df_r["is_geo"] == True]
+        cn_n = int((df_r["category"] == "大陸").sum())
+        intl_n = int((df_r["language"] == "en").sum())
         tot = max(len(df_r), 1)
+        qf = st.query_params.get("qf", "")
+        _qbase = f"?theme={st.session_state['theme_sel']}"
 
         st.markdown(_h(f"""
         <div class="mrow">
-          <div class="m"><div class="m-l">📰 新聞</div><div class="m-v">{len(df_r)}</div></div>
+          <a class="m" style="text-decoration:none" href="{_qbase}&qf=cn"><div class="m-l">🏮 大陸{' ✓' if qf == 'cn' else ''}</div><div class="m-v">{cn_n}</div></a>
+          <a class="m" style="text-decoration:none" href="{_qbase}&qf=intl"><div class="m-l">🌐 國際英文{' ✓' if qf == 'intl' else ''}</div><div class="m-v">{intl_n}</div></a>
+          <a class="m" style="text-decoration:none" href="{_qbase}"><div class="m-l">📰 新聞{' ✓' if not qf else ''}</div><div class="m-v">{len(df_r)}</div></a>
           <div class="m"><div class="m-l">📈 利多</div><div class="m-v up">{bull_n}</div></div>
           <div class="m"><div class="m-l">📉 利空</div><div class="m-v dn">{bear_n}</div></div>
           <div class="m"><div class="m-l">✦ AI 分析</div><div class="m-v">{len(ai_df_all)}</div></div>
@@ -1428,7 +1436,7 @@ with tab_home:
 
         # ── 新聞牆 ──
         st.markdown('<div class="sec">📋 最新新聞</div>', unsafe_allow_html=True)
-        chip = st.radio("快速篩選", ["全部", "📈 利多", "📉 利空", "✦ AI 精選", "⚑ 地緣", "🏮 大陸", "🌐 國際英文"],
+        chip = st.radio("快速篩選", ["全部", "📈 利多", "📉 利空", "✦ AI 精選", "⚑ 地緣"],
                         horizontal=True, label_visibility="collapsed", key="chip")
         f1, f2, f3, f4 = st.columns([1.2, 2.4, 1, 1])
         with f1:
@@ -1451,12 +1459,12 @@ with tab_home:
             ddf = ddf[(ddf["ai_summary"].fillna("") != "") & (ddf["ai_score"].abs() >= 5)]
         elif chip == "⚑ 地緣":
             ddf = ddf[ddf["is_geo"] == True]
-        elif chip == "🏮 大陸":
-            # 「大陸生活」（娛樂/電玩/旅遊）平常不進新聞牆，只在這個篩選底下才併進來顯示
+        if qf == "cn":
+            # 「大陸生活」（娛樂/電玩/旅遊）平常不進新聞牆，只在這個快篩底下才併進來顯示
             life_cn = df_all[df_all["category"] == "大陸生活"]
             ddf = pd.concat([ddf[ddf["category"] == "大陸"], life_cn]).drop_duplicates(subset=["url"])
             ddf = ddf.sort_values("published_at", ascending=False)
-        elif chip == "🌐 國際英文":
+        elif qf == "intl":
             ddf = ddf[ddf["language"] == "en"]
         if hide_neu:
             ddf = ddf[ddf.apply(lambda r: eff_sent(r)[0] != "neutral", axis=1)]
