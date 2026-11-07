@@ -12,7 +12,7 @@ extras.py — 籌碼 / 行事曆 / 社群 資料抓取（由 GitHub Actions 執�
 區塊
   chips     三大法人（大盤＋個股買賣超前 10）、融資融券增減、注意股、處置股
   calendar  只讀 calendar_manual.json（總經、NVDA 財報、休市），只顯示未來 62 天
-  social    PTT 熱門、Reddit、微博熱搜
+  social    Reddit、微博熱搜
 """
 
 import calendar as _cal
@@ -44,7 +44,7 @@ _last_call = [0.0]
 PROXY_URL = os.environ.get("PROXY_URL", "").strip().rstrip("/")
 PROXY_KEY = os.environ.get("PROXY_KEY", "").strip()
 # 這些網站對雲端機房 IP 不友善 → 先走 Cloudflare Worker，失敗再直連；證交所則相反（先直連，失敗才走代理）
-PROXY_FIRST = {"www.ptt.cc", "weibo.com", "s.weibo.com", "www.reddit.com", "old.reddit.com",
+PROXY_FIRST = {"weibo.com", "s.weibo.com", "www.reddit.com", "old.reddit.com",
                "graph.threads.net", "www.bls.gov", "www.federalreserve.gov", "api.nasdaq.com"}
 PROXY_AFTER = {"www.twse.com.tw", "openapi.twse.com.tw"}
 
@@ -636,9 +636,8 @@ def build_calendar(prev: dict, now: datetime) -> dict:
 
 # ─────────────────────────────────────────────
 # 社群（不限股票：看各種事件的討論熱度）
-#   PTT 熱門文章（依推文數；雲端 IP 目前被擋）、Reddit（美國）、微博熱搜（大陸）
+#   Reddit（美國）、微博熱搜（大陸）
 # ─────────────────────────────────────────────
-PTT_BOARDS = ["Gossiping", "HatePolitics", "Stock", "Baseball", "NBA"]
 REDDIT_SUBS = [("popular", 12), ("worldnews", 8), ("technology", 8)]
 
 
@@ -660,48 +659,6 @@ def _ts(e) -> int:
             except Exception:
                 pass
     return 0
-
-
-def _ptt_push(txt: str) -> int:
-    txt = (txt or "").strip()
-    if txt == "爆":
-        return 100
-    if txt.startswith("X"):
-        return -int(txt[1:]) if txt[1:].isdigit() else -10
-    return int(txt) if txt.isdigit() else 0
-
-
-def fetch_ptt(pages: int = 2):
-    """PTT 網頁版索引頁（帶 over18 cookie），各板抓最新 pages 頁並保留推文數。失敗回 (None, 原因)"""
-    from bs4 import BeautifulSoup
-    posts, last_err = [], ""
-    for board in PTT_BOARDS:
-        url = f"https://www.ptt.cc/bbs/{board}/index.html"
-        for _ in range(pages):
-            r = _get(url, headers={"User-Agent": UA["User-Agent"], "Accept": "text/html,*/*"},
-                     cookies={"over18": "1"}, gap=1.2)
-            if r is None:
-                last_err = f"{board} 連不上（非 200，雲端 IP 可能被 PTT 擋）"
-                break
-            soup = BeautifulSoup(r.text, "lxml")
-            for ent in soup.select("div.r-ent"):
-                a = ent.select_one("div.title a")
-                if not a:
-                    continue
-                nr, dt = ent.select_one("div.nrec"), ent.select_one("div.date")
-                t = _tags(a.get_text())
-                m = re.match(r"\s*\[(.+?)\]", t)
-                posts.append({"t": t, "u": "https://www.ptt.cc" + a.get("href", ""), "b": board,
-                              "n": _ptt_push(nr.get_text() if nr else ""),
-                              "d": _tags(dt.get_text()) if dt else "", "k": m.group(1) if m else ""})
-            prev = next((x for x in soup.select("div.btn-group-paging a") if "上頁" in x.get_text()), None)
-            if not prev or not prev.get("href"):
-                break
-            url = "https://www.ptt.cc" + prev["href"]
-    if not posts:
-        return None, last_err or "沒有抓到任何文章"
-    posts.sort(key=lambda p: p["n"], reverse=True)
-    return posts[:30], ""
 
 
 def fetch_reddit():
@@ -801,11 +758,6 @@ def build_social(prev: dict, now: datetime) -> dict:
     prev = prev or {}
     parts = {}
     out = {"fetched_at": now.isoformat(timespec="seconds")}
-
-    ptt, err = fetch_ptt()
-    old_ptt = prev.get("ptt") if isinstance(prev.get("ptt"), list) else []
-    out["ptt"] = ptt or old_ptt
-    parts["ptt"] = "ok" if ptt else f"error: {err}"
 
     red, errs = fetch_reddit()
     old = prev.get("reddit") if isinstance(prev.get("reddit"), dict) else {}
