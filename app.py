@@ -1486,7 +1486,7 @@ with tab_home:
 
         # ── 新聞牆 ──
         st.markdown('<div class="sec">📋 最新新聞</div>', unsafe_allow_html=True)
-        chip = st.radio("快速篩選", ["全部", "🏮 大陸", "🌐 國際英文", "📈 利多", "📉 利空", "✦ AI 精選", "⚑ 地緣"],
+        chip = st.radio("快速篩選", ["全部", "🏮 大陸", "🌐 國際", "📈 利多", "📉 利空", "✦ AI 精選", "⚑ 地緣"],
                         horizontal=True, label_visibility="collapsed", key="chip")
         f1, f2, f3, f4 = st.columns([1.2, 2.4, 1, 1])
         with f1:
@@ -1514,7 +1514,7 @@ with tab_home:
             life_cn = df_all[df_all["category"] == "大陸生活"]
             ddf = pd.concat([ddf[ddf["category"] == "大陸"], life_cn]).drop_duplicates(subset=["url"])
             ddf = ddf.sort_values("published_at", ascending=False)
-        elif chip == "🌐 國際英文":
+        elif chip == "🌐 國際":
             ddf = ddf[ddf["language"] == "en"]
         if hide_neu:
             ddf = ddf[ddf.apply(lambda r: eff_sent(r)[0] != "neutral", axis=1)]
