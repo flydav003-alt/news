@@ -1,4 +1,5 @@
 [
+  {"date": "2026-11-18", "time": "06:00", "kind": "earn", "title": "輝達（NVDA）FQ3 財報", "note": "美東 11/17 盤後；5pm ET 電話會議；來源：NVIDIA 官方公告"},
   {"date": "2026-11-26", "time": "", "kind": "holiday", "title": "美股休市（感恩節）", "note": "NYSE / Nasdaq 全天休市"},
   {"date": "2026-11-27", "time": "", "kind": "holiday", "title": "美股提早收盤（感恩節隔日）", "note": "美東 13:00 收盤＝台灣 11/28 02:00"},
   {"date": "2026-12-04", "time": "21:30", "kind": "macro", "title": "美國 11 月非農就業報告（NFP）", "note": "美東 8:30；來源：BLS 官方行程"},
