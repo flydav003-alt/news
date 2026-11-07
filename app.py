@@ -138,6 +138,16 @@ hr{border-color:var(--line)!important;margin:10px 0!important}
 .mrow{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:6px}
 .m{background:var(--soft);border-radius:10px;padding:8px 14px;min-width:96px}
 .m-l{font-size:11px;color:var(--tx2)} .m-v{font-size:19px;font-weight:700}
+/* 快速篩選裡的「大陸」「國際英文」兩個選項特別加大、加框，比其他選項顯眼 */
+div[role="radiogroup"][aria-label="快速篩選"] label:nth-of-type(2),
+div[role="radiogroup"][aria-label="快速篩選"] label:nth-of-type(3){
+  border:2px solid var(--accent)!important;border-radius:14px!important;
+  padding:8px 18px!important;background:var(--soft)!important;
+}
+div[role="radiogroup"][aria-label="快速篩選"] label:nth-of-type(2) p,
+div[role="radiogroup"][aria-label="快速篩選"] label:nth-of-type(3) p{
+  font-size:17px!important;font-weight:700!important;color:var(--accent)!important;
+}
 .sbar{display:flex;height:8px;border-radius:6px;overflow:hidden;margin:6px 0 2px;background:var(--line)}
 .sbar i{display:block;height:100%}
 
@@ -1428,7 +1438,7 @@ with tab_home:
 
         # ── 新聞牆 ──
         st.markdown('<div class="sec">📋 最新新聞</div>', unsafe_allow_html=True)
-        chip = st.radio("快速篩選", ["全部", "📈 利多", "📉 利空", "✦ AI 精選", "⚑ 地緣", "🏮 大陸", "🌐 國際英文"],
+        chip = st.radio("快速篩選", ["全部", "🏮 大陸", "🌐 國際英文", "📈 利多", "📉 利空", "✦ AI 精選", "⚑ 地緣"],
                         horizontal=True, label_visibility="collapsed", key="chip")
         f1, f2, f3, f4 = st.columns([1.2, 2.4, 1, 1])
         with f1:
