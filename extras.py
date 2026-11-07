@@ -615,7 +615,14 @@ def build_calendar(prev: dict, now: datetime) -> dict:
     for cat, label in (("fomc", "FOMC"), ("nfp", "非農"), ("cpi", "CPI"), ("nvda", "輝達財報")):
         if auto[cat] is not None:
             events += auto[cat]
-            parts[cat] = f"ok（{len(auto[cat])} 筆）"
+            extra = 0
+            if cat in ("nfp", "cpi"):                     # 自動資料沒有的日期，用手動檔補上（日期相同不重複）
+                have = {e["date"] for e in auto[cat]}
+                for e in man:
+                    if _cat(e["title"]) == cat and e["date"] not in have:
+                        events.append(e)
+                        extra += 1
+            parts[cat] = f"ok（{len(auto[cat])} 筆" + (f"，手動補 {extra} 筆）" if extra else "）")
         else:
             fb = [e for e in man if _cat(e["title"]) == cat]
             events += fb
