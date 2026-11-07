@@ -509,7 +509,7 @@ sync = sync_remote(DATA_URL)
 def load_all():
     db = SessionLocal()
     try:
-        return get_articles_df(db, limit=800)
+        return get_articles_df(db, limit=1500)
     finally:
         db.close()
 
