@@ -11,8 +11,8 @@ extras.py — 籌碼 / 行事曆 / 社群 資料抓取（由 GitHub Actions 執�
 
 區塊
   chips     三大法人（大盤＋個股買賣超前 10）、融資融券增減、注意股、處置股
-  calendar  台股除權息、美股重點財報、calendar_manual.json 裡你自己維護的事件（總經、休市…）
-  social    PTT 股票版、Reddit（wallstreetbets / stocks）
+  calendar  只讀 calendar_manual.json（總經、NVDA 財報、休市），只顯示未來 62 天
+  social    Threads（需 token）、PTT 熱門、Reddit、微博熱搜
 """
 
 import calendar as _cal
@@ -41,14 +41,14 @@ _last_call = [0.0]
 # ─────────────────────────────────────────────
 # 基礎工具
 # ─────────────────────────────────────────────
-def _get(url, params=None, headers=None, timeout=25, gap=1.0):
+def _get(url, params=None, headers=None, timeout=25, gap=1.0, cookies=None):
     """禮貌地 GET：兩次請求至少間隔 gap 秒。失敗回 None。"""
     wait = gap - (time.time() - _last_call[0])
     if wait > 0:
         time.sleep(wait)
     _last_call[0] = time.time()
     try:
-        r = requests.get(url, params=params, headers=headers or UA, timeout=timeout)
+        r = requests.get(url, params=params, headers=headers or UA, timeout=timeout, cookies=cookies)
         if r.status_code != 200:
             logger.warning(f"HTTP {r.status_code}：{url[:80]}")
             return None
@@ -337,14 +337,6 @@ def build_chips(prev: dict, now: datetime) -> dict:
     if not mdone:
         parts["margin"] = "error: 近 4 個交易日都抓不到"
 
-    # 4) 注意股 / 處置股
-    notice = fetch_announce("notice", today - timedelta(days=3), today)
-    out["notice"] = notice
-    parts["notice"] = "ok" if notice else "empty（可能今天沒有公布，或格式變動）"
-    punish = fetch_announce("punish", today - timedelta(days=14), today + timedelta(days=14))
-    out["punish"] = punish
-    parts["punish"] = "ok" if punish else "empty（可能目前沒有處置股，或格式變動）"
-
     out["parts"] = parts
     bad = [k for k, v in parts.items() if v.startswith("error")]
     out["status"] = "ok" if not bad else ("error" if len(bad) == len(parts) else "partial")
@@ -354,67 +346,7 @@ def build_chips(prev: dict, now: datetime) -> dict:
 # ─────────────────────────────────────────────
 # 行事曆
 # ─────────────────────────────────────────────
-EARN_WATCH = {"NVDA", "AAPL", "MSFT", "GOOGL", "GOOG", "AMZN", "META", "TSLA", "AVGO", "AMD", "MU", "ORCL",
-              "INTC", "QCOM", "TSM", "ASML", "ARM", "SMCI", "DELL", "MRVL", "PLTR", "NFLX", "CSCO", "AMAT",
-              "LRCX", "KLAC", "COST", "CRM", "ADBE", "JPM", "GS", "WMT"}
-
-
-def fetch_exdiv(today: date):
-    """台股除權息預告（證交所 TWT48U）。回傳事件 list"""
-    s, e = today.strftime("%Y%m%d"), (today + timedelta(days=45)).strftime("%Y%m%d")
-    recs = []
-    for base in (f"{TWSE}/rwd/zh/exRight/TWT48U", f"{TWSE}/exchangeReport/TWT48U"):
-        j = _json(base, {"response": "json", "strDate": s, "startDate": s, "endDate": e})
-        f, d = _rows(j)
-        if d:
-            recs = [dict(zip([_tags(x) for x in f], row)) for row in d]
-            break
-    if not recs:
-        j = _json("https://openapi.twse.com.tw/v1/exchangeReport/TWT48U_ALL")
-        if isinstance(j, list):
-            recs = [r for r in j if isinstance(r, dict)]
-    ev = []
-    for r in recs:
-        dt = _roc(_pick(r, "資料日期", "日期", "Date"))
-        code = _pick(r, "股票代號", "代號", "Code")
-        if not dt or not code or not (today <= dt <= today + timedelta(days=45)):
-            continue
-        kind = _pick(r, "除權息", "Exdividend") or "息"
-        cash = _pick(r, "現金股利", "CashDividend")
-        stock = _pick(r, "無償配股率", "StockDividend")
-        note = " · ".join(x for x in (f"現金股利 {cash}" if cash and cash not in ("0", "0.0", "0.00000000") else "",
-                                      f"配股率 {stock}" if stock and stock not in ("0", "0.0", "0.00000000") else "") if x)
-        ev.append({"date": dt.isoformat(), "time": "", "kind": "exdiv",
-                   "title": f"{code} {_pick(r, '股票名稱', '名稱', 'Name')} {kind if kind.startswith('除') else '除' + kind}", "note": note})
-    ev.sort(key=lambda x: (x["date"], x["title"]))
-    return ev[:150]
-
-
-def fetch_earnings(today: date, days: int = 14):
-    """美股財報（Nasdaq 公開 API），只留大型股 / 關注名單。日期為美東日期。"""
-    hdr = dict(UA, Origin="https://www.nasdaq.com", Referer="https://www.nasdaq.com/")
-    ev, tried, okn = [], 0, 0
-    for i in range(days):
-        d = today + timedelta(days=i)
-        if d.weekday() >= 5:
-            continue
-        tried += 1
-        j = _json("https://api.nasdaq.com/api/calendar/earnings", {"date": d.isoformat()}, headers=hdr, gap=0.5)
-        rows = ((j or {}).get("data") or {}).get("rows") if isinstance(j, dict) else None
-        if rows is None:
-            continue
-        okn += 1
-        for r in rows:
-            sym = str(r.get("symbol", "")).upper()
-            cap = _n(re.sub(r"[^\d.]", "", str(r.get("marketCap", ""))))
-            if sym in EARN_WATCH or cap >= 2e11:
-                t = str(r.get("time", ""))
-                lab = "盤前" if "pre" in t else ("盤後" if "after" in t else "")
-                eps = str(r.get("epsForecast", "") or "").strip()
-                ev.append({"date": d.isoformat(), "time": lab, "kind": "earn",
-                           "title": f"{sym} {_tags(r.get('name', ''))[:28]} 財報（美東）",
-                           "note": f"EPS 預估 {eps}" if eps else ""})
-    return ev, (okn > 0 or tried == 0)
+CAL_DAYS = 62      # 行事曆只往後看 62 天（約 2 個月）
 
 
 def load_manual(today: date):
@@ -427,7 +359,7 @@ def load_manual(today: date):
                 out = []
                 for it in items:
                     dt = _roc(it.get("date"))
-                    if dt and dt >= today - timedelta(days=1):
+                    if dt and today <= dt <= today + timedelta(days=CAL_DAYS):
                         out.append({"date": dt.isoformat(), "time": str(it.get("time", "")),
                                     "kind": str(it.get("kind", "macro")), "title": str(it.get("title", "")),
                                     "note": str(it.get("note", ""))})
@@ -440,26 +372,23 @@ def load_manual(today: date):
 
 def build_calendar(prev: dict, now: datetime) -> dict:
     today = now.date()
-    parts, events = {}, []
-    ex = fetch_exdiv(today)
-    parts["exdiv"] = "ok" if ex else "empty（可能近期沒有除權息，或格式變動）"
-    events += ex
-    er, ok = fetch_earnings(today)
-    parts["earnings"] = "ok" if er else ("empty" if ok else "error: Nasdaq API 連不上")
-    events += er
     man, found = load_manual(today)
-    parts["manual"] = f"ok（{len(man)} 筆）" if found else "empty（找不到 calendar_manual.json）"
-    events += man
-    events.sort(key=lambda e: (e["date"], e["time"] or "99", e["title"]))
-    out = {"fetched_at": now.isoformat(timespec="seconds"), "events": events[:300], "parts": parts}
-    bad = [k for k, v in parts.items() if v.startswith("error")]
-    out["status"] = "ok" if not bad else "partial"
-    return out
+    parts = {"manual": f"ok（{len(man)} 筆）" if found else "error: 找不到或讀不了 calendar_manual.json"}
+    man.sort(key=lambda e: (e["date"], e["time"] or "99", e["title"]))
+    return {"fetched_at": now.isoformat(timespec="seconds"), "events": man, "parts": parts,
+            "status": "ok" if found else "partial"}
 
 
 # ─────────────────────────────────────────────
-# 社群
+# 社群（不限股票：看各種事件的討論熱度）
+#   Threads（台灣主流，需官方 API token）→ PTT 熱門文章（依推文數）→ Reddit（美國）→ 微博熱搜（大陸）
 # ─────────────────────────────────────────────
+PTT_BOARDS = ["Gossiping", "HatePolitics", "Stock", "Baseball", "NBA"]
+REDDIT_SUBS = [("popular", 12), ("worldnews", 8), ("technology", 8)]
+THREADS_KEYWORDS = [k.strip() for k in os.environ.get(
+    "THREADS_KEYWORDS", "台積電,颱風,地震,選舉,AI,漲價").split(",") if k.strip()]
+
+
 def _feed(url):
     import feedparser
     r = _get(url, headers={"User-Agent": UA["User-Agent"], "Accept": "application/atom+xml,application/xml,*/*"}, gap=1.0)
@@ -480,61 +409,138 @@ def _ts(e) -> int:
     return 0
 
 
-_CODE_RE = re.compile(r"(?<![\d.])(\d{4})(?![\d年月日%元點.])")
+def _ptt_push(txt: str) -> int:
+    txt = (txt or "").strip()
+    if txt == "爆":
+        return 100
+    if txt.startswith("X"):
+        return -int(txt[1:]) if txt[1:].isdigit() else -10
+    return int(txt) if txt.isdigit() else 0
+
+
+def fetch_ptt(pages: int = 2):
+    """PTT 網頁版索引頁（帶 over18 cookie），各板抓最新 pages 頁並保留推文數。失敗回 (None, 原因)"""
+    from bs4 import BeautifulSoup
+    posts, last_err = [], ""
+    for board in PTT_BOARDS:
+        url = f"https://www.ptt.cc/bbs/{board}/index.html"
+        for _ in range(pages):
+            r = _get(url, headers={"User-Agent": UA["User-Agent"], "Accept": "text/html,*/*"},
+                     cookies={"over18": "1"}, gap=1.2)
+            if r is None:
+                last_err = f"{board} 連不上（非 200，雲端 IP 可能被 PTT 擋）"
+                break
+            soup = BeautifulSoup(r.text, "lxml")
+            for ent in soup.select("div.r-ent"):
+                a = ent.select_one("div.title a")
+                if not a:
+                    continue
+                nr, dt = ent.select_one("div.nrec"), ent.select_one("div.date")
+                t = _tags(a.get_text())
+                m = re.match(r"\s*\[(.+?)\]", t)
+                posts.append({"t": t, "u": "https://www.ptt.cc" + a.get("href", ""), "b": board,
+                              "n": _ptt_push(nr.get_text() if nr else ""),
+                              "d": _tags(dt.get_text()) if dt else "", "k": m.group(1) if m else ""})
+            prev = next((x for x in soup.select("div.btn-group-paging a") if "上頁" in x.get_text()), None)
+            if not prev or not prev.get("href"):
+                break
+            url = "https://www.ptt.cc" + prev["href"]
+    if not posts:
+        return None, last_err or "沒有抓到任何文章"
+    posts.sort(key=lambda p: p["n"], reverse=True)
+    return posts[:30], ""
+
+
+def fetch_reddit():
+    out, errs = {}, []
+    for sub, n in REDDIT_SUBS:
+        ent = None
+        for host in ("www.reddit.com", "old.reddit.com"):
+            ent = _feed(f"https://{host}/r/{sub}/hot/.rss?limit=25")
+            if ent:
+                break
+        if ent:
+            out[sub] = [{"t": _tags(e.get("title", "")), "u": e.get("link", ""), "p": _ts(e)} for e in ent[:n]]
+        else:
+            errs.append(sub)
+    return out, errs
+
+
+def fetch_weibo():
+    """微博熱搜榜（公開 JSON）。失敗回 None"""
+    from urllib.parse import quote
+    hdr = {"User-Agent": UA["User-Agent"], "Accept": "application/json, text/plain, */*",
+           "Referer": "https://weibo.com/", "Accept-Language": "zh-CN,zh;q=0.9"}
+    j = _json("https://weibo.com/ajax/side/hotSearch", headers=hdr)
+    try:
+        lst = j["data"]["realtime"]
+    except Exception:
+        return None
+    out = []
+    for it in lst:
+        w = str(it.get("word") or it.get("note") or "").strip()
+        if not w or it.get("is_ad"):
+            continue
+        out.append({"t": w, "u": f"https://s.weibo.com/weibo?q=%23{quote(w)}%23",
+                    "n": int(it.get("num") or 0), "tag": str(it.get("label_name") or "")})
+    return out[:25] or None
+
+
+def fetch_threads(token: str):
+    """Threads 官方 API 關鍵字搜尋（熱門）。Threads 沒有公開的趨勢榜或 RSS。回 (list, 錯誤原因)"""
+    posts, err = [], ""
+    for kw in THREADS_KEYWORDS:
+        j = _json("https://graph.threads.net/v1.0/keyword_search",
+                  {"q": kw, "search_type": "TOP", "access_token": token,
+                   "fields": "id,text,permalink,username,like_count,reply_count,timestamp"}, gap=1.0)
+        if not isinstance(j, dict) or not j.get("data"):
+            err = f"「{kw}」沒有回傳（token 過期、沒有 keyword_search 權限，或額度用完）"
+            continue
+        for it in j["data"][:6]:
+            txt = _tags(it.get("text", ""))
+            if not txt or not it.get("permalink"):
+                continue
+            posts.append({"t": txt[:90], "u": it["permalink"], "a": it.get("username", ""), "kw": kw,
+                          "n": int(it.get("like_count") or 0) + 3 * int(it.get("reply_count") or 0)})
+    posts.sort(key=lambda p: p["n"], reverse=True)
+    return posts[:20], ("" if posts else err)
 
 
 def build_social(prev: dict, now: datetime) -> dict:
+    prev = prev or {}
     parts = {}
     out = {"fetched_at": now.isoformat(timespec="seconds")}
 
-    # PTT 股票版
-    ent = _feed("https://www.ptt.cc/atom/Stock.xml")
-    old = {p["u"]: p for p in ((prev or {}).get("ptt") or {}).get("posts", [])}
-    if ent:
-        for e in ent:
-            u = e.get("link", "")
-            if not u:
-                continue
-            t = _tags(e.get("title", ""))
-            m = re.match(r"\s*\[(.+?)\]", t)
-            old[u] = {"t": t, "u": u, "a": _tags(e.get("author", "")), "p": _ts(e) or int(now.timestamp()),
-                      "k": m.group(1) if m else ""}
-        parts["ptt"] = "ok"
+    token = os.environ.get("THREADS_ACCESS_TOKEN", "").strip()
+    if token:
+        th, err = fetch_threads(token)
+        out["threads"] = th or prev.get("threads") or []
+        parts["threads"] = "ok" if th else f"error: {err}"
     else:
-        parts["ptt"] = "error: PTT 連不上或沒有資料（保留上次內容）"
-    cutoff = now.timestamp() - 72 * 3600
-    posts = sorted((p for p in old.values() if p["p"] >= cutoff), key=lambda p: p["p"], reverse=True)[:300]
-    cnt = {}
-    for p in posts:
-        if p["p"] < now.timestamp() - 24 * 3600:
-            continue
-        for c in set(_CODE_RE.findall(p["t"])):
-            if 1990 <= int(c) <= 2035:
-                continue
-            cnt.setdefault(c, []).append(p)
-    hot = sorted(cnt.items(), key=lambda kv: (-len(kv[1]), kv[0]))[:10]
-    out["ptt"] = {"posts": posts, "hot": [{"c": c, "n": len(v), "t": v[0]["t"], "u": v[0]["u"]} for c, v in hot if len(v) >= 2]}
+        out["threads"] = prev.get("threads") or []
+        parts["threads"] = "skip: 尚未設定 THREADS_ACCESS_TOKEN（Threads 沒有公開 RSS，必須用官方 API）"
 
-    # Reddit
-    red = {}
-    for sub in ("wallstreetbets", "stocks"):
-        ent = _feed(f"https://www.reddit.com/r/{sub}/hot/.rss?limit=25")
-        if ent:
-            red[sub] = [{"t": _tags(e.get("title", "")), "u": e.get("link", ""), "p": _ts(e)} for e in ent[:25]]
-            parts[f"reddit_{sub}"] = "ok"
-        else:
-            red[sub] = ((prev or {}).get("reddit") or {}).get(sub, [])
-            parts[f"reddit_{sub}"] = "error: Reddit 擋住或連不上（雲端 IP 常被限制）"
-    tag = {}
-    for lst in red.values():
-        for p in lst:
-            for s in set(re.findall(r"\$([A-Z]{1,5})\b", p["t"])):
-                tag[s] = tag.get(s, 0) + 1
+    ptt, err = fetch_ptt()
+    old_ptt = prev.get("ptt") if isinstance(prev.get("ptt"), list) else []
+    out["ptt"] = ptt or old_ptt
+    parts["ptt"] = "ok" if ptt else f"error: {err}"
+
+    red, errs = fetch_reddit()
+    old = prev.get("reddit") if isinstance(prev.get("reddit"), dict) else {}
+    for sub, _n2 in REDDIT_SUBS:
+        if sub not in red and old.get(sub):
+            red[sub] = old[sub]
     out["reddit"] = red
-    out["reddit_tags"] = [{"s": s, "n": n} for s, n in sorted(tag.items(), key=lambda kv: -kv[1])[:10] if n >= 2]
+    parts["reddit"] = "ok" if not errs else f"error: {', '.join(errs)} 抓不到（Reddit 常擋雲端 IP）"
+
+    wb = fetch_weibo()
+    out["weibo"] = wb or prev.get("weibo") or []
+    parts["weibo"] = "ok" if wb else "error: 微博熱搜抓不到（保留上次內容）"
+
     out["parts"] = parts
-    bad = [k for k, v in parts.items() if v.startswith("error")]
-    out["status"] = "ok" if not bad else ("error" if len(bad) == len(parts) else "partial")
+    real = [v for v in parts.values() if not v.startswith("skip")]
+    bad = [v for v in real if v.startswith("error")]
+    out["status"] = "ok" if not bad else ("error" if len(bad) == len(real) else "partial")
     return out
 
 
