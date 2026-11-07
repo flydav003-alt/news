@@ -41,21 +41,52 @@ _last_call = [0.0]
 # ─────────────────────────────────────────────
 # 基礎工具
 # ─────────────────────────────────────────────
+PROXY_URL = os.environ.get("PROXY_URL", "").strip().rstrip("/")
+PROXY_KEY = os.environ.get("PROXY_KEY", "").strip()
+# 這些網站對雲端機房 IP 不友善 → 先走 Cloudflare Worker，失敗再直連；證交所則相反（先直連，失敗才走代理）
+PROXY_FIRST = {"www.ptt.cc", "weibo.com", "s.weibo.com", "www.reddit.com", "old.reddit.com",
+               "graph.threads.net", "www.bls.gov", "www.federalreserve.gov", "api.nasdaq.com"}
+PROXY_AFTER = {"www.twse.com.tw", "openapi.twse.com.tw"}
+
+
+def _once(url, params, headers, timeout, cookies, via_proxy):
+    try:
+        if via_proxy:
+            full = requests.Request("GET", url, params=params).prepare().url
+            h = dict(headers or UA)
+            if cookies:
+                h["X-Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
+            r = requests.get(PROXY_URL, params={"url": full, "key": PROXY_KEY}, headers=h, timeout=timeout + 10)
+        else:
+            r = requests.get(url, params=params, headers=headers or UA, timeout=timeout, cookies=cookies)
+        if r.status_code != 200:
+            logger.warning(f"HTTP {r.status_code}{'（代理）' if via_proxy else ''}：{url[:80]}")
+            return None
+        return r
+    except Exception as e:
+        logger.warning(f"請求失敗{'（代理）' if via_proxy else ''}：{url[:80]} → {type(e).__name__}: {e}")
+        return None
+
+
 def _get(url, params=None, headers=None, timeout=25, gap=1.0, cookies=None):
-    """禮貌地 GET：兩次請求至少間隔 gap 秒。失敗回 None。"""
+    """禮貌地 GET：兩次請求至少間隔 gap 秒。依網站決定直連或走代理。失敗回 None。"""
+    from urllib.parse import urlparse
     wait = gap - (time.time() - _last_call[0])
     if wait > 0:
         time.sleep(wait)
     _last_call[0] = time.time()
-    try:
-        r = requests.get(url, params=params, headers=headers or UA, timeout=timeout, cookies=cookies)
-        if r.status_code != 200:
-            logger.warning(f"HTTP {r.status_code}：{url[:80]}")
-            return None
-        return r
-    except Exception as e:
-        logger.warning(f"請求失敗：{url[:80]} → {type(e).__name__}: {e}")
-        return None
+    host = urlparse(url).hostname or ""
+    if PROXY_URL and host in PROXY_FIRST:
+        order = (True, False)
+    elif PROXY_URL and host in PROXY_AFTER:
+        order = (False, True)
+    else:
+        order = (False,)
+    for via in order:
+        r = _once(url, params, headers, timeout, cookies, via)
+        if r is not None:
+            return r
+    return None
 
 
 def _json(url, params=None, headers=None, gap=1.0):
@@ -346,11 +377,203 @@ def build_chips(prev: dict, now: datetime) -> dict:
 # ─────────────────────────────────────────────
 # 行事曆
 # ─────────────────────────────────────────────
-CAL_DAYS = 62      # 行事曆只往後看 62 天（約 2 個月）
+CAL_DAYS = 62      # 行事曆只往後看 62 天（約 2 個月），每次執行都重新計算，所以新事件會隨時間自動滾進來
+HTML_HDR = {"User-Agent": UA["User-Agent"], "Accept": "text/html,application/xhtml+xml,*/*",
+            "Accept-Language": "en-US,en;q=0.9"}
+_MON = {m: i for i, m in enumerate(["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
+
+
+def _et_to_tw(d: date, hh: int, mm: int):
+    """美東時間 → (台灣日期 iso, 'HH:MM')，自動處理夏令時間"""
+    try:
+        from zoneinfo import ZoneInfo
+        dt = datetime(d.year, d.month, d.day, hh, mm, tzinfo=ZoneInfo("America/New_York")).astimezone(TZ_TW)
+    except Exception:
+        dt = datetime(d.year, d.month, d.day, hh, mm, tzinfo=TZ_TW) + timedelta(hours=13)
+    return dt.date().isoformat(), dt.strftime("%H:%M")
+
+
+# ── 美股休市日：用規則算，不用上網 ──
+def _nth_wd(y, m, wd, n):
+    if n > 0:
+        d = date(y, m, 1)
+        d += timedelta(days=(wd - d.weekday()) % 7 + 7 * (n - 1))
+        return d
+    d = date(y, m + 1, 1) - timedelta(days=1) if m < 12 else date(y, 12, 31)
+    return d - timedelta(days=(d.weekday() - wd) % 7)
+
+
+def _easter(y):
+    a, b, c = y % 19, y // 100, y % 100
+    d, e = b // 4, b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = c // 4, c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    mo, da = divmod(h + l - 7 * m + 114, 31)
+    return date(y, mo, da + 1)
+
+
+def us_market_days(y: int):
+    """回傳 [(date, kind, 名稱)]，kind = 'closed' | 'early'（13:00 ET 收盤）"""
+    def obs(d, newyear=False):
+        if d.weekday() == 5:
+            return None if newyear else d - timedelta(days=1)
+        return d + timedelta(days=1) if d.weekday() == 6 else d
+    out = []
+    for d, name in ((date(y, 1, 1), "元旦"), (date(y, 6, 19), "六月節"), (date(y, 7, 4), "獨立紀念日"),
+                    (date(y, 12, 25), "聖誕節")):
+        o = obs(d, newyear=(name == "元旦"))
+        if o:
+            out.append((o, "closed", name))
+    out += [(_nth_wd(y, 1, 0, 3), "closed", "馬丁路德金恩日"), (_nth_wd(y, 2, 0, 3), "closed", "總統日"),
+            (_easter(y) - timedelta(days=2), "closed", "耶穌受難日"), (_nth_wd(y, 5, 0, -1), "closed", "陣亡將士紀念日"),
+            (_nth_wd(y, 9, 0, 1), "closed", "勞動節")]
+    tg = _nth_wd(y, 11, 3, 4)
+    out.append((tg, "closed", "感恩節"))
+    out.append((tg + timedelta(days=1), "early", "感恩節隔日"))
+    d24 = date(y, 12, 24)
+    if d24.weekday() < 5 and date(y, 12, 25).weekday() != 5:
+        out.append((d24, "early", "平安夜"))
+    j3 = date(y, 7, 3)
+    if j3.weekday() < 4 and date(y, 7, 4).weekday() < 5:
+        out.append((j3, "early", "獨立紀念日前一天"))
+    return out
+
+
+def build_holidays(today: date):
+    ev = []
+    for y in (today.year, today.year + 1):
+        for d, kind, name in us_market_days(y):
+            if not (today <= d <= today + timedelta(days=CAL_DAYS)):
+                continue
+            if kind == "closed":
+                ev.append({"date": d.isoformat(), "time": "", "kind": "holiday",
+                           "title": f"美股休市（{name}）", "note": "NYSE / Nasdaq 全天休市"})
+            else:
+                dd, tt = _et_to_tw(d, 13, 0)
+                ev.append({"date": d.isoformat(), "time": "", "kind": "holiday",
+                           "title": f"美股提早收盤（{name}）", "note": f"美東 13:00 收盤＝台灣 {dd[5:].replace('-', '/')} {tt}"})
+    return ev
+
+
+# ── FOMC：Fed 官網 ──
+def fetch_fomc(today: date):
+    r = _get("https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm", headers=HTML_HDR)
+    if r is None:
+        return None
+    from bs4 import BeautifulSoup
+    lines = [x.strip() for x in BeautifulSoup(r.text, "lxml").get_text("\n").split("\n") if x.strip()]
+    year = month = None
+    ev = []
+    for ln in lines:
+        m = re.search(r"(20\d\d)\s+FOMC\s+Meetings", ln)
+        if m and len(ln) < 40:
+            year, month = int(m.group(1)), None
+            continue
+        if year is None:
+            continue
+        mm = re.fullmatch(r"([A-Za-z]{3,9})(?:/([A-Za-z]{3,9}))?", ln)
+        if mm and (mm.group(2) or mm.group(1))[:3].lower() in _MON:
+            month = _MON[(mm.group(2) or mm.group(1))[:3].lower()]
+            continue
+        dm = re.fullmatch(r"(\d{1,2})\s*[-–]\s*(\d{1,2})\*?", ln)
+        if dm and month:
+            try:
+                d = date(year, month, int(dm.group(2)))
+            except ValueError:
+                continue
+            if today <= d <= today + timedelta(days=CAL_DAYS):
+                dd, tt = _et_to_tw(d, 14, 0)
+                ev.append({"date": dd, "time": tt, "kind": "macro",
+                           "title": f"FOMC 利率決議（{dm.group(1)}–{dm.group(2)} 日會議）",
+                           "note": f"美東 {d.month}/{d.day} 14:00；來源：Fed 官方行程"})
+            month = None
+    return ev or None
+
+
+# ── 非農 / CPI：FRED（需免費 API key）→ BLS 官網 ──
+def _macro_events(dates, title, src, today):
+    ev = []
+    for d, hh, mm in dates:
+        if today <= d <= today + timedelta(days=CAL_DAYS):
+            dd, tt = _et_to_tw(d, hh, mm)
+            ev.append({"date": dd, "time": tt, "kind": "macro", "title": title,
+                       "note": f"美東 {d.month}/{d.day} {hh}:{mm:02d}；來源：{src}"})
+    return ev
+
+
+def fetch_fred_dates(release_id: int, key: str, today: date):
+    j = _json("https://api.stlouisfed.org/fred/release/dates",
+              {"release_id": release_id, "api_key": key, "file_type": "json", "sort_order": "asc",
+               "realtime_start": today.isoformat(), "realtime_end": "9999-12-31",
+               "include_release_dates_with_no_data": "true"})
+    try:
+        return [(date.fromisoformat(x["date"]), 8, 30) for x in j["release_dates"]]
+    except Exception:
+        return None
+
+
+def fetch_bls_dates(slug: str):
+    r = _get(f"https://www.bls.gov/schedule/news_release/{slug}.htm", headers=HTML_HDR)
+    if r is None:
+        return None
+    from bs4 import BeautifulSoup
+    out = []
+    for tr in BeautifulSoup(r.text, "lxml").select("tr"):
+        txt = " ".join(td.get_text(" ", strip=True) for td in tr.find_all(["td", "th"]))
+        m = re.search(r"([A-Za-z]{3,9})\.?\s+(\d{1,2}),\s+(20\d\d)", txt)
+        if not m or m.group(1)[:3].lower() not in _MON:
+            continue
+        t = re.search(r"(\d{1,2}):(\d{2})\s*([AP]M)", txt)
+        hh, mi = (int(t.group(1)) % 12 + (12 if t.group(3) == "PM" else 0), int(t.group(2))) if t else (8, 30)
+        try:
+            out.append((date(int(m.group(3)), _MON[m.group(1)[:3].lower()], int(m.group(2))), hh, mi))
+        except ValueError:
+            pass
+    return out or None
+
+
+def fetch_macro(label, fred_id, slug, title, today):
+    key = os.environ.get("FRED_API_KEY", "").strip()
+    if key:
+        d = fetch_fred_dates(fred_id, key, today)
+        if d:
+            return _macro_events(d, title, "FRED / BLS 發布行程", today)
+    d = fetch_bls_dates(slug)
+    return _macro_events(d, title, "BLS 官方行程", today) if d else None
+
+
+# ── 輝達財報：Nasdaq ──
+def fetch_nvda(today: date):
+    hdr = dict(UA, Origin="https://www.nasdaq.com", Referer="https://www.nasdaq.com/")
+    j = _json("https://api.nasdaq.com/api/analyst/NVDA/earnings-date", headers=hdr)
+    try:
+        txt = json.dumps(j.get("data") or {}, ensure_ascii=False)
+        m = re.search(r"([A-Z][a-z]{2})[a-z]*\.?\s+(\d{1,2}),\s+(20\d\d)", txt)
+        d = date(int(m.group(3)), _MON[m.group(1).lower()], int(m.group(2)))
+    except Exception:
+        return None
+    if not (today <= d <= today + timedelta(days=CAL_DAYS)):
+        return []
+    return [{"date": d.isoformat(), "time": "", "kind": "earn", "title": "輝達（NVDA）財報",
+             "note": "美東盤後公布，台灣時間為隔天清晨；日期來源 Nasdaq，可能是預估"}]
+
+
+def _cat(title: str) -> str:
+    t = title.upper()
+    if "休市" in title or "提早收盤" in title:
+        return "holiday"
+    for k, c in (("FOMC", "fomc"), ("非農", "nfp"), ("NFP", "nfp"), ("CPI", "cpi"), ("NVDA", "nvda"), ("輝達", "nvda")):
+        if k in t:
+            return c
+    return "other"
 
 
 def load_manual(today: date):
-    """calendar_manual.json：你自己維護的事件（總經、休市、法說會…）"""
+    """calendar_manual.json：備援＋臨時事件。某類事件自動抓失敗時才會用到同類的手動資料；沒分到類的一律顯示"""
     for p in ("calendar_manual.json", os.path.join(os.path.dirname(os.path.abspath(__file__)), "calendar_manual.json")):
         if os.path.exists(p):
             try:
@@ -372,11 +595,36 @@ def load_manual(today: date):
 
 def build_calendar(prev: dict, now: datetime) -> dict:
     today = now.date()
+    parts, auto = {}, {}
+    auto["holiday"] = build_holidays(today)
+    for cat, label, fn in (
+        ("fomc", "FOMC", lambda: fetch_fomc(today)),
+        ("nfp", "非農", lambda: fetch_macro("非農", 50, "empsit", "美國非農就業報告（NFP）", today)),
+        ("cpi", "CPI", lambda: fetch_macro("CPI", 10, "cpi", "美國 CPI", today)),
+        ("nvda", "輝達財報", lambda: fetch_nvda(today)),
+    ):
+        try:
+            r = fn()
+        except Exception as e:
+            logger.warning(f"{label} 例外：{type(e).__name__}: {e}")
+            r = None
+        auto[cat] = r
     man, found = load_manual(today)
-    parts = {"manual": f"ok（{len(man)} 筆）" if found else "error: 找不到或讀不了 calendar_manual.json"}
-    man.sort(key=lambda e: (e["date"], e["time"] or "99", e["title"]))
-    return {"fetched_at": now.isoformat(timespec="seconds"), "events": man, "parts": parts,
-            "status": "ok" if found else "partial"}
+    events = list(auto["holiday"])
+    parts["holiday"] = f"ok（規則計算 {len(auto['holiday'])} 筆）"
+    for cat, label in (("fomc", "FOMC"), ("nfp", "非農"), ("cpi", "CPI"), ("nvda", "輝達財報")):
+        if auto[cat] is not None:
+            events += auto[cat]
+            parts[cat] = f"ok（{len(auto[cat])} 筆）"
+        else:
+            fb = [e for e in man if _cat(e["title"]) == cat]
+            events += fb
+            parts[cat] = f"error: {label} 自動抓取失敗，改用手動檔 {len(fb)} 筆"
+    events += [e for e in man if _cat(e["title"]) == "other"]
+    events.sort(key=lambda e: (e["date"], e["time"] or "99", e["title"]))
+    bad = [v for v in parts.values() if v.startswith("error")]
+    return {"fetched_at": now.isoformat(timespec="seconds"), "events": events[:300], "parts": parts,
+            "status": "ok" if not bad else "partial"}
 
 
 # ─────────────────────────────────────────────
@@ -483,7 +731,44 @@ def fetch_weibo():
             continue
         out.append({"t": w, "u": f"https://s.weibo.com/weibo?q=%23{quote(w)}%23",
                     "n": int(it.get("num") or 0), "tag": str(it.get("label_name") or "")})
-    return out[:25] or None
+    out = out[:25]
+    try:
+        from opencc import OpenCC
+        cc = OpenCC("s2twp")
+        for p in out:
+            p["t"] = cc.convert(p["t"])
+    except Exception:
+        pass
+    return out or None
+
+
+def translate_reddit(red: dict, old: dict) -> None:
+    """替 Reddit 標題加上 z（繁體中文）；已翻過的沿用上次結果，不重複打翻譯。"""
+    cache = {p["u"]: p.get("z", "") for lst in old.values() for p in lst if p.get("z")}
+    todo = []
+    for lst in red.values():
+        for p in lst:
+            if cache.get(p["u"]):
+                p["z"] = cache[p["u"]]
+            elif not p.get("z"):
+                todo.append(p)
+    if not todo:
+        return
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        from deep_translator import GoogleTranslator
+
+        def one(p):
+            try:
+                return GoogleTranslator(source="auto", target="zh-TW").translate(p["t"]) or ""
+            except Exception:
+                return ""
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            res = list(ex.map(one, todo))
+        for p, z in zip(todo, res):
+            p["z"] = z if z and z != p["t"] else ""
+    except Exception as e:
+        logger.warning(f"Reddit 標題翻譯失敗：{type(e).__name__}: {e}")
 
 
 def fetch_threads(token: str):
@@ -530,6 +815,7 @@ def build_social(prev: dict, now: datetime) -> dict:
     for sub, _n2 in REDDIT_SUBS:
         if sub not in red and old.get(sub):
             red[sub] = old[sub]
+    translate_reddit(red, old)
     out["reddit"] = red
     parts["reddit"] = "ok" if not errs else f"error: {', '.join(errs)} 抓不到（Reddit 常擋雲端 IP）"
 
