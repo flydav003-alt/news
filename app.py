@@ -1340,26 +1340,22 @@ def _rank_list(rows, n=15) -> str:
 
 
 def social_html(sc: dict) -> tuple:
-    """回傳 (左欄 html, 右欄 html)：左＝Threads + PTT（台灣），右＝Reddit（美國）+ 微博（大陸）"""
-    parts = sc.get("parts") or {}
-    th = sc.get("threads") or []
-    if th:
-        th_h = _rank_list([(p["t"], p["u"], f'@{p.get("a", "")} · {p["n"]:,}') for p in th], 12)
-    else:
-        th_h = ('<div class="rk-e">' + esc(str(parts.get("threads", "")).split(": ", 1)[-1] or "（目前沒有資料）") + '</div>')
+    """回傳 (左欄 html, 右欄 html)：左＝PTT（有資料才顯示）+ Reddit（美國），右＝微博（大陸）"""
     ptt = sc.get("ptt") if isinstance(sc.get("ptt"), list) else []
-    ptt_h = _rank_list([(p["t"], p["u"], f'{p.get("b", "")} · 推 {p["n"]}') for p in ptt], 15)
-    left = ('<div class="sec">🧵 Threads（台灣）</div>' + th_h
-            + '<div class="sec">🗣 PTT 熱門（依推文數）</div>' + ptt_h)
-
+    left = ""
+    if ptt:
+        left += ('<div class="sec">🗣 PTT 熱門（依推文數）</div>'
+                 + _rank_list([(p["t"], p["u"], f'{p.get("b", "")} · 推 {p["n"]}') for p in ptt], 15))
     rd = ""
     for sub, lst in (sc.get("reddit") or {}).items():
-        rd += f'<div class="subhead"><b>r/{esc(sub)}</b></div>' + _rank_list([(p.get("z") or p["t"], p["u"], rel_epoch(p.get("p")), p["t"] if p.get("z") else "") for p in lst], 12)
-    rd = rd or '<div class="rk-e">（Reddit 目前連不上，雲端 IP 常被擋）</div>'
+        rd += f'<div class="subhead"><b>r/{esc(sub)}</b></div>' + _rank_list(
+            [(p.get("z") or p["t"], p["u"], rel_epoch(p.get("p")), p["t"] if p.get("z") else "") for p in lst], 12)
+    rd = rd or '<div class="rk-e">（Reddit 目前連不上）</div>'
+    left += '<div class="sec">👽 Reddit（美國）</div>' + rd
     wb = sc.get("weibo") or []
     wb_h = _rank_list([(f'{i}. {p["t"]}', p["u"], (p.get("tag") or "") + (f' · {p["n"]:,}' if p.get("n") else ""))
                        for i, p in enumerate(wb, 1)], 20)
-    right = '<div class="sec">👽 Reddit（美國）</div>' + rd + '<div class="sec">🇨🇳 微博熱搜（大陸）</div>' + wb_h
+    right = '<div class="sec">🇨🇳 微博熱搜（大陸）</div>' + wb_h
     return left, right
 
 
