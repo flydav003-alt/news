@@ -235,6 +235,69 @@ hr{border-color:var(--line)!important;margin:10px 0!important}
 .sg-l{margin:0;padding-left:16px;font-size:12.5px;line-height:1.5}
 .sg-l a{color:var(--tx)!important;text-decoration:none!important}
 .sg-l a:hover{color:var(--accent)!important}
+.rkgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}
+.rk{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 13px}
+.rk-h{font-size:12.5px;font-weight:700;color:var(--tx2);margin-bottom:6px}
+.rk-e{font-size:12px;color:var(--tx3)}
+.rk-r{display:flex;align-items:center;gap:8px;font-size:12.5px;margin:4px 0}
+.rk-c{width:46px;font-family:'JetBrains Mono',monospace;font-weight:600;flex-shrink:0}
+.rk-c a{color:var(--tx)!important;text-decoration:none!important}
+.rk-c a:hover{color:var(--accent)!important}
+.rk-n{width:84px;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--tx2)}
+.rk-b{flex:1;background:var(--soft);height:10px;border-radius:5px;overflow:hidden;min-width:30px}
+.rk-b i{display:block;height:100%;border-radius:5px}
+.rk-v{width:70px;text-align:right;font-family:'JetBrains Mono',monospace;font-weight:600;flex-shrink:0}
+.tblw{overflow-x:auto;margin:6px 0}
+.tbl{width:100%;border-collapse:collapse;font-size:12.5px;background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.tbl th{background:var(--soft);color:var(--tx2);font-weight:600;text-align:right;padding:6px 10px;white-space:nowrap}
+.tbl td{padding:6px 10px;border-top:1px solid var(--line);text-align:right;font-family:'JetBrains Mono',monospace}
+.tbl th:first-child,.tbl td:first-child,.tbl td.l{text-align:left}
+.tbl td.l{font-family:inherit}
+.tbl a{color:var(--tx)!important;text-decoration:none!important}
+.parts{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:11.5px;color:var(--tx3);margin:10px 0}
+.cal-d{font-size:13px;margin:14px 0 4px;font-weight:700}
+.cal-d span{font-weight:500;color:var(--tx3);margin-left:8px;font-size:12px}
+.cal-d.today{color:var(--accent)}
+.cal-r{display:flex;gap:10px;align-items:baseline;padding:6px 10px;background:var(--card);border:1px solid var(--line);border-radius:8px;margin:4px 0;font-size:13px;flex-wrap:wrap}
+.cal-t{font-family:'JetBrains Mono',monospace;color:var(--tx3);min-width:42px;font-size:12px}
+.cal-n{font-weight:600}
+.cal-x{color:var(--tx3);font-size:12px}
+.subhead{font-size:12.5px;color:var(--tx2);margin:6px 0 4px}
+.pk{font-size:11px;padding:1px 7px;border-radius:9px;background:var(--soft);color:var(--tx2);white-space:nowrap}
+.post{display:flex;gap:8px;padding:6px 0;border-bottom:1px solid var(--line);font-size:13px;align-items:baseline}
+.post a{color:var(--tx)!important;text-decoration:none!important}
+.post a:hover{color:var(--accent)!important}
+.post .pt{color:var(--tx3);font-size:11.5px;white-space:nowrap;margin-left:auto;padding-left:8px}
+.trend-img{width:100%;height:auto;display:block;border:1px solid var(--line);border-radius:10px;background:var(--card)}
+.trend-lg{display:flex;gap:14px;font-size:12px;color:var(--tx2);margin:6px 2px 0;flex-wrap:wrap}
+.lg{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+.fn-new:empty{display:none}
+.fn-new{display:flex;align-items:center;gap:10px;background:var(--soft);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:8px;padding:6px 12px;font-size:13px;margin:4px 0 10px}
+.fn-new .tg{margin-left:auto;cursor:pointer;color:var(--accent);font-weight:600;white-space:nowrap}
+.card.new{box-shadow:-3px 0 0 var(--accent)}
+.card.new .ct::before{content:"NEW ";color:var(--accent);font-size:10.5px;font-weight:800;letter-spacing:.5px}
+.fn-dens{display:flex;justify-content:flex-end;gap:4px;margin:2px 0 6px}
+.fn-dens span{cursor:pointer;font-size:12px;padding:3px 10px;border:1px solid var(--line);border-radius:14px;color:var(--tx2);user-select:none;background:var(--card)}
+.fn-dens span.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+html[data-fnjs] .card[data-lz]{display:none}
+body.fn-onlynew .wall .card:not(.new){display:none!important}
+body.fn-onlynew .wall .card.new[data-lz]{display:flex!important}
+.fn-sentinel{height:1px}
+body.fn-compact .grid{grid-template-columns:1fr;gap:0}
+body.fn-compact .card{flex-direction:row;border-radius:0;border-width:0 0 1px 0;box-shadow:none;transform:none!important;align-items:center}
+body.fn-compact .card:hover{box-shadow:none;background:var(--soft)}
+body.fn-compact .card.bull{border-top:0;border-left:3px solid var(--up)}
+body.fn-compact .card.bear{border-top:0;border-left:3px solid var(--dn)}
+body.fn-compact .card>a:first-child{display:none}
+body.fn-compact .cb{flex-direction:row;align-items:center;gap:10px;padding:7px 12px;flex-wrap:nowrap;flex:1;min-width:0}
+body.fn-compact .ct{-webkit-line-clamp:1;flex:1;min-width:0;font-size:14px;font-weight:600}
+body.fn-compact .co,body.fn-compact .cs,body.fn-compact .more{display:none}
+body.fn-compact .cm-a{order:-1;flex-shrink:0;margin-top:0;flex-wrap:nowrap}
+body.fn-compact .cm-a .tk~.tk{display:none}
+body.fn-compact .cm-a .bd-g{display:none}
+body.fn-compact .cm-b{flex-shrink:0;margin-top:0;white-space:nowrap}
+body.fn-compact .cm-b .tr{display:none}
+@media(max-width:700px){body.fn-compact .cb{flex-wrap:wrap}body.fn-compact .ct{flex-basis:100%;order:1}body.fn-compact .cm-a{order:0}body.fn-compact .cm-b{order:2}}
 
 /* 地緣 */
 .geo-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
@@ -482,7 +545,8 @@ SECTOR_GRAD = {
 
 
 CAT_GRAD = {"AI": ("#2E86DE", "#6C5CE7"), "運動": ("#27AE60", "#16A0A8"), "娛樂": ("#D35D8C", "#E8A0BF"),
-            "電玩": ("#6C5CE7", "#A29BFE"), "科技": ("#4A6FA5", "#7C9BC9"), "國際": ("#8C7B63", "#B3A48C")}
+            "電玩": ("#6C5CE7", "#A29BFE"), "科技": ("#4A6FA5", "#7C9BC9"), "國際": ("#8C7B63", "#B3A48C"),
+            "大陸": ("#B03A2E", "#E08A6F")}
 
 
 def _first_sector(row) -> str:
@@ -510,7 +574,7 @@ def thumb_html(row, extra_cls="") -> str:
             f'<span class="ph">{esc(ph)}</span>{img_tag}</div>')
 
 
-CAT_ICON = {"AI": "🤖", "運動": "⚽", "娛樂": "🎬", "電玩": "🎮", "科技": "💡", "國際": "🌐", "財經": "💹"}
+CAT_ICON = {"AI": "🤖", "運動": "⚽", "娛樂": "🎬", "電玩": "🎮", "科技": "💡", "國際": "🌐", "財經": "💹", "大陸": "🏮"}
 
 
 def strip_html(row) -> str:
@@ -712,30 +776,40 @@ def card_html(row, others=None) -> str:
       <div class="cb">
         <a class="ct" href="{href}" target="_blank" rel="noopener">{esc(main)}</a>
         {orig_h}{summ_h}{more_h}
-        <div class="cm">{badge_html(sent, sv)}{geo}{tickers_chips(row)}</div>
-        <div class="cm"><span>{esc(str(row.get("source", "")))}</span><span>· {relative_time(row.get("published_at"))}</span>{translate_link(row)}<span class="fav" role="button" title="收藏">☆</span></div>
+        <div class="cm cm-a">{badge_html(sent, sv)}{geo}{tickers_chips(row)}</div>
+        <div class="cm cm-b"><span>{esc(str(row.get("source", "")))}</span><span>· {relative_time(row.get("published_at"))}</span>{translate_link(row)}<span class="fav" role="button" title="收藏">☆</span></div>
       </div>
     </div>""")
 
 
-def render_grid(df, max_items=60, merge=True):
+def render_grid(df, max_items=60, merge=True, lazy=0, cls=""):
+    """lazy>0：全部卡片一次輸出，但第 lazy 張之後先隱藏（data-lz），由瀏覽器端 JS 捲到底再分批顯示＝無限捲動。
+    沒有 JS 時（html 沒有 data-fnjs）CSS 不會隱藏任何卡片，所以不會卡住。cls="wall" 會啟用「自上次造訪新增」橫幅。"""
     if df is None or df.empty:
         st.markdown('<div class="empty">📭 沒有符合條件的新聞</div>', unsafe_allow_html=True)
         return
+    note = ""
     if merge and st.session_state.get("merge_events", True):
         groups = cluster_events(df.head(400))
-        cards = "".join(card_html(rep, oth) for rep, oth in groups[:max_items])
-        st.markdown(f'<div class="grid">{cards}</div>', unsafe_allow_html=True)
+        cards = [card_html(rep, oth) for rep, oth in groups[:max_items]]
         merged = len(df.head(400)) - len(groups)
         if len(groups) > max_items:
-            st.caption(f"顯示前 {max_items} 組事件，共 {len(groups)} 組（已把 {merged} 則重複報導合併）")
+            note = f"顯示前 {max_items} 組事件，共 {len(groups)} 組（已把 {merged} 則重複報導合併）"
         elif merged:
-            st.caption(f"已把 {merged} 則重複報導合併進對應卡片")
-        return
-    cards = "".join(card_html(r) for _, r in df.head(max_items).iterrows())
-    st.markdown(f'<div class="grid">{cards}</div>', unsafe_allow_html=True)
-    if len(df) > max_items:
-        st.caption(f"顯示前 {max_items} 則，共 {len(df)} 則")
+            note = f"已把 {merged} 則重複報導合併進對應卡片"
+    else:
+        cards = [card_html(r) for _, r in df.head(max_items).iterrows()]
+        if len(df) > max_items:
+            note = f"顯示前 {max_items} 則，共 {len(df)} 則"
+    if lazy:
+        cards = [c if i < lazy else c.replace('<div class="card', '<div data-lz="1" class="card', 1)
+                 for i, c in enumerate(cards)]
+    sentinel = '<div class="fn-sentinel"></div>' if lazy and len(cards) > lazy else ""
+    newbar = '<div class="fn-new"></div>' if cls == "wall" else ""
+    st.markdown(f'{newbar}<div class="{("grid " + cls).strip()}">{"".join(cards)}</div>{sentinel}',
+                unsafe_allow_html=True)
+    if note:
+        st.caption(note)
 
 
 def hero_html(df) -> str:
@@ -948,6 +1022,317 @@ def _gen_time_str(iso: str):
         return "—", None
 
 
+# ═══════════════════════════════════════════════
+# 擴充資料：extras.json（籌碼 / 行事曆 / 社群）＋ health.json（來源健康度）
+# 兩個檔案都由 GitHub Actions 產生，放在 news.json 旁邊（同一個 data 分支）
+# ═══════════════════════════════════════════════
+@st.cache_data(ttl=300, show_spinner=False)
+def load_remote_json(name: str, data_url: str):
+    if not data_url:
+        return None
+    try:
+        r = requests.get(data_url.rsplit("/", 1)[0] + "/" + name, timeout=15)
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return None
+
+
+EXTRAS = load_remote_json("extras.json", DATA_URL) or {}
+HEALTH = load_remote_json("health.json", DATA_URL) or {}
+WEEK = "一二三四五六日"
+
+
+def yahoo_tw(code) -> str:
+    return f"https://tw.stock.yahoo.com/quote/{quote(str(code))}"
+
+
+def rel_epoch(ts) -> str:
+    try:
+        s = datetime.now(TZ_TW).timestamp() - float(ts)
+    except Exception:
+        return ""
+    if s < 90:
+        return "剛剛"
+    if s < 3600:
+        return f"{int(s // 60)}分鐘前"
+    if s < 86400:
+        return f"{int(s // 3600)}小時前"
+    return f"{int(s // 86400)}天前"
+
+
+def _iso_age_h(iso) -> float:
+    try:
+        return (datetime.now(TZ_TW) - datetime.fromisoformat(str(iso))).total_seconds() / 3600
+    except Exception:
+        return 9999.0
+
+
+def _vcls(v) -> str:
+    return "up" if v > 0 else ("dn" if v < 0 else "flat")
+
+
+def _parts_html(parts: dict) -> str:
+    if not parts:
+        return ""
+    li = "".join(f'<span class="{"dn" if str(v).startswith("error") else "flat"}">{esc(k)}：{esc(str(v))}</span>'
+                 for k, v in parts.items())
+    return f'<div class="parts">{li}</div>'
+
+
+# ── 來源健康度 ──────────────────────────────
+def health_rows() -> list:
+    rows = []
+    for name, h in (HEALTH.get("sources") or {}).items():
+        hist = h.get("hist") or []
+        rec = [x for x in hist if _iso_age_h(x[0]) <= 24]
+        rate = (sum(x[1] for x in rec) / len(rec) * 100) if rec else None
+        fails = 0
+        for x in reversed(hist):
+            if x[1]:
+                break
+            fails += 1
+        rows.append({"name": name, "rate": rate, "n": len(rec), "fails": fails,
+                     "last_ok": h.get("last_ok", ""), "cnt": (hist[-1][2] if hist else 0)})
+    rows.sort(key=lambda r: (-r["fails"], r["rate"] if r["rate"] is not None else 101))
+    return rows
+
+
+def health_html(rows) -> str:
+    if not rows:
+        return '<div class="empty">還沒有健康度資料（部署新版 scheduler.py 後，下一次自動抓取就會開始記錄）</div>'
+    body = ""
+    for r in rows:
+        if r["fails"] >= 3:
+            dot, cls = "🔴", "dn"
+        elif r["rate"] is not None and r["rate"] < 80:
+            dot, cls = "🟡", "flat"
+        else:
+            dot, cls = "🟢", "up"
+        rate = f'{r["rate"]:.0f}%（{r["n"]} 次）' if r["rate"] is not None else "—"
+        last = relative_time(datetime.fromisoformat(r["last_ok"])) if r["last_ok"] else "—"
+        body += (f'<tr><td class="l">{dot} {esc(r["name"])}</td><td class="{cls}">{rate}</td>'
+                 f'<td>{r["fails"] if r["fails"] else "—"}</td><td>{r["cnt"]}</td><td>{esc(last)}</td></tr>')
+    return ('<div class="tblw"><table class="tbl"><tr><th>來源</th><th>近 24 小時成功率</th><th>連續失敗</th>'
+            f'<th>最近篇數</th><th>最近成功</th></tr>{body}</table></div>')
+
+
+# ── 多空情緒趨勢圖（SVG 轉成 data URI 圖片，顏色跟著目前主題）────────────
+@st.cache_data(ttl=600, show_spinner=False)
+def twii_hourly():
+    try:
+        r = requests.get("https://query1.finance.yahoo.com/v8/finance/chart/%5ETWII?range=5d&interval=60m",
+                         headers=_UA, timeout=8)
+        res = r.json()["chart"]["result"][0]
+        return [(t, c) for t, c in zip(res["timestamp"], res["indicators"]["quote"][0]["close"]) if c is not None]
+    except Exception:
+        return []
+
+
+def trend_chart(df, hours: int = 48):
+    """回傳 (html, 有效篇數, 近 6 小時淨多空)；資料太少回傳 ('', n, 0)"""
+    import base64
+    if df is None or df.empty:
+        return "", 0, 0
+    d = df[~df["category"].isin(LIFE_CATS)]
+    start = datetime.now(TZ_TW).replace(minute=0, second=0, microsecond=0) - timedelta(hours=hours - 1)
+    bull, bear, n = [0] * hours, [0] * hours, 0
+    for r in d.to_dict("records"):
+        try:
+            k = int((r["published_at"].astimezone(TZ_TW).replace(minute=0, second=0, microsecond=0) - start)
+                    .total_seconds() // 3600)
+        except Exception:
+            continue
+        if 0 <= k < hours:
+            n += 1
+            s = eff_sent(r)[0]
+            if s == "bullish":
+                bull[k] += 1
+            elif s == "bearish":
+                bear[k] += 1
+    if n < 10:
+        return "", n, 0
+    W, H, L, R, T, B = 760, 240, 40, 56, 14, 26
+    iw, ih = W - L - R, H - T - B
+    mid, bw = T + ih / 2, (W - L - R) / hours
+    mx = max(max(bull), max(bear), 3)
+    sc = (ih / 2 - 4) / mx
+    c_up, c_dn, c_ln, c_tx, c_ac = _tv["up"], _tv["dn"], _tv["line"], _tv["tx2"], _tv["accent"]
+    p = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}" '
+         f'font-family="sans-serif" font-size="11">']
+    step = 3 if hours <= 24 else 6
+    for i in range(hours):
+        t, x = start + timedelta(hours=i), L + i * bw
+        if t.hour == 0:
+            p.append(f'<line x1="{x:.1f}" y1="{T}" x2="{x:.1f}" y2="{T + ih}" stroke="{c_ln}" stroke-dasharray="3 3"/>')
+        if i % step == 0:
+            lab = f"{t.month}/{t.day} {t.hour:02d}h" if (t.hour == 0 or i == 0) else f"{t.hour:02d}h"
+            p.append(f'<text x="{x + bw / 2:.1f}" y="{H - 8}" text-anchor="middle" fill="{c_tx}">{lab}</text>')
+        if bull[i]:
+            p.append(f'<rect x="{x + bw * .14:.1f}" y="{mid - bull[i] * sc:.1f}" width="{bw * .72:.1f}" '
+                     f'height="{bull[i] * sc:.1f}" fill="{c_up}" opacity=".85"/>')
+        if bear[i]:
+            p.append(f'<rect x="{x + bw * .14:.1f}" y="{mid:.1f}" width="{bw * .72:.1f}" '
+                     f'height="{bear[i] * sc:.1f}" fill="{c_dn}" opacity=".85"/>')
+    p.append(f'<line x1="{L}" y1="{mid:.1f}" x2="{W - R}" y2="{mid:.1f}" stroke="{c_tx}" stroke-width=".8"/>')
+    p.append(f'<text x="{L - 6}" y="{T + 10}" text-anchor="end" fill="{c_tx}">{mx}</text>')
+    p.append(f'<text x="{L - 6}" y="{mid + 4:.1f}" text-anchor="end" fill="{c_tx}">0</text>')
+    p.append(f'<text x="{L - 6}" y="{T + ih}" text-anchor="end" fill="{c_tx}">{mx}</text>')
+    pts = []
+    for ts, cl in twii_hourly():
+        idx = (ts - start.timestamp()) / 3600
+        if 0 <= idx < hours:
+            pts.append((L + (idx + 0.5) * bw, cl))
+    if len(pts) >= 3:
+        lo, hi = min(c for _, c in pts), max(c for _, c in pts)
+        span = (hi - lo) or 1.0
+        ys = [(x, T + 6 + (1 - (c - lo) / span) * (ih - 12)) for x, c in pts]
+        p.append(f'<polyline fill="none" stroke="{c_ac}" stroke-width="2" stroke-linejoin="round" points="'
+                 + " ".join(f"{x:.1f},{y:.1f}" for x, y in ys) + '"/>')
+        p.append(f'<text x="{W - R + 6}" y="{T + 12}" fill="{c_ac}">{hi:,.0f}</text>')
+        p.append(f'<text x="{W - R + 6}" y="{T + ih - 2}" fill="{c_ac}">{lo:,.0f}</text>')
+    p.append("</svg>")
+    b64 = base64.b64encode("".join(p).encode("utf-8")).decode("ascii")
+    net6 = sum(bull[-6:]) - sum(bear[-6:])
+    lg = (f'<div class="trend-lg"><span><i class="lg" style="background:{c_up}"></i>利多篇數（每小時）</span>'
+          f'<span><i class="lg" style="background:{c_dn}"></i>利空篇數</span>'
+          f'<span><i class="lg" style="background:{c_ac}"></i>加權指數（右軸，僅開盤時段）</span></div>')
+    return (f'<img class="trend-img" alt="多空情緒趨勢" src="data:image/svg+xml;base64,{b64}">{lg}'), n, net6
+
+
+# ── 籌碼分頁 ──────────────────────────────
+def rank_html(title, items) -> str:
+    if not items:
+        return f'<div class="rk"><div class="rk-h">{esc(title)}</div><div class="rk-e">（無）</div></div>'
+    mx = max(abs(x["v"]) for x in items) or 1
+    rows = "".join(
+        f'<div class="rk-r"><span class="rk-c"><a href="{esc(yahoo_tw(x["c"]), quote=True)}" target="_blank" '
+        f'rel="noopener">{esc(x["c"])}</a></span><span class="rk-n">{esc(x.get("n", ""))}</span>'
+        f'<span class="rk-b"><i style="width:{abs(x["v"]) / mx * 100:.0f}%;background:var(--{"up" if x["v"] > 0 else "dn"})"></i></span>'
+        f'<span class="rk-v {_vcls(x["v"])}">{x["v"]:+,}</span></div>' for x in items)
+    return f'<div class="rk"><div class="rk-h">{esc(title)}</div>{rows}</div>'
+
+
+def _tbl_ann(items, cols) -> str:
+    if not items:
+        return '<div class="rk-e">（目前沒有資料）</div>'
+    head = "".join(f"<th>{esc(h)}</th>" for _, h in cols)
+    body = ""
+    for it in items[:40]:
+        tds = ""
+        for k, _h2 in cols:
+            v = it.get(k, "")
+            if k == "c":
+                v = f'<a href="{esc(yahoo_tw(v), quote=True)}" target="_blank" rel="noopener">{esc(v)}</a>'
+            else:
+                v = esc(str(v))
+            tds += f'<td class="l">{v}</td>'
+        body += f"<tr>{tds}</tr>"
+    return f'<div class="tblw"><table class="tbl"><tr>{head}</tr>{body}</table></div>'
+
+
+def chips_html(ch: dict) -> str:
+    out = []
+    mk = ch.get("market")
+    out.append(f'<div class="sec">🏦 三大法人（大盤，億元）<span class="fn-reco-chips">資料日期 {esc(ch.get("asof", "—"))}</span></div>')
+    if mk:
+        cells = "".join(
+            f'<div class="m"><div class="m-l">{lab}</div><div class="m-v {_vcls(mk.get(k, 0))}">{mk.get(k, 0):+,.1f}</div></div>'
+            for k, lab in (("foreign", "外資"), ("trust", "投信"), ("dealer", "自營商"), ("total", "合計")))
+        out.append(f'<div class="mrow">{cells}</div>')
+    hist = ch.get("history") or {}
+    if hist:
+        rows = ""
+        for k in sorted(hist.keys(), reverse=True)[:10]:
+            h = hist[k]
+            dd = f"{k[4:6]}/{k[6:]}"
+            rows += (f'<tr><td class="l">{dd}</td>' + "".join(
+                f'<td class="{_vcls(h.get(x, 0))}">{h.get(x, 0):+,.1f}</td>' for x in ("foreign", "trust", "dealer", "total"))
+                + "</tr>")
+        out.append('<div class="tblw"><table class="tbl"><tr><th>日期</th><th>外資</th><th>投信</th><th>自營商</th>'
+                   f'<th>合計</th></tr>{rows}</table></div>')
+    out.append('<div class="sec">📊 個股買賣超前 10（張）</div>')
+    out.append('<div class="rkgrid">' + rank_html("外資買超", ch.get("foreign_buy")) + rank_html("外資賣超", ch.get("foreign_sell"))
+               + rank_html("投信買超", ch.get("trust_buy")) + rank_html("投信賣超", ch.get("trust_sell")) + "</div>")
+    mg = ch.get("margin")
+    if mg:
+        amt = mg.get("amt")
+        extra = (f'<span class="fn-reco-chips">大盤融資餘額 {amt["bal"]:,.0f} 億（{amt["chg"]:+,.1f} 億）</span>' if amt else "")
+        out.append(f'<div class="sec">💳 融資融券增減前 10（張）· {esc(mg.get("date", ""))}{extra}</div>')
+        out.append('<div class="rkgrid">' + rank_html("融資增加", mg.get("fin_up")) + rank_html("融資減少", mg.get("fin_down"))
+                   + rank_html("融券增加", mg.get("short_up")) + "</div>")
+    out.append('<div class="sec">⚠️ 注意股（近 3 天公布）</div>')
+    out.append(_tbl_ann(ch.get("notice"), [("c", "代號"), ("n", "名稱"), ("reason", "注意原因"), ("date", "公布日")]))
+    out.append('<div class="sec">🚫 處置股</div>')
+    out.append(_tbl_ann(ch.get("punish"), [("c", "代號"), ("n", "名稱"), ("reason", "處置條件"), ("period", "處置期間")]))
+    return "".join(out)
+
+
+# ── 行事曆分頁 ──────────────────────────────
+CAL_KIND = {"macro": ("🏛", "總經"), "exdiv": ("💰", "除權息"), "earn": ("📊", "美股財報"),
+            "holiday": ("🏖", "休市"), "other": ("📌", "其他")}
+
+
+def cal_html(events, kind="全部") -> str:
+    today = datetime.now(TZ_TW).date()
+    keep = [e for e in events if kind == "全部" or e.get("kind") == kind]
+    by = {}
+    for e in keep:
+        by.setdefault(e["date"], []).append(e)
+    if not by:
+        return '<div class="empty">📭 這個類別近期沒有事件</div>'
+    out = []
+    for ds in sorted(by.keys()):
+        try:
+            dt = datetime.strptime(ds, "%Y-%m-%d").date()
+        except Exception:
+            continue
+        delta = (dt - today).days
+        rel = "今天" if delta == 0 else ("明天" if delta == 1 else (f"{delta} 天後" if delta > 1 else "已過"))
+        out.append(f'<div class="cal-d{" today" if delta == 0 else ""}">{dt.month}/{dt.day}（{WEEK[dt.weekday()]}）<span>{rel}</span></div>')
+        rows = []
+        for e in by[ds]:
+            ic = CAL_KIND.get(e.get("kind"), CAL_KIND["other"])[0]
+            note = f'<span class="cal-x">{esc(e["note"])}</span>' if e.get("note") else ""
+            rows.append(f'<div class="cal-r"><span>{ic}</span><span class="cal-t">{esc(e.get("time") or "")}</span>'
+                        f'<span class="cal-n">{esc(e["title"])}</span>{note}</div>')
+        if len(rows) > 8:
+            out.append("".join(rows[:8]) + f'<details class="more"><summary>另外 {len(rows) - 8} 筆</summary>'
+                       + "".join(rows[8:]) + "</details>")
+        else:
+            out.append("".join(rows))
+    return "".join(out)
+
+
+# ── 社群分頁 ──────────────────────────────
+def _post_list(posts, n=40, show_k=True) -> str:
+    if not posts:
+        return '<div class="rk-e">（目前沒有資料）</div>'
+    rows = ""
+    for p in posts[:n]:
+        k = f'<span class="pk">{esc(p["k"])}</span>' if (show_k and p.get("k")) else ""
+        rows += (f'<div class="post">{k}<a href="{esc(p["u"], quote=True)}" target="_blank" rel="noopener">{esc(p["t"])}</a>'
+                 f'<span class="pt">{rel_epoch(p.get("p"))}</span></div>')
+    return rows
+
+
+def ptt_html(sc: dict) -> str:
+    ptt = sc.get("ptt") or {}
+    hot = "".join(f'<a class="chip-t" href="{esc(h["u"], quote=True)}" target="_blank" rel="noopener" '
+                  f'title="{esc(h["t"], quote=True)}">{esc(h["c"])} ×{h["n"]}</a>' for h in ptt.get("hot", []))
+    hot_h = (f'<div class="subhead">近 24 小時被提到最多的代號</div><div style="margin-bottom:8px">{hot}</div>'
+             if hot else '<div class="subhead">近 24 小時沒有被多篇提到的代號</div>')
+    return hot_h + _post_list(ptt.get("posts"), 40)
+
+
+def reddit_html(sc: dict) -> str:
+    tags = "".join(f'<span class="chip-t">${esc(t["s"])} ×{t["n"]}</span>' for t in sc.get("reddit_tags", []))
+    out = (f'<div class="subhead">標題裡被重複提到的股票代號</div><div style="margin-bottom:8px">{tags}</div>' if tags else "")
+    for sub, lst in (sc.get("reddit") or {}).items():
+        out += f'<div class="subhead" style="margin-top:10px"><b>r/{esc(sub)}</b>（熱門）</div>' + _post_list(lst, 12, False)
+    return out or '<div class="rk-e">（Reddit 目前連不上，雲端 IP 常被擋）</div>'
+
+
 gen_str, gen_age = _gen_time_str(sync.get("generated_at", ""))
 if sync["ok"] and gen_age is not None and gen_age <= 3:
     status = f'<span class="pill pill-ok">● 自動更新正常</span>'
@@ -955,6 +1340,11 @@ elif sync["ok"]:
     status = '<span class="pill pill-warn">⚠ 自動更新已超過 3 小時</span>'
 else:
     status = '<span class="pill pill-warn">⚠ 未連到 GitHub 資料</span>'
+
+_hbad = [r for r in health_rows() if r["fails"] >= 3]
+if _hbad:
+    status += (f'<span class="pill pill-warn" title="{esc("、".join(r["name"] for r in _hbad), quote=True)}">'
+               f'⚠ {len(_hbad)} 個來源連續抓不到</span>')
 
 tb1, tb3, tb2 = st.columns([5, 1.3, 1])
 with tb1:
@@ -987,8 +1377,8 @@ qs = fetch_quotes()
 if qs:
     st.markdown(quotes_html(qs), unsafe_allow_html=True)
 
-tab_home, tab_ai, tab_sports, tab_ent, tab_game, tab_search, tab_fav, tab_cfg = st.tabs(
-    ["📰 今日新聞", "🤖 AI 專區", "⚽ 運動", "🎬 娛樂", "🎮 電玩", "🔎 搜尋", "⭐ 收藏", "⚙️ 設定"])
+tab_home, tab_ai, tab_cn, tab_chips, tab_cal, tab_soc, tab_sports, tab_ent, tab_game, tab_search, tab_fav, tab_cfg = st.tabs(
+    ["📰 今日新聞", "🤖 AI 專區", "🏮 大陸", "📊 籌碼", "📅 行事曆", "💬 社群", "⚽ 運動", "🎬 娛樂", "🎮 電玩", "🔎 搜尋", "⭐ 收藏", "⚙️ 設定"])
 
 # ═══════════════════════════════════════════════
 # TAB 1：今日新聞
@@ -1033,6 +1423,19 @@ with tab_home:
             st.caption(f"📈 題材升溫：資料只涵蓋 {_span:.0f} 小時，累積到 {SURGE_MIN_HISTORY_H} 小時以上才會開始偵測")
         else:
             st.caption(f"📈 題材升溫：近 {SURGE_WIN_H} 小時沒有個股的提及量超過平均 {SURGE_RATIO:g} 倍")
+
+        # ── 多空情緒趨勢 ──
+        st.markdown('<div class="sec">📉 多空情緒趨勢</div>', unsafe_allow_html=True)
+        _th = st.radio("趨勢區間", [24, 48, 72], index=1, horizontal=True, key="trend_h",
+                       format_func=lambda h: f"近 {h} 小時", label_visibility="collapsed")
+        _tc, _tn, _net6 = trend_chart(df_all, _th)
+        if _tc:
+            _tone = "偏多" if _net6 > 2 else ("偏空" if _net6 < -2 else "多空均衡")
+            st.markdown(_tc, unsafe_allow_html=True)
+            st.caption(f"近 {_th} 小時共 {_tn} 則；最近 6 小時利多減利空 = {_net6:+d}（{_tone}）。"
+                       "柱子是每小時的利多／利空篇數，線是加權指數，可以看情緒有沒有領先價格。")
+        else:
+            st.caption("資料還不夠（需要至少 10 則帶情緒判斷的新聞）才畫得出趨勢圖")
 
         # ── 頭條 ──
         st.markdown('<div class="sec">🔥 今日頭條</div>', unsafe_allow_html=True)
@@ -1101,7 +1504,7 @@ with tab_home:
 
         # ── 新聞牆 ──
         st.markdown('<div class="sec">📋 最新新聞</div>', unsafe_allow_html=True)
-        chip = st.radio("快速篩選", ["全部", "📈 利多", "📉 利空", "✦ AI 精選", "⚑ 地緣", "🌐 國際英文"],
+        chip = st.radio("快速篩選", ["全部", "📈 利多", "📉 利空", "✦ AI 精選", "⚑ 地緣", "🏮 大陸", "🌐 國際英文"],
                         horizontal=True, label_visibility="collapsed", key="chip")
         f1, f2, f3, f4 = st.columns([1.2, 2.4, 1, 1])
         with f1:
@@ -1124,6 +1527,8 @@ with tab_home:
             ddf = ddf[(ddf["ai_summary"].fillna("") != "") & (ddf["ai_score"].abs() >= 5)]
         elif chip == "⚑ 地緣":
             ddf = ddf[ddf["is_geo"] == True]
+        elif chip == "🏮 大陸":
+            ddf = ddf[ddf["category"] == "大陸"]
         elif chip == "🌐 國際英文":
             ddf = ddf[ddf["language"] == "en"]
         if hide_neu:
@@ -1137,13 +1542,75 @@ with tab_home:
         if sort_f == "重要度":
             ddf = ddf.sort_values(["importance_score", "published_at"], ascending=False)
 
-        st.caption(f"共 {len(ddf)} 則")
-        n_show = st.session_state["n_show"]
-        render_grid(ddf, max_items=n_show)
-        if len(ddf) > n_show:
-            if st.button(f"顯示更多（+24）", key="more"):
-                st.session_state["n_show"] += 24
-                st.rerun()
+        st.markdown('<div class="fn-dens"><span data-dens="card">▦ 卡片</span><span data-dens="list">☰ 列表</span></div>',
+                    unsafe_allow_html=True)
+        st.caption(f"共 {len(ddf)} 則（往下捲會自動載入更多）")
+        render_grid(ddf, max_items=240, lazy=24, cls="wall")
+
+
+# ═══════════════════════════════════════════════
+# TAB：大陸（category = "大陸"：A股、政策、經濟、產業、中美、港股、兩岸）
+# ═══════════════════════════════════════════════
+with tab_cn:
+    _cn = df_all[df_all["category"] == "大陸"]
+    if _cn.empty:
+        st.markdown('<div class="empty">🏮 還沒有大陸新聞。部署新版 crawler.py 之後，下一次自動抓取就會出現；'
+                    '也可以按右上角「立即抓取」。</div>', unsafe_allow_html=True)
+    else:
+        _cn, _cnh = recent(_cn, hours_steps=(24, 48, 72, 168), min_n=10)
+        _ce = _cn.apply(lambda r: eff_sent(r)[0], axis=1)
+        _nb, _nd = int((_ce == "bullish").sum()), int((_ce == "bearish").sum())
+        _srcs = _cn["source"].value_counts().head(6)
+        st.caption(f"近 {_cnh} 小時共 {len(_cn)} 則（利多 {_nb}／利空 {_nd}）｜主要來源：" +
+                   "、".join(f"{k} {v}" for k, v in _srcs.items()))
+        render_grid(_cn.sort_values("published_at", ascending=False), max_items=200, lazy=18)
+
+
+# ═══════════════════════════════════════════════
+# TAB：籌碼 / 行事曆 / 社群（資料來自 extras.json）
+# ═══════════════════════════════════════════════
+_NO_EXTRAS = ("這一塊的資料還沒產生。請確認 GitHub Actions 已部署新版（extras.py、calendar_manual.json、fetch_news.yml），"
+              "下一次自動抓取後就會出現；也可以到 Actions 頁面手動按一次 Run workflow。")
+with tab_chips:
+    _ch = EXTRAS.get("chips")
+    if not _ch or not (_ch.get("foreign_buy") or _ch.get("market")):
+        st.markdown(f'<div class="empty">📊 {_NO_EXTRAS}</div>', unsafe_allow_html=True)
+        if _ch:
+            st.markdown(_parts_html(_ch.get("parts")), unsafe_allow_html=True)
+    else:
+        st.markdown(chips_html(_ch), unsafe_allow_html=True)
+        st.markdown(_parts_html(_ch.get("parts")), unsafe_allow_html=True)
+        st.caption("資料來源：臺灣證券交易所（三大法人買賣超日報、融資融券彙總、注意／處置公告）。"
+                   "三大法人約 15:00～16:30 公布，融資融券通常更晚；紅色＝買超／增加，綠色＝賣超／減少。")
+
+with tab_cal:
+    _cal = EXTRAS.get("calendar")
+    if not _cal or not _cal.get("events"):
+        st.markdown(f'<div class="empty">📅 {_NO_EXTRAS}</div>', unsafe_allow_html=True)
+        if _cal:
+            st.markdown(_parts_html(_cal.get("parts")), unsafe_allow_html=True)
+    else:
+        _kinds = {"全部": "全部", "🏛 總經": "macro", "💰 除權息": "exdiv", "📊 美股財報": "earn", "🏖 休市": "holiday"}
+        _kf = st.radio("類別", list(_kinds.keys()), horizontal=True, key="cal_kind", label_visibility="collapsed")
+        st.markdown(cal_html(_cal["events"], _kinds[_kf]), unsafe_allow_html=True)
+        st.markdown(_parts_html(_cal.get("parts")), unsafe_allow_html=True)
+        st.caption("除權息：證交所預告；美股財報：只列大型股／關注名單（美東日期）；總經與休市：calendar_manual.json 手動維護，"
+                   "來源為 BLS、Fed 官方行程，時間已換算成台灣時間。")
+
+with tab_soc:
+    _sc = EXTRAS.get("social")
+    if not _sc:
+        st.markdown(f'<div class="empty">💬 {_NO_EXTRAS}</div>', unsafe_allow_html=True)
+    else:
+        _c1, _c2 = st.columns(2)
+        with _c1:
+            st.markdown('<div class="sec">🗣 PTT 股票版</div>', unsafe_allow_html=True)
+            st.markdown(ptt_html(_sc), unsafe_allow_html=True)
+        with _c2:
+            st.markdown('<div class="sec">👽 Reddit</div>', unsafe_allow_html=True)
+            st.markdown(reddit_html(_sc), unsafe_allow_html=True)
+        st.markdown(_parts_html(_sc.get("parts")), unsafe_allow_html=True)
+        st.caption("社群內容只代表網友情緒與話題熱度，不是消息來源；不要當成買賣依據。")
 
 
 # ═══════════════════════════════════════════════
@@ -1283,11 +1750,7 @@ with tab_ai:
                         if top else '<div class="empty">還沒有個股被點名</div>', unsafe_allow_html=True)
 
         st.markdown('<div class="sec">📋 AI 新聞</div>', unsafe_allow_html=True)
-        n_ai = st.session_state.setdefault("n_ai", 18)
-        render_grid(view.sort_values("published_at", ascending=False), max_items=n_ai)
-        if len(view) > n_ai and st.button("顯示更多（+18）", key="more_ai"):
-            st.session_state["n_ai"] += 18
-            st.rerun()
+        render_grid(view.sort_values("published_at", ascending=False), max_items=200, lazy=18)
 
 
 # ═══════════════════════════════════════════════
@@ -1300,12 +1763,7 @@ def render_life_tab(cat: str, icon: str):
         return
     d0, _ = recent(d0, hours_steps=(24, 48, 72, 168), min_n=6)
     st.caption(f"共 {len(d0)} 則（只保留精華，每個來源 8～12 則）")
-    nk = f"n_{cat}"
-    n_show_ = st.session_state.setdefault(nk, 18)
-    render_grid(d0.sort_values("published_at", ascending=False), max_items=n_show_)
-    if len(d0) > n_show_ and st.button("顯示更多（+18）", key=f"more_{cat}"):
-        st.session_state[nk] += 18
-        st.rerun()
+    render_grid(d0.sort_values("published_at", ascending=False), max_items=200, lazy=18)
 
 
 with tab_sports:
@@ -1335,6 +1793,16 @@ with tab_cfg:
                     unsafe_allow_html=True)
         st.caption("各來源在資料庫裡的文章數（某來源是 0 或不見，代表該 RSS 目前抓不到，可去 crawler.py 換網址）")
 
+    st.markdown("#### 🩺 來源健康度")
+    st.markdown(health_html(health_rows()), unsafe_allow_html=True)
+    st.caption("每次自動抓取記一筆，保留最近約 2 天。「連續失敗」≥ 3 會在頁面最上方出現警示；"
+               "失敗＝該來源這次抓到 0 篇（網址壞了、被擋、或 RSS 真的沒新東西）。")
+    if EXTRAS:
+        st.markdown("**籌碼 / 行事曆 / 社群 資料狀態**")
+        for _k, _lab in (("chips", "籌碼"), ("calendar", "行事曆"), ("social", "社群")):
+            _e = EXTRAS.get(_k) or {}
+            st.markdown(f'{_lab}：`{_e.get("status", "沒有資料")}`　更新於 {esc(str(_e.get("fetched_at", "—"))[:16])}'
+                        + _parts_html(_e.get("parts")), unsafe_allow_html=True)
     st.divider()
     st.markdown("#### 📡「立即抓取」要用哪些來源")
     st.caption("GitHub Actions 的自動抓取固定用 crawler.py 裡 enabled=True 的來源；這裡只影響頁面上的手動按鈕。")
@@ -1494,6 +1962,86 @@ _READ_JS = """
       m.appendChild(x); b.appendChild(a); b.appendChild(m); c.appendChild(b); box.appendChild(c);
     });
   }
+  // ── 列表 / 卡片密度（存在 localStorage，不需要重新整理）──
+  var DK = 'finnews_dens';
+  function applyDens(){
+    var list = false;
+    try { list = P.localStorage.getItem(DK) === 'list'; } catch(e) {}
+    if (D.body.classList.contains('fn-compact') !== list) D.body.classList.toggle('fn-compact', list);
+    D.querySelectorAll('.fn-dens span').forEach(function(sp){
+      var on = (sp.getAttribute('data-dens') === 'list') === list;
+      if (sp.classList.contains('on') !== on) sp.classList.toggle('on', on);
+    });
+  }
+  // ── 自上次造訪新增 N 則：基準＝上一次造訪最後活躍的時間（存在 localStorage）──
+  var LV = 'finnews_last_seen', BASE = 0;
+  function initBase(){
+    try {
+      var b = parseInt(P.sessionStorage.getItem('fn_base') || '', 10);
+      if (isNaN(b)) { b = parseInt(P.localStorage.getItem(LV) || '0', 10) || 0; P.sessionStorage.setItem('fn_base', String(b)); }
+      BASE = b;
+    } catch(e) { BASE = 0; }
+  }
+  function touch(){
+    if (D.visibilityState === 'visible') { try { P.localStorage.setItem(LV, String(Date.now())); } catch(e) {} }
+  }
+  function fmtT(ms){
+    var d = new Date(ms), p2 = function(n){ return (n < 10 ? '0' : '') + n; };
+    var t = p2(d.getHours()) + ':' + p2(d.getMinutes());
+    return new Date().toDateString() === d.toDateString() ? '今天 ' + t : (d.getMonth() + 1) + '/' + d.getDate() + ' ' + t;
+  }
+  function markNew(force){
+    var banner = D.querySelector('.fn-new'); if (!banner) return;
+    var cards = D.querySelectorAll('.wall .card'), n = 0;
+    cards.forEach(function(c){
+      var isNew = BASE > 0 && parseInt((c.dataset || {}).ts || '0', 10) * 1000 > BASE;
+      if (isNew) n++;
+      if (c.classList.contains('new') !== isNew) c.classList.toggle('new', isNew);
+    });
+    var only = D.body.classList.contains('fn-onlynew');
+    var sig = BASE + '|' + n + '|' + only + '|' + cards.length;
+    if (!force && banner.getAttribute('data-sig') === sig) return;
+    banner.setAttribute('data-sig', sig);
+    banner.innerHTML = '';
+    if (BASE <= 0 || !cards.length) return;
+    banner.appendChild(D.createTextNode(n ? '🆕 自上次造訪（' + fmtT(BASE) + '）新增 ' + n + ' 則'
+                                          : '✓ 自上次造訪（' + fmtT(BASE) + '）沒有新的新聞'));
+    if (n) { var tg = mk('span', 'tg', only ? '看全部' : '只看新增'); tg.setAttribute('data-onlynew', '1'); banner.appendChild(tg); }
+    else if (only) { D.body.classList.remove('fn-onlynew'); }
+  }
+  function onVis(){
+    if (D.visibilityState !== 'visible') return;
+    var last = 0;
+    try { last = parseInt(P.localStorage.getItem(LV) || '0', 10) || 0; } catch(e) {}
+    if (last && Date.now() - last > 30 * 60 * 1000) {          // 離開超過 30 分鐘再回來：基準更新成「離開前最後活躍的時間」
+      BASE = last;
+      try { P.sessionStorage.setItem('fn_base', String(BASE)); } catch(e) {}
+      markNew(true);
+    }
+    touch();
+  }
+  // ── 無限捲動：卡片先全部輸出、第 N 張之後隱藏（data-lz），捲到底部哨兵時分批顯示 ──
+  var io = null, sents = [];
+  function reveal(grid){
+    var hid = grid.querySelectorAll(':scope > .card[data-lz]');
+    for (var i = 0; i < hid.length && i < 24; i++) hid[i].removeAttribute('data-lz');
+    return hid.length > 24;
+  }
+  function ensureLazy(){
+    var now = Array.prototype.slice.call(D.querySelectorAll('.fn-sentinel'));
+    var same = now.length === sents.length && now.every(function(x, i){ return x === sents[i]; });
+    if (same) return;
+    if (io) io.disconnect();
+    sents = now;
+    io = new P.IntersectionObserver(function(es){
+      es.forEach(function(e){
+        if (!e.isIntersecting) return;
+        var g = e.target.previousElementSibling;
+        if (g && reveal(g)) { io.unobserve(e.target); io.observe(e.target); }   // 還有沒顯示的：重新觀察，哨兵仍在畫面內會再觸發
+      });
+    }, {rootMargin: '900px 0px'});
+    sents.forEach(function(x){ io.observe(x); });
+  }
   // ── 切換分頁：捲到「該分頁內容的最上面」（分頁列是 sticky，所以內容頂端剛好貼在分頁列下方）──
   function scrollerOf(el){
     for (var n = el.parentElement; n && n !== D.body; n = n.parentElement) {
@@ -1516,6 +2064,9 @@ _READ_JS = """
   }
   function onClick(e){
     var tg = e.target, cl = function(sel){ return tg && tg.closest ? tg.closest(sel) : null; };
+    var dn = cl('[data-dens]');
+    if (dn) { e.preventDefault(); try { P.localStorage.setItem(DK, dn.getAttribute('data-dens')); } catch(x) {} applyDens(); return; }
+    if (cl('[data-onlynew]')) { e.preventDefault(); D.body.classList.toggle('fn-onlynew'); markNew(true); return; }
     var tabEl = cl('[role="tab"]');
     if (tabEl) { setTimeout(function(){ scrollToTabTop(tabEl); }, 80); setTimeout(function(){ scrollToTabTop(tabEl); }, 300); }
     var fv = cl('.card .fav');
@@ -1546,11 +2097,15 @@ _READ_JS = """
     setTimeout(buildReco, 400);
   }
   var t = null;
-  var obs = new MutationObserver(function(){ clearTimeout(t); t = setTimeout(function(){ markRead(); buildReco(); markFav(); buildFav(); }, 200); });
+  var obs = new MutationObserver(function(){ clearTimeout(t); t = setTimeout(function(){ markRead(); buildReco(); markFav(); buildFav(); applyDens(); markNew(); ensureLazy(); }, 200); });
   obs.observe(D.body, {childList: true, subtree: true});
   D.addEventListener('click', onClick, true);
-  P.__fnCleanup = function(){ obs.disconnect(); D.removeEventListener('click', onClick, true); };
-  markRead(); buildReco(); markFav(); buildFav();
+  P.__fnCleanup = function(){ obs.disconnect(); D.removeEventListener('click', onClick, true); D.removeEventListener('visibilitychange', onVis); clearInterval(tt); if (io) io.disconnect(); D.documentElement.removeAttribute('data-fnjs'); };
+  D.documentElement.setAttribute('data-fnjs', '1');
+  initBase(); touch();
+  var tt = setInterval(touch, 60000);
+  D.addEventListener('visibilitychange', onVis);
+  markRead(); buildReco(); markFav(); buildFav(); applyDens(); markNew(); ensureLazy();
 })();
 </script>
 """
