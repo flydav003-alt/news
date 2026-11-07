@@ -639,6 +639,7 @@ def build_calendar(prev: dict, now: datetime) -> dict:
 # 社群（不限股票：看各種事件的討論熱度）
 #   PTT 熱門文章（依推文數；雲端 IP 目前被擋）、Reddit（美國）、微博熱搜（大陸）
 # ─────────────────────────────────────────────
+PTT_ENABLED = False
 PTT_BOARDS = ["Gossiping", "HatePolitics", "Stock", "Baseball", "NBA"]
 REDDIT_SUBS = [("popular", 12), ("worldnews", 8), ("technology", 8)]
 
@@ -803,10 +804,15 @@ def build_social(prev: dict, now: datetime) -> dict:
     parts = {}
     out = {"fetched_at": now.isoformat(timespec="seconds")}
 
-    ptt, err = fetch_ptt()
-    old_ptt = prev.get("ptt") if isinstance(prev.get("ptt"), list) else []
-    out["ptt"] = ptt or old_ptt
-    parts["ptt"] = "ok" if ptt else f"error: {err}"
+    # PTT 已停用（雲端 IP 一律 403，且畫面不再使用）。要重新啟用，把 PTT_ENABLED 改成 True
+    if PTT_ENABLED:
+        ptt, err = fetch_ptt()
+        old_ptt = prev.get("ptt") if isinstance(prev.get("ptt"), list) else []
+        out["ptt"] = ptt or old_ptt
+        parts["ptt"] = "ok" if ptt else f"error: {err}"
+    else:
+        out["ptt"] = []
+        parts["ptt"] = "skip: 已停用"
 
     red, errs = fetch_reddit()
     old = prev.get("reddit") if isinstance(prev.get("reddit"), dict) else {}
