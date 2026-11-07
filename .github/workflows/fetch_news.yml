@@ -57,7 +57,11 @@ jobs:
       - name: 籌碼 / 行事曆 / 社群 → extras.json（失敗也不影響新聞）
         continue-on-error: true
         env:
-          THREADS_ACCESS_TOKEN: ${{ secrets.THREADS_ACCESS_TOKEN }}   # 沒設定也沒關係，Threads 區塊會顯示未設定
+          PROXY_URL: ${{ secrets.PROXY_URL }}                          # Cloudflare Worker 網址（繞過 PTT / 微博 / Reddit / BLS 擋雲端 IP）
+          PROXY_KEY: ${{ secrets.PROXY_KEY }}                          # Worker 的通關密碼
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}                    # 選填：非農 / CPI 日期更穩（沒有就改抓 BLS 官網）
+          THREADS_ACCESS_TOKEN: ${{ secrets.THREADS_ACCESS_TOKEN }}    # 選填：沒設定時 Threads 區塊會顯示未設定
+          EXTRAS_FORCE: ${{ github.event_name == 'workflow_dispatch' && '1' || '' }}   # 手動按 Run workflow 時強制全部重抓
         run: python extras.py data_out/extras.json
 
       - name: 推到 data 分支（只保留 1 個 commit，不會讓 repo 變肥）
