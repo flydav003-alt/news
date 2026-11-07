@@ -268,8 +268,8 @@ hr{border-color:var(--line)!important;margin:10px 0!important}
 .post a{color:var(--tx)!important;text-decoration:none!important}
 .post a:hover{color:var(--accent)!important}
 .post .pt{color:var(--tx3);font-size:11.5px;white-space:nowrap;margin-left:auto;padding-left:8px}
-.trend-img{width:100%;height:auto;display:block;border:1px solid var(--line);border-radius:10px;background:var(--card)}
-.trend-lg{display:flex;gap:14px;font-size:12px;color:var(--tx2);margin:6px 2px 0;flex-wrap:wrap}
+.trend-img{width:100%;max-width:560px;height:auto;display:block;border:1px solid var(--line);border-radius:10px;background:var(--card)}
+.trend-lg{display:flex;gap:12px;font-size:11px;color:var(--tx2);margin:6px 2px 0;flex-wrap:wrap}
 .lg{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}
 .fn-new:empty{display:none}
 .fn-new{display:flex;align-items:center;gap:10px;background:var(--soft);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:8px;padding:6px 12px;font-size:13px;margin:4px 0 10px}
@@ -1152,14 +1152,14 @@ def trend_chart(df, hours: int = 48):
                 bear[k] += 1
     if n < 10:
         return "", n, 0
-    W, H, L, R, T, B = 760, 240, 40, 56, 14, 26
+    W, H, L, R, T, B = 620, 130, 30, 46, 8, 20
     iw, ih = W - L - R, H - T - B
     mid, bw = T + ih / 2, (W - L - R) / hours
     mx = max(max(bull), max(bear), 3)
-    sc = (ih / 2 - 4) / mx
+    sc = (ih / 2 - 3) / mx
     c_up, c_dn, c_ln, c_tx, c_ac = _tv["up"], _tv["dn"], _tv["line"], _tv["tx2"], _tv["accent"]
     p = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}" '
-         f'font-family="sans-serif" font-size="11">']
+         f'font-family="sans-serif" font-size="10">']
     step = 3 if hours <= 24 else 6
     for i in range(hours):
         t, x = start + timedelta(hours=i), L + i * bw
@@ -1167,7 +1167,7 @@ def trend_chart(df, hours: int = 48):
             p.append(f'<line x1="{x:.1f}" y1="{T}" x2="{x:.1f}" y2="{T + ih}" stroke="{c_ln}" stroke-dasharray="3 3"/>')
         if i % step == 0:
             lab = f"{t.month}/{t.day} {t.hour:02d}h" if (t.hour == 0 or i == 0) else f"{t.hour:02d}h"
-            p.append(f'<text x="{x + bw / 2:.1f}" y="{H - 8}" text-anchor="middle" fill="{c_tx}">{lab}</text>')
+            p.append(f'<text x="{x + bw / 2:.1f}" y="{H - 5}" text-anchor="middle" fill="{c_tx}">{lab}</text>')
         if bull[i]:
             p.append(f'<rect x="{x + bw * .14:.1f}" y="{mid - bull[i] * sc:.1f}" width="{bw * .72:.1f}" '
                      f'height="{bull[i] * sc:.1f}" fill="{c_up}" opacity=".85"/>')
@@ -1186,7 +1186,7 @@ def trend_chart(df, hours: int = 48):
     if len(pts) >= 3:
         lo, hi = min(c for _, c in pts), max(c for _, c in pts)
         span = (hi - lo) or 1.0
-        ys = [(x, T + 6 + (1 - (c - lo) / span) * (ih - 12)) for x, c in pts]
+        ys = [(x, T + 4 + (1 - (c - lo) / span) * (ih - 8)) for x, c in pts]
         p.append(f'<polyline fill="none" stroke="{c_ac}" stroke-width="2" stroke-linejoin="round" points="'
                  + " ".join(f"{x:.1f},{y:.1f}" for x, y in ys) + '"/>')
         p.append(f'<text x="{W - R + 6}" y="{T + 12}" fill="{c_ac}">{hi:,.0f}</text>')
@@ -1194,9 +1194,9 @@ def trend_chart(df, hours: int = 48):
     p.append("</svg>")
     b64 = base64.b64encode("".join(p).encode("utf-8")).decode("ascii")
     net6 = sum(bull[-6:]) - sum(bear[-6:])
-    lg = (f'<div class="trend-lg"><span><i class="lg" style="background:{c_up}"></i>利多篇數（每小時）</span>'
-          f'<span><i class="lg" style="background:{c_dn}"></i>利空篇數</span>'
-          f'<span><i class="lg" style="background:{c_ac}"></i>加權指數（右軸，僅開盤時段）</span></div>')
+    lg = (f'<div class="trend-lg"><span><i class="lg" style="background:{c_up}"></i>利多篇數／小時（左軸）</span>'
+          f'<span><i class="lg" style="background:{c_dn}"></i>利空篇數（左軸）</span>'
+          f'<span><i class="lg" style="background:{c_ac}"></i>加權指數（右軸，只有開盤時段）</span></div>')
     return (f'<img class="trend-img" alt="多空情緒趨勢" src="data:image/svg+xml;base64,{b64}">{lg}'), n, net6
 
 
@@ -1261,10 +1261,6 @@ def chips_html(ch: dict) -> str:
         out.append(f'<div class="sec">💳 融資融券增減前 10（張）· {esc(mg.get("date", ""))}{extra}</div>')
         out.append('<div class="rkgrid">' + rank_html("融資增加", mg.get("fin_up")) + rank_html("融資減少", mg.get("fin_down"))
                    + rank_html("融券增加", mg.get("short_up")) + "</div>")
-    out.append('<div class="sec">⚠️ 注意股（近 3 天公布）</div>')
-    out.append(_tbl_ann(ch.get("notice"), [("c", "代號"), ("n", "名稱"), ("reason", "注意原因"), ("date", "公布日")]))
-    out.append('<div class="sec">🚫 處置股</div>')
-    out.append(_tbl_ann(ch.get("punish"), [("c", "代號"), ("n", "名稱"), ("reason", "處置條件"), ("period", "處置期間")]))
     return "".join(out)
 
 
@@ -1316,21 +1312,36 @@ def _post_list(posts, n=40, show_k=True) -> str:
     return rows
 
 
-def ptt_html(sc: dict) -> str:
-    ptt = sc.get("ptt") or {}
-    hot = "".join(f'<a class="chip-t" href="{esc(h["u"], quote=True)}" target="_blank" rel="noopener" '
-                  f'title="{esc(h["t"], quote=True)}">{esc(h["c"])} ×{h["n"]}</a>' for h in ptt.get("hot", []))
-    hot_h = (f'<div class="subhead">近 24 小時被提到最多的代號</div><div style="margin-bottom:8px">{hot}</div>'
-             if hot else '<div class="subhead">近 24 小時沒有被多篇提到的代號</div>')
-    return hot_h + _post_list(ptt.get("posts"), 40)
+def _rank_list(rows, n=15) -> str:
+    """rows: [(標題, 連結, 右側小字)]"""
+    if not rows:
+        return '<div class="rk-e">（目前沒有資料）</div>'
+    return "".join(f'<div class="post"><a href="{esc(u, quote=True)}" target="_blank" rel="noopener">{esc(t)}</a>'
+                   f'<span class="pt">{esc(x)}</span></div>' for t, u, x in rows[:n])
 
 
-def reddit_html(sc: dict) -> str:
-    tags = "".join(f'<span class="chip-t">${esc(t["s"])} ×{t["n"]}</span>' for t in sc.get("reddit_tags", []))
-    out = (f'<div class="subhead">標題裡被重複提到的股票代號</div><div style="margin-bottom:8px">{tags}</div>' if tags else "")
+def social_html(sc: dict) -> tuple:
+    """回傳 (左欄 html, 右欄 html)：左＝Threads + PTT（台灣），右＝Reddit（美國）+ 微博（大陸）"""
+    parts = sc.get("parts") or {}
+    th = sc.get("threads") or []
+    if th:
+        th_h = _rank_list([(p["t"], p["u"], f'@{p.get("a", "")} · {p["n"]:,}') for p in th], 12)
+    else:
+        th_h = ('<div class="rk-e">' + esc(str(parts.get("threads", "")).split(": ", 1)[-1] or "（目前沒有資料）") + '</div>')
+    ptt = sc.get("ptt") if isinstance(sc.get("ptt"), list) else []
+    ptt_h = _rank_list([(p["t"], p["u"], f'{p.get("b", "")} · 推 {p["n"]}') for p in ptt], 15)
+    left = ('<div class="sec">🧵 Threads（台灣）</div>' + th_h
+            + '<div class="sec">🗣 PTT 熱門（依推文數）</div>' + ptt_h)
+
+    rd = ""
     for sub, lst in (sc.get("reddit") or {}).items():
-        out += f'<div class="subhead" style="margin-top:10px"><b>r/{esc(sub)}</b>（熱門）</div>' + _post_list(lst, 12, False)
-    return out or '<div class="rk-e">（Reddit 目前連不上，雲端 IP 常被擋）</div>'
+        rd += f'<div class="subhead"><b>r/{esc(sub)}</b></div>' + _rank_list([(p["t"], p["u"], rel_epoch(p.get("p"))) for p in lst], 12)
+    rd = rd or '<div class="rk-e">（Reddit 目前連不上，雲端 IP 常被擋）</div>'
+    wb = sc.get("weibo") or []
+    wb_h = _rank_list([(f'{i}. {p["t"]}', p["u"], (p.get("tag") or "") + (f' · {p["n"]:,}' if p.get("n") else ""))
+                       for i, p in enumerate(wb, 1)], 20)
+    right = '<div class="sec">👽 Reddit（美國）</div>' + rd + '<div class="sec">🇨🇳 微博熱搜（大陸）</div>' + wb_h
+    return left, right
 
 
 gen_str, gen_age = _gen_time_str(sync.get("generated_at", ""))
@@ -1377,8 +1388,8 @@ qs = fetch_quotes()
 if qs:
     st.markdown(quotes_html(qs), unsafe_allow_html=True)
 
-tab_home, tab_ai, tab_cn, tab_chips, tab_cal, tab_soc, tab_sports, tab_ent, tab_game, tab_search, tab_fav, tab_cfg = st.tabs(
-    ["📰 今日新聞", "🤖 AI 專區", "🏮 大陸", "📊 籌碼", "📅 行事曆", "💬 社群", "⚽ 運動", "🎬 娛樂", "🎮 電玩", "🔎 搜尋", "⭐ 收藏", "⚙️ 設定"])
+tab_home, tab_ai, tab_sports, tab_ent, tab_game, tab_cn, tab_cal, tab_search, tab_fav, tab_cfg = st.tabs(
+    ["📰 今日新聞", "🤖 AI 專區", "⚽ 運動", "🎬 娛樂", "🎮 電玩", "🏮 大陸", "📅 行事曆", "🔎 搜尋", "⭐ 收藏", "⚙️ 設定"])
 
 # ═══════════════════════════════════════════════
 # TAB 1：今日新聞
@@ -1423,19 +1434,6 @@ with tab_home:
             st.caption(f"📈 題材升溫：資料只涵蓋 {_span:.0f} 小時，累積到 {SURGE_MIN_HISTORY_H} 小時以上才會開始偵測")
         else:
             st.caption(f"📈 題材升溫：近 {SURGE_WIN_H} 小時沒有個股的提及量超過平均 {SURGE_RATIO:g} 倍")
-
-        # ── 多空情緒趨勢 ──
-        st.markdown('<div class="sec">📉 多空情緒趨勢</div>', unsafe_allow_html=True)
-        _th = st.radio("趨勢區間", [24, 48, 72], index=1, horizontal=True, key="trend_h",
-                       format_func=lambda h: f"近 {h} 小時", label_visibility="collapsed")
-        _tc, _tn, _net6 = trend_chart(df_all, _th)
-        if _tc:
-            _tone = "偏多" if _net6 > 2 else ("偏空" if _net6 < -2 else "多空均衡")
-            st.markdown(_tc, unsafe_allow_html=True)
-            st.caption(f"近 {_th} 小時共 {_tn} 則；最近 6 小時利多減利空 = {_net6:+d}（{_tone}）。"
-                       "柱子是每小時的利多／利空篇數，線是加權指數，可以看情緒有沒有領先價格。")
-        else:
-            st.caption("資料還不夠（需要至少 10 則帶情緒判斷的新聞）才畫得出趨勢圖")
 
         # ── 頭條 ──
         st.markdown('<div class="sec">🔥 今日頭條</div>', unsafe_allow_html=True)
@@ -1489,6 +1487,18 @@ with tab_home:
                 if st.button("🔄 重試", key="regen_err"):
                     st.session_state.pop("_sum_key", None)
                     st.rerun()
+
+        # ── 多空情緒趨勢 ──
+        st.markdown('<div class="sec" style="margin-top:14px">📉 多空情緒趨勢</div>', unsafe_allow_html=True)
+        _th = st.radio("趨勢區間", [24, 48, 72], index=1, horizontal=True, key="trend_h",
+                       format_func=lambda h: f"近 {h} 小時", label_visibility="collapsed")
+        _tc, _tn, _net6 = trend_chart(df_all, _th)
+        if _tc:
+            _tone = "偏多" if _net6 > 2 else ("偏空" if _net6 < -2 else "多空均衡")
+            st.markdown(_tc, unsafe_allow_html=True)
+            st.caption(f"近 {_th} 小時 {_tn} 則；最近 6 小時利多減利空 {_net6:+d}（{_tone}）")
+        else:
+            st.caption("資料還不夠（需要至少 10 則帶情緒判斷的新聞）才畫得出趨勢圖")
 
         # ── 地緣 ──
         if not geo_df.empty:
@@ -1571,7 +1581,8 @@ with tab_cn:
 # ═══════════════════════════════════════════════
 _NO_EXTRAS = ("這一塊的資料還沒產生。請確認 GitHub Actions 已部署新版（extras.py、calendar_manual.json、fetch_news.yml），"
               "下一次自動抓取後就會出現；也可以到 Actions 頁面手動按一次 Run workflow。")
-with tab_chips:
+with tab_cal:
+    # ① 籌碼（最上）
     _ch = EXTRAS.get("chips")
     if not _ch or not (_ch.get("foreign_buy") or _ch.get("market")):
         st.markdown(f'<div class="empty">📊 {_NO_EXTRAS}</div>', unsafe_allow_html=True)
@@ -1579,38 +1590,41 @@ with tab_chips:
             st.markdown(_parts_html(_ch.get("parts")), unsafe_allow_html=True)
     else:
         st.markdown(chips_html(_ch), unsafe_allow_html=True)
-        st.markdown(_parts_html(_ch.get("parts")), unsafe_allow_html=True)
-        st.caption("資料來源：臺灣證券交易所（三大法人買賣超日報、融資融券彙總、注意／處置公告）。"
+        st.caption("資料來源：臺灣證券交易所（三大法人買賣超日報、融資融券彙總）。"
                    "三大法人約 15:00～16:30 公布，融資融券通常更晚；紅色＝買超／增加，綠色＝賣超／減少。")
 
-with tab_cal:
+    # ② 行事曆（只留總經 / 休市 / NVDA 財報，未來約 2 個月，不分頁）
+    st.markdown('<div class="sec">📅 行事曆（未來 2 個月）</div>', unsafe_allow_html=True)
     _cal = EXTRAS.get("calendar")
-    if not _cal or not _cal.get("events"):
-        st.markdown(f'<div class="empty">📅 {_NO_EXTRAS}</div>', unsafe_allow_html=True)
-        if _cal:
-            st.markdown(_parts_html(_cal.get("parts")), unsafe_allow_html=True)
+    _today = datetime.now(TZ_TW).date()
+    _evs = []
+    for _e in ((_cal or {}).get("events") or []):
+        try:
+            _d = datetime.strptime(_e["date"], "%Y-%m-%d").date()
+        except Exception:
+            continue
+        if 0 <= (_d - _today).days <= 62 and _e.get("kind") in ("macro", "holiday", "earn"):
+            _evs.append(_e)
+    if _evs:
+        st.markdown(cal_html(_evs), unsafe_allow_html=True)
     else:
-        _kinds = {"全部": "全部", "🏛 總經": "macro", "💰 除權息": "exdiv", "📊 美股財報": "earn", "🏖 休市": "holiday"}
-        _kf = st.radio("類別", list(_kinds.keys()), horizontal=True, key="cal_kind", label_visibility="collapsed")
-        st.markdown(cal_html(_cal["events"], _kinds[_kf]), unsafe_allow_html=True)
-        st.markdown(_parts_html(_cal.get("parts")), unsafe_allow_html=True)
-        st.caption("除權息：證交所預告；美股財報：只列大型股／關注名單（美東日期）；總經與休市：calendar_manual.json 手動維護，"
-                   "來源為 BLS、Fed 官方行程，時間已換算成台灣時間。")
+        st.markdown('<div class="empty">📭 未來 2 個月沒有事件（請更新 calendar_manual.json）</div>', unsafe_allow_html=True)
+    st.caption("事件來自 calendar_manual.json 手動維護（BLS、Fed、NVIDIA 官方公告），時間已換成台灣時間；只顯示今天起 62 天內。")
 
-with tab_soc:
+    # ③ 社群（最下）：Threads、PTT / Reddit、微博
+    st.markdown('<div class="sec">💬 社群熱門話題</div>', unsafe_allow_html=True)
     _sc = EXTRAS.get("social")
     if not _sc:
         st.markdown(f'<div class="empty">💬 {_NO_EXTRAS}</div>', unsafe_allow_html=True)
     else:
+        _l, _r = social_html(_sc)
         _c1, _c2 = st.columns(2)
         with _c1:
-            st.markdown('<div class="sec">🗣 PTT 股票版</div>', unsafe_allow_html=True)
-            st.markdown(ptt_html(_sc), unsafe_allow_html=True)
+            st.markdown(_l, unsafe_allow_html=True)
         with _c2:
-            st.markdown('<div class="sec">👽 Reddit</div>', unsafe_allow_html=True)
-            st.markdown(reddit_html(_sc), unsafe_allow_html=True)
+            st.markdown(_r, unsafe_allow_html=True)
         st.markdown(_parts_html(_sc.get("parts")), unsafe_allow_html=True)
-        st.caption("社群內容只代表網友情緒與話題熱度，不是消息來源；不要當成買賣依據。")
+        st.caption("社群內容只代表網友討論熱度，不是消息來源，也不是買賣依據。")
 
 
 # ═══════════════════════════════════════════════
