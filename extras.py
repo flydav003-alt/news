@@ -729,7 +729,7 @@ def fetch_weibo():
         w = str(it.get("word") or it.get("note") or "").strip()
         if not w or it.get("is_ad"):
             continue
-        out.append({"t": w, "u": f"https://s.weibo.com/weibo?q=%23{quote(w)}%23",
+        out.append({"t": w, "u": "https://m.weibo.cn/search?containerid=" + quote(f"100103type=1&q=#{w}#", safe=""),
                     "n": int(it.get("num") or 0), "tag": str(it.get("label_name") or "")})
     out = out[:25]
     try:
@@ -743,7 +743,7 @@ def fetch_weibo():
 
 
 def translate_reddit(red: dict, old: dict) -> None:
-    """替 Reddit 標題加上 z（繁體中文）；已翻過的沿用上次結果，不重複打翻譯。"""
+    """替 Reddit 標題加上 z（繁體中文）；已翻過的沿用上次結果。先用 Groq，失敗再用 Google 翻譯。"""
     cache = {p["u"]: p.get("z", "") for lst in old.values() for p in lst if p.get("z")}
     todo = []
     for lst in red.values():
@@ -754,21 +754,41 @@ def translate_reddit(red: dict, old: dict) -> None:
                 todo.append(p)
     if not todo:
         return
-    try:
-        from concurrent.futures import ThreadPoolExecutor
-        from deep_translator import GoogleTranslator
-
-        def one(p):
-            try:
-                return GoogleTranslator(source="auto", target="zh-TW").translate(p["t"]) or ""
-            except Exception:
-                return ""
-        with ThreadPoolExecutor(max_workers=4) as ex:
-            res = list(ex.map(one, todo))
-        for p, z in zip(todo, res):
-            p["z"] = z if z and z != p["t"] else ""
-    except Exception as e:
-        logger.warning(f"Reddit 標題翻譯失敗：{type(e).__name__}: {e}")
+    groq_n = 0
+    key = os.environ.get("GROQ_API_KEY", "").strip()
+    if key:
+        try:
+            from groq_analyzer import groq_translate_titles
+            for i in range(0, len(todo), 25):
+                chunk = todo[i:i + 25]
+                out = groq_translate_titles([p["t"] for p in chunk], key) or []
+                for p, z in zip(chunk, out):
+                    if z and z != p["t"]:
+                        p["z"] = z
+                        groq_n += 1
+        except Exception as e:
+            logger.warning(f"Reddit 標題 Groq 翻譯失敗：{type(e).__name__}: {e}")
+    else:
+        logger.warning("Reddit 標題翻譯：沒有 GROQ_API_KEY，只能用 Google 翻譯")
+    left = [p for p in todo if not p.get("z")]
+    g_n, err = 0, ""
+    if left:
+        try:
+            from deep_translator import GoogleTranslator
+            tr = GoogleTranslator(source="auto", target="zh-TW")
+            for p in left:
+                try:
+                    z = tr.translate(p["t"]) or ""
+                    if z and z != p["t"]:
+                        p["z"] = z
+                        g_n += 1
+                except Exception as e:
+                    err = err or f"{type(e).__name__}: {e}"
+        except Exception as e:
+            err = f"{type(e).__name__}: {e}"
+    if err:
+        logger.warning(f"Reddit 標題 Google 翻譯失敗（只記第一個錯誤）：{err}")
+    logger.info(f"Reddit 標題翻譯 {groq_n + g_n}/{len(todo)}（Groq {groq_n}、Google {g_n}）")
 
 
 def fetch_threads(token: str):
