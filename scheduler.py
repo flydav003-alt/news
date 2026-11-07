@@ -101,8 +101,8 @@ def translate_titles(items: list[dict], limit: int = 150, api_key: str = "") -> 
     return n
 
 
-# 生活類（運動/娛樂/電玩/大陸生活）不做股市情緒、個股、地緣判斷
-LIFESTYLE = {"運動", "娛樂", "電玩", "大陸生活"}
+# 生活類（運動/娛樂/電玩）不做股市情緒、個股、地緣判斷
+LIFESTYLE = {"運動", "娛樂", "電玩"}
 
 
 # ── 主流程 ────────────────────────────────────────────────────────────────────
@@ -298,7 +298,13 @@ def run_job(json_path: str, max_ai: int = 8) -> None:
             logger.error(f"讀取舊 news.json 失敗（當作空資料）：{e}")
 
     # 2) 抓取 + 分析 + 翻譯 + 補圖
-    result = crawl_and_save(use_ai=True, max_ai_per_run=max_ai,
+    # 深夜時段跳過 AI 分析（省 Groq 額度；關鍵字分析、翻譯、存庫照常）
+    skip_hours = {int(h) for h in os.environ.get("AI_SKIP_HOURS_TW", "").split(",") if h.strip().isdigit()}
+    hour_tw = datetime.now(TZ_TW).hour
+    use_ai = hour_tw not in skip_hours
+    if not use_ai:
+        logger.info(f"台灣時間 {hour_tw} 點在 AI_SKIP_HOURS_TW 內，本次跳過 AI 分析")
+    result = crawl_and_save(use_ai=use_ai, max_ai_per_run=max_ai,
                             fetch_og=True, translate=True)
     logger.info(f"本次結果：{ {k: v for k, v in result.items() if k != 'logs'} }")
     for lg in result["logs"]:
