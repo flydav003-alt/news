@@ -29,6 +29,22 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# 簡體 → 繁體（台灣用詞）。沒裝 opencc 也能跑，只是大陸簡體來源會維持簡體顯示、關鍵字比對較不準
+try:
+    from opencc import OpenCC
+    _S2T = OpenCC("s2twp")
+except Exception:
+    _S2T = None
+
+
+def _to_tw(text: str) -> str:
+    if not text or _S2T is None:
+        return text
+    try:
+        return _S2T.convert(text)
+    except Exception:
+        return text
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -43,11 +59,13 @@ TIMEOUT   = 20
 MAX_ITEMS = 50
 
 
-def _gnews(query: str, en: bool = False, when: str = "1d") -> str:
-    """Google News RSS（預設繁中台灣；en=True 為美國英文版）"""
+def _gnews(query: str, en: bool = False, when: str = "1d", cn: bool = False) -> str:
+    """Google News RSS（預設繁中台灣；en=True 為美國英文版；cn=True 為中國大陸簡體版，能抓到財聯社、證券時報等大陸媒體）"""
     q = quote(f"{query} when:{when}")
     if en:
         return f"https://news.google.com/rss/search?q={q}&hl=en-US&gl=US&ceid=US:en"
+    if cn:
+        return f"https://news.google.com/rss/search?q={q}&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
     return f"https://news.google.com/rss/search?q={q}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
 
 
@@ -127,6 +145,40 @@ SOURCES = [
      "language": "en", "category": "電玩", "enabled": True, "max_items": 8},
     {"name": "The Verge",     "url": "https://www.theverge.com/rss/index.xml",
      "language": "en", "category": "科技", "enabled": True, "max_items": 10},
+    # ── 🏮 大陸（category="大陸"）────────────────────────────
+    # s2t=True：簡體來源，抓回來後用 opencc 轉成繁體。cn=True 的 Google News 簡體版能直接抓到財聯社、證券時報、第一財經等大陸媒體。
+    {"name": "GN-大陸A股",   "url": _gnews("A股 OR 上证指数 OR 沪深300 OR 创业板 OR 北向资金", cn=True),
+     "language": "zh", "category": "大陸", "enabled": True, "strip_suffix": True, "s2t": True, "max_items": 30},
+    {"name": "GN-大陸政策",  "url": _gnews("央行 OR 国务院 OR 证监会 OR 发改委 OR 财政部 降准 OR 降息 OR 刺激 OR 稳增长 OR 新政", cn=True),
+     "language": "zh", "category": "大陸", "enabled": True, "strip_suffix": True, "s2t": True, "max_items": 30},
+    {"name": "GN-大陸經濟",  "url": _gnews("中国 经济 数据 OR 房地产 OR 消费 OR 出口 OR 人民币 OR PMI OR 通缩", cn=True),
+     "language": "zh", "category": "大陸", "enabled": True, "strip_suffix": True, "s2t": True, "max_items": 30},
+    {"name": "GN-大陸產業",  "url": _gnews("华为 OR 中芯国际 OR 比亚迪 OR 宁德时代 OR 小米 OR 阿里巴巴 OR 腾讯 财报 OR 芯片 OR 新能源车", cn=True),
+     "language": "zh", "category": "大陸", "enabled": True, "strip_suffix": True, "s2t": True, "max_items": 30},
+    {"name": "GN-中美關係",  "url": _gnews("中美 OR 美中 關稅 OR 出口管制 OR 晶片禁令 OR 稀土 OR 實體清單 OR 脫鉤"),
+     "language": "zh", "category": "大陸", "enabled": True, "strip_suffix": True, "max_items": 30},
+    {"name": "GN-港股",      "url": _gnews("港股 OR 恒生指數 OR 恆生科技 OR 港交所"),
+     "language": "zh", "category": "大陸", "enabled": True, "strip_suffix": True, "max_items": 25},
+    {"name": "GN-兩岸",      "url": _gnews("兩岸 OR 台海 OR 國台辦 OR 陸委會 OR 解放軍", when="2d"),
+     "language": "zh", "category": "大陸", "enabled": True, "strip_suffix": True, "max_items": 25},
+    {"name": "GN-China Markets", "url": _gnews("China stocks OR yuan OR PBOC OR Shanghai Composite OR Hang Seng OR China economy", en=True),
+     "language": "en", "category": "大陸", "enabled": True, "strip_suffix": True, "max_items": 25},
+    # 以下 4 個我有確認過網址可用
+    {"name": "BBC中文",      "url": "https://feeds.bbci.co.uk/zhongwen/trad/rss.xml",
+     "language": "zh", "category": "大陸", "enabled": True, "max_items": 20},
+    {"name": "BBC China",    "url": "http://feeds.bbci.co.uk/news/world/asia/china/rss.xml",
+     "language": "en", "category": "大陸", "enabled": True, "max_items": 15},
+    {"name": "SCMP China Biz 1", "url": "https://www.scmp.com/rss/523893/feed",
+     "language": "en", "category": "大陸", "enabled": True, "max_items": 15},
+    {"name": "SCMP China Biz 2", "url": "https://www.scmp.com/rss/523082/feed",
+     "language": "en", "category": "大陸", "enabled": True, "max_items": 15},
+    # 以下網址我沒辦法確認是否還有效，預設關閉；想試的話改成 True，再到設定頁「來源健康度」看有沒有抓到
+    {"name": "FT中文網",     "url": "https://www.ftchinese.com/rss/feed",
+     "language": "zh", "category": "大陸", "enabled": False, "s2t": True, "max_items": 20},
+    {"name": "中新網財經",   "url": "https://www.chinanews.com.cn/rss/finance.xml",
+     "language": "zh", "category": "大陸", "enabled": False, "s2t": True, "max_items": 20},
+    {"name": "德國之聲中文", "url": "https://rss.dw.com/rdf/rss-chi-all",
+     "language": "zh", "category": "大陸", "enabled": False, "s2t": True, "max_items": 20},
     # ── 已停用（保留設定，需要時到設定頁開）──────────────────
     {"name": "信傳媒",        "url": "https://www.cmmedia.com.tw/rss/yahoo/article",
      "language": "zh", "category": "財經", "enabled": False},
@@ -273,6 +325,9 @@ def fetch_rss(source: dict) -> list[dict]:
                 if pub_name:
                     src_name = pub_name
                 summary = ""   # Google News 的 summary 只是重複標題
+
+            if source.get("s2t"):                      # 大陸簡體來源：轉成繁體再往下游走（顯示、關鍵字分析都比較準）
+                title, summary, src_name = _to_tw(title), _to_tw(summary), _to_tw(src_name)
 
             if not title or len(title) < 4:
                 continue
