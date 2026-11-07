@@ -325,6 +325,20 @@ body.fn-compact .cm-b .tr{display:none}
 [role="tab"][aria-selected="true"] p{color:#fff!important}
 .react-aria-SelectionIndicator,[data-baseweb="tab-highlight"],[data-baseweb="tab-border"]{display:none!important}
 @media (max-width:640px){[role="tab"]{padding:7px 12px!important}[role="tab"] p{font-size:15px!important}}
+@media (max-width:700px){
+  [data-testid="stHeader"]{height:2.2rem!important;min-height:0!important}
+  .main .block-container,[data-testid="stMain"] .block-container{padding-top:2.4rem!important;padding-left:.7rem!important;padding-right:.7rem!important;padding-bottom:20px!important}
+  .topbar{padding:0;gap:6px}.logo{font-size:15px}.pill{font-size:11px;padding:1px 8px}.tmono{display:none}
+  [data-testid="stHorizontalBlock"]:has(.topbar){flex-wrap:nowrap!important;gap:6px!important;align-items:center!important}
+  [data-testid="stHorizontalBlock"]:has(.topbar)>div{min-width:0!important;width:auto!important;flex:0 1 auto!important}
+  [data-testid="stHorizontalBlock"]:has(.topbar)>div:nth-child(1){flex:1 1 0!important}
+  [data-testid="stHorizontalBlock"]:has(.topbar)>div:nth-child(2){flex:0 0 92px!important}
+  [data-testid="stHorizontalBlock"]:has(.topbar)>div:nth-child(3){flex:0 0 84px!important}
+  .qbar{display:flex;overflow-x:auto;gap:6px;margin:2px 0 6px;scrollbar-width:none}.qbar::-webkit-scrollbar{display:none}
+  .q{flex:0 0 auto;min-width:98px;padding:4px 8px}.q-p{font-size:14px}.q-n,.q-c{font-size:11px}
+  .mrow{gap:6px}.m{padding:5px 10px;min-width:0;flex:1 1 28%}.m-v{font-size:16px}
+  [role="tab"]{padding:6px 10px!important}[role="tab"] p{font-size:14px!important}
+}
 .stButton>button{border-radius:8px;font-weight:500;border:1px solid var(--line);background:var(--card);color:var(--tx)}
 .stButton>button[kind="primary"]{background:var(--accent);border-color:var(--accent);color:#fff}
 .stSelectbox>div>div,.stTextInput>div>div>input{background:var(--card)!important;border:1px solid var(--line)!important;border-radius:8px!important}
@@ -1313,11 +1327,16 @@ def _post_list(posts, n=40, show_k=True) -> str:
 
 
 def _rank_list(rows, n=15) -> str:
-    """rows: [(標題, 連結, 右側小字)]"""
+    """rows: [(標題, 連結, 右側小字[, 原文])]"""
     if not rows:
         return '<div class="rk-e">（目前沒有資料）</div>'
-    return "".join(f'<div class="post"><a href="{esc(u, quote=True)}" target="_blank" rel="noopener">{esc(t)}</a>'
-                   f'<span class="pt">{esc(x)}</span></div>' for t, u, x in rows[:n])
+    out = ""
+    for r in rows[:n]:
+        t, u, x = r[0], r[1], r[2]
+        sub = f'<div style="font-size:11.5px;color:var(--tx3);font-weight:400">{esc(r[3])}</div>' if len(r) > 3 and r[3] else ""
+        out += (f'<div class="post"><div style="flex:1;min-width:0"><a href="{esc(u, quote=True)}" target="_blank" '
+                f'rel="noopener">{esc(t)}</a>{sub}</div><span class="pt">{esc(x)}</span></div>')
+    return out
 
 
 def social_html(sc: dict) -> tuple:
@@ -1335,7 +1354,7 @@ def social_html(sc: dict) -> tuple:
 
     rd = ""
     for sub, lst in (sc.get("reddit") or {}).items():
-        rd += f'<div class="subhead"><b>r/{esc(sub)}</b></div>' + _rank_list([(p["t"], p["u"], rel_epoch(p.get("p"))) for p in lst], 12)
+        rd += f'<div class="subhead"><b>r/{esc(sub)}</b></div>' + _rank_list([(p.get("z") or p["t"], p["u"], rel_epoch(p.get("p")), p["t"] if p.get("z") else "") for p in lst], 12)
     rd = rd or '<div class="rk-e">（Reddit 目前連不上，雲端 IP 常被擋）</div>'
     wb = sc.get("weibo") or []
     wb_h = _rank_list([(f'{i}. {p["t"]}', p["u"], (p.get("tag") or "") + (f' · {p["n"]:,}' if p.get("n") else ""))
@@ -1603,13 +1622,14 @@ with tab_cal:
             _d = datetime.strptime(_e["date"], "%Y-%m-%d").date()
         except Exception:
             continue
-        if 0 <= (_d - _today).days <= 62 and _e.get("kind") in ("macro", "holiday", "earn"):
+        if 0 <= (_d - _today).days <= 62 and (_e.get("kind") in ("macro", "holiday")
+                                                  or (_e.get("kind") == "earn" and ("NVDA" in _e.get("title", "") or "輝達" in _e.get("title", "")))):
             _evs.append(_e)
     if _evs:
         st.markdown(cal_html(_evs), unsafe_allow_html=True)
     else:
         st.markdown('<div class="empty">📭 未來 2 個月沒有事件（請更新 calendar_manual.json）</div>', unsafe_allow_html=True)
-    st.caption("事件來自 calendar_manual.json 手動維護（BLS、Fed、NVIDIA 官方公告），時間已換成台灣時間；只顯示今天起 62 天內。")
+    st.caption("自動更新：休市日用規則計算，FOMC 來自 Fed 官網，非農／CPI 來自 FRED／BLS，輝達財報來自 Nasdaq；時間已換成台灣時間，只顯示今天起 62 天內。")
 
     # ③ 社群（最下）：Threads、PTT / Reddit、微博
     st.markdown('<div class="sec">💬 社群熱門話題</div>', unsafe_allow_html=True)
