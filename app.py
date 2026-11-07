@@ -1255,12 +1255,8 @@ def _rank_list(rows, n=15) -> str:
 
 
 def social_html(sc: dict) -> tuple:
-    """回傳 (左欄 html, 右欄 html)：左＝PTT（有資料才顯示）+ Reddit（美國），右＝微博（大陸）"""
-    ptt = sc.get("ptt") if isinstance(sc.get("ptt"), list) else []
+    """回傳 (左欄 html, 右欄 html)：左＝Reddit（美國），右＝微博（大陸）"""
     left = ""
-    if ptt:
-        left += ('<div class="sec">🗣 PTT 熱門（依推文數）</div>'
-                 + _rank_list([(p["t"], p["u"], f'{p.get("b", "")} · 推 {p["n"]}') for p in ptt], 15))
     rd = ""
     for sub, lst in (sc.get("reddit") or {}).items():
         rd += f'<div class="subhead"><b>r/{esc(sub)}</b></div>' + _rank_list(
@@ -1515,7 +1511,7 @@ with tab_cal:
         st.markdown('<div class="empty">📭 未來 2 個月沒有事件（請更新 calendar_manual.json）</div>', unsafe_allow_html=True)
     st.caption("自動更新：休市日用規則計算，FOMC 來自 Fed 官網，非農／CPI 來自 FRED／BLS，輝達財報來自 Nasdaq；時間已換成台灣時間，只顯示今天起 62 天內。")
 
-    # ③ 社群（最下）：Threads、PTT / Reddit、微博
+    # ③ 社群（最下）：Reddit、微博
     st.markdown('<div class="sec">💬 社群熱門話題</div>', unsafe_allow_html=True)
     _sc = EXTRAS.get("social")
     if not _sc:
