@@ -252,6 +252,33 @@ def crawl_and_save(enabled_names=None,
     }
 
 
+# ── 來源健康度：每次抓取記一筆（成功/空/篇數），保留最近 96 次（約 2 天）到 health.json ──────────
+def update_health(logs: list, path: str, keep: int = 96) -> None:
+    """crawler 的 status：success＝抓到文章、empty＝0 篇（網址壞了、被擋、或 RSS 真的沒新東西）"""
+    now = datetime.now(TZ_TW).isoformat(timespec="seconds")
+    data = {}
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            logger.warning(f"讀取舊 health.json 失敗（重新開始）：{e}")
+    srcs = data.get("sources", {})
+    for lg in logs:
+        h = srcs.setdefault(lg["source"], {"hist": []})
+        ok = 1 if lg.get("status") == "success" else 0
+        h["hist"] = (h.get("hist", []) + [[now, ok, int(lg.get("count", 0))]])[-keep:]
+        if ok:
+            h["last_ok"] = now
+    data.update(sources=srcs, updated=now)
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+    except Exception as e:
+        logger.warning(f"寫入 health.json 失敗：{e}")
+
+
 # ── GitHub Actions 入口 ───────────────────────────────────────────────────────
 def run_job(json_path: str, max_ai: int = 8) -> None:
     init_db()
@@ -276,6 +303,7 @@ def run_job(json_path: str, max_ai: int = 8) -> None:
     logger.info(f"本次結果：{ {k: v for k, v in result.items() if k != 'logs'} }")
     for lg in result["logs"]:
         logger.info(f"  來源 {lg['source']}: {lg['status']} ({lg['count']})")
+    update_health(result["logs"], os.path.join(os.path.dirname(os.path.abspath(json_path)), "health.json"))
 
     # 3) 匯出（保留 72 小時）
     db = SessionLocal()
