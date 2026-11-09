@@ -44,9 +44,9 @@ _last_call = [0.0]
 PROXY_URL = os.environ.get("PROXY_URL", "").strip().rstrip("/")
 PROXY_KEY = os.environ.get("PROXY_KEY", "").strip()
 # 這些網站對雲端機房 IP 不友善 → 先走 Cloudflare Worker，失敗再直連；證交所則相反（先直連，失敗才走代理）
-PROXY_FIRST = {"www.ptt.cc", "weibo.com", "s.weibo.com", "www.reddit.com", "old.reddit.com",
+PROXY_FIRST = {"www.ptt.cc", "s.weibo.com", "www.reddit.com", "old.reddit.com",
                "graph.threads.net", "www.bls.gov", "www.federalreserve.gov", "api.nasdaq.com"}
-PROXY_AFTER = {"www.twse.com.tw", "openapi.twse.com.tw"}
+PROXY_AFTER = {"www.twse.com.tw", "openapi.twse.com.tw", "weibo.com"}   # weibo.com：代理一律 403，直連才通，所以改先直連
 
 
 def _once(url, params, headers, timeout, cookies, via_proxy):
@@ -642,11 +642,13 @@ def build_calendar(prev: dict, now: datetime) -> dict:
 PTT_ENABLED = False
 PTT_BOARDS = ["Gossiping", "HatePolitics", "Stock", "Baseball", "NBA"]
 REDDIT_SUBS = [("popular", 12), ("worldnews", 8), ("technology", 8)]
+REDDIT_HOSTS = ("www.reddit.com",)      # old.reddit.com 在歷次 log 都是 403，先不試（要的話加回 "old.reddit.com"）
+REDDIT_GAP = 3.0                        # 兩次 Reddit 請求至少間隔幾秒（連續請求容易被 429）
 
 
-def _feed(url):
+def _feed(url, gap=1.0):
     import feedparser
-    r = _get(url, headers={"User-Agent": UA["User-Agent"], "Accept": "application/atom+xml,application/xml,*/*"}, gap=1.0)
+    r = _get(url, headers={"User-Agent": UA["User-Agent"], "Accept": "application/atom+xml,application/xml,*/*"}, gap=gap)
     if r is None:
         return None
     fp = feedparser.parse(r.content)
@@ -710,8 +712,8 @@ def fetch_reddit():
     out, errs = {}, []
     for sub, n in REDDIT_SUBS:
         ent = None
-        for host in ("www.reddit.com", "old.reddit.com"):
-            ent = _feed(f"https://{host}/r/{sub}/hot/.rss?limit=25")
+        for host in REDDIT_HOSTS:
+            ent = _feed(f"https://{host}/r/{sub}/hot/.rss?limit=25", gap=REDDIT_GAP)
             if ent:
                 break
         if ent:
@@ -816,15 +818,24 @@ def build_social(prev: dict, now: datetime) -> dict:
 
     red, errs = fetch_reddit()
     old = prev.get("reddit") if isinstance(prev.get("reddit"), dict) else {}
+    now_iso = now.isoformat(timespec="seconds")
+    rat = dict(prev.get("reddit_at") or {}) if isinstance(prev.get("reddit_at"), dict) else {}
+    for sub in red:                                  # 這次真的抓到的板：記下時間
+        rat[sub] = now_iso
+    stale = []
     for sub, _n2 in REDDIT_SUBS:
         if sub not in red and old.get(sub):
             red[sub] = old[sub]
+            stale.append(sub)                        # 沿用上次內容
+    out["reddit_at"], out["reddit_stale"] = rat, stale
     translate_reddit(red, old)
     out["reddit"] = red
     parts["reddit"] = "ok" if not errs else f"error: {', '.join(errs)} 抓不到（Reddit 常擋雲端 IP）"
 
     wb = fetch_weibo()
     out["weibo"] = wb or prev.get("weibo") or []
+    out["weibo_at"] = now_iso if wb else (prev.get("weibo_at") or "")
+    out["weibo_stale"] = not wb
     parts["weibo"] = "ok" if wb else "error: 微博熱搜抓不到（保留上次內容）"
 
     out["parts"] = parts
