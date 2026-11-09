@@ -550,6 +550,8 @@ def render_reader(url: str) -> None:
         st.markdown(_h(f'<div class="rdr">{nav}<div class="rdr-warn">⚠️ 無法在這裡顯示全文：{esc(err)}'
                        f'</div>{src_btn}</div>'), unsafe_allow_html=True)
         return
+    src_btn = (f'<a class="rdr-src" href="{esc(art["final_url"], quote=True)}" target="_blank" rel="noopener noreferrer">'
+               f'↗ 開啟原文網頁</a>')
     meta = " · ".join(x for x in (art["site"], art["author"], art["date"]) if x)
     warn = ('<div class="rdr-warn">只抓到很少的內容，可能是付費牆或網站限制，完整內容請點最下方「開啟原文網頁」。</div>'
             if art["chars"] < 200 else "")
