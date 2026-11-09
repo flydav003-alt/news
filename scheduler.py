@@ -91,7 +91,7 @@ def translate_titles(items: list[dict], limit: int = 150, api_key: str = "") -> 
 
     left = [it for it in todo if not it.get("title_zh")]
     if left:
-        with ThreadPoolExecutor(max_workers=4) as ex:
+        with ThreadPoolExecutor(max_workers=8) as ex:
             results = list(ex.map(lambda it: _translate_one(it["title"]), left))
         for it, zh in zip(left, results):
             if zh and zh != it["title"]:
@@ -188,11 +188,29 @@ def crawl_and_save(enabled_names=None,
         tech_n = min(int(os.environ.get("AI_TECH_SLOTS", "4")), len(ai_items), max_ai_per_run)
         fin_n = max_ai_per_run - tech_n
         fin_pick = cands[:fin_n]
-        for it in fin_pick:
+        def _fin_call(it):
             if _is_rate_limited():
-                break
-            ai = groq_analyze(it["title"], it.get("summary", ""),
-                              it.get("category", "財經"), groq_key)
+                return None
+            return groq_analyze(it["title"], it.get("summary", ""), it.get("category", "財經"), groq_key)
+
+        def _tech_call(it):
+            if _is_rate_limited():
+                return None
+            return groq_tech_summary(it["title"], it.get("summary", ""), groq_key)
+
+        picked = {id(x) for x in fin_pick}
+        tech_pool = [it for it in ai_items if id(it) not in picked]
+        tech_pool.sort(key=lambda it: it["published_at"].timestamp(), reverse=True)
+        tech_pick = tech_pool[:tech_n]
+
+        # 原本 10 則 Groq 呼叫一個接一個等；改成同時送 3 個（Groq 免費額度是看總次數，不受影響）
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            f1 = [ex.submit(_fin_call, it) for it in fin_pick]
+            f2 = [ex.submit(_tech_call, it) for it in tech_pick]     # 財經與技術摘要一起排進同一批
+            fin_res = [f.result() for f in f1]
+            tech_res = [f.result() for f in f2]
+
+        for it, ai in zip(fin_pick, fin_res):
             if ai:
                 it["ai_sentiment"]        = ai["sentiment"]
                 it["ai_score"]            = ai["score"]
@@ -201,14 +219,8 @@ def crawl_and_save(enabled_names=None,
                 it["ai_reason"]           = ai["reason"]
                 it["ai_confidence"]       = ai["confidence"]
                 ai_count += 1
-        picked = {id(x) for x in fin_pick}
-        tech_pool = [it for it in ai_items if id(it) not in picked]
-        tech_pool.sort(key=lambda it: it["published_at"].timestamp(), reverse=True)
         tech_done = 0
-        for it in tech_pool[:tech_n]:
-            if _is_rate_limited():
-                break
-            ai = groq_tech_summary(it["title"], it.get("summary", ""), groq_key)
+        for it, ai in zip(tech_pick, tech_res):
             if ai:
                 it["ai_sentiment"], it["ai_score"] = "", 0.0     # 技術新聞不顯示利多/利空，只顯示摘要
                 it["ai_summary"] = ai["summary"]
