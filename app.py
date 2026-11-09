@@ -474,6 +474,38 @@ st.markdown(THEME_CSS, unsafe_allow_html=True)
 # ─────────────────────────────────────────────
 FONT_STEPS = [85, 100, 115, 130, 150, 170]
 
+# 手機預設字級：標題 115%、內文 115%、分頁標籤 85%
+MOBILE_DEFAULT = {"ts": 115, "bs": 115, "tb": 85}
+
+# 手機第一次開啟（網址沒有 dv 標記）→ 自動套用手機預設字級並重新載入一次。
+# 之後網址帶著 dv=1，就不會再覆蓋你手動調整的值。閱讀模式（?read=）不處理。
+if not st.query_params.get("dv") and not st.query_params.get("read"):
+    _mobile_default_js = f"""
+    <script>
+    (function(){{
+      var P = window.parent;
+      try {{
+        if (!P.matchMedia('(max-width: 700px)').matches) return;   // 只在手機寬度生效
+        var u = new URL(P.location.href);
+        if (u.searchParams.get('dv')) return;
+        u.searchParams.set('ts', '{MOBILE_DEFAULT["ts"]}');
+        u.searchParams.set('bs', '{MOBILE_DEFAULT["bs"]}');
+        u.searchParams.set('tb', '{MOBILE_DEFAULT["tb"]}');
+        u.searchParams.set('dv', '1');
+        P.location.replace(u.toString());
+      }} catch(e) {{}}
+    }})();
+    </script>
+    """
+    try:
+        st.iframe(_mobile_default_js, height=1)
+    except Exception:
+        try:
+            import streamlit.components.v1 as components
+            components.html(_mobile_default_js, height=0)
+        except Exception:
+            pass
+
 
 def _qp_font(name: str) -> int:
     try:
@@ -507,7 +539,7 @@ st.markdown(FONT_CSS, unsafe_allow_html=True)
 def _keep_qs() -> str:
     """帶著目前的主題與字級，閱讀頁才會跟首頁長得一樣"""
     return (f"theme={quote(st.session_state['theme_sel'])}&ts={st.session_state['font_title']}"
-            f"&bs={st.session_state['font_body']}&tb={st.session_state['font_tab']}")
+            f"&bs={st.session_state['font_body']}&tb={st.session_state['font_tab']}&dv=1")
 
 
 # 閱讀模式打不開的網站，點新聞改直接開原網站；目前先留空（先收集失敗原因），之後再把網域加進來
@@ -1922,8 +1954,15 @@ with tab_cfg:
     st.select_slider("分頁標籤大小（今日新聞、AI 專區…）", options=FONT_STEPS, key="font_tab",
                      format_func=lambda v: f"{v}%")
     st.caption("100% 是預設。手機覺得字小的話，建議標題 130%、內文 115% 起試；設定會記在網址上，重新整理不會跑掉。")
-    st.button("↩️ 還原預設字級", key="reset_font",
-              on_click=lambda: st.session_state.update(font_title=100, font_body=100, font_tab=100))
+    def _reset_fonts():
+        st.session_state.update(font_title=100, font_body=100, font_tab=100)
+        # 清掉 dv 標記：手機會再套用手機預設值，電腦維持 100%
+        try:
+            del st.query_params["dv"]
+        except Exception:
+            pass
+
+    st.button("↩️ 還原預設字級", key="reset_font", on_click=_reset_fonts)
     for _k, _q in (("font_title", "ts"), ("font_body", "bs"), ("font_tab", "tb")):
         if st.query_params.get(_q) != str(st.session_state[_k]):
             st.query_params[_q] = str(st.session_state[_k])
