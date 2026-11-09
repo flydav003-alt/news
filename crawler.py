@@ -143,6 +143,18 @@ SOURCES = [
      "language": "zh", "category": "電玩", "enabled": True, "max_items": 12},
     {"name": "IGN",           "url": "https://feeds.ign.com/ign/all",
      "language": "en", "category": "電玩", "enabled": True, "max_items": 8},
+    # ETtoday / Yahoo奇摩：網址格式依 ETtoday 現行 feedburner 慣例與 Yahoo 的 /rss/<分類> 推測，我沒辦法連線驗證。
+    # 跑過一輪後到設定頁「來源健康度」看，抓不到（0 篇）的就改網址或關掉
+    {"name": "ETtoday運動",   "url": "https://feeds.feedburner.com/ettoday/sport",
+     "language": "zh", "category": "運動", "enabled": True, "max_items": 10},
+    {"name": "ETtoday影劇",   "url": "https://feeds.feedburner.com/ettoday/star",
+     "language": "zh", "category": "娛樂", "enabled": True, "max_items": 10},
+    {"name": "ETtoday遊戲",   "url": "https://feeds.feedburner.com/ettoday/game",
+     "language": "zh", "category": "電玩", "enabled": True, "max_items": 10},
+    {"name": "Yahoo奇摩運動", "url": "https://tw.news.yahoo.com/rss/sports",
+     "language": "zh", "category": "運動", "enabled": True, "max_items": 10},
+    {"name": "Yahoo奇摩娛樂", "url": "https://tw.news.yahoo.com/rss/entertainment",
+     "language": "zh", "category": "娛樂", "enabled": True, "max_items": 10},
     {"name": "The Verge",     "url": "https://www.theverge.com/rss/index.xml",
      "language": "en", "category": "科技", "enabled": True, "max_items": 10},
     # ── 🏮 大陸（category="大陸"）────────────────────────────
