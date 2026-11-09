@@ -477,34 +477,19 @@ FONT_STEPS = [85, 100, 115, 130, 150, 170]
 # 手機預設字級：標題 115%、內文 115%、分頁標籤 85%
 MOBILE_DEFAULT = {"ts": 115, "bs": 115, "tb": 85}
 
-# 手機第一次開啟（網址沒有 dv 標記）→ 自動套用手機預設字級並重新載入一次。
+# 手機第一次開啟（網址沒有 dv 標記）→ 伺服器端用 User-Agent 判斷是不是手機，
+# 是的話把手機預設字級寫進網址參數（不需要 JS、不需要重新載入）。
 # 之後網址帶著 dv=1，就不會再覆蓋你手動調整的值。閱讀模式（?read=）不處理。
-if not st.query_params.get("dv") and not st.query_params.get("read"):
-    _mobile_default_js = f"""
-    <script>
-    (function(){{
-      var P = window.parent;
-      try {{
-        if (!P.matchMedia('(max-width: 700px)').matches) return;   // 只在手機寬度生效
-        var u = new URL(P.location.href);
-        if (u.searchParams.get('dv')) return;
-        u.searchParams.set('ts', '{MOBILE_DEFAULT["ts"]}');
-        u.searchParams.set('bs', '{MOBILE_DEFAULT["bs"]}');
-        u.searchParams.set('tb', '{MOBILE_DEFAULT["tb"]}');
-        u.searchParams.set('dv', '1');
-        P.location.replace(u.toString());
-      }} catch(e) {{}}
-    }})();
-    </script>
-    """
+def _is_mobile_ua() -> bool:
     try:
-        st.iframe(_mobile_default_js, height=1)
+        ua = str(st.context.headers.get("User-Agent", ""))
     except Exception:
-        try:
-            import streamlit.components.v1 as components
-            components.html(_mobile_default_js, height=0)
-        except Exception:
-            pass
+        return False
+    return bool(re.search(r"Mobile|Android|iPhone|iPod", ua, re.I))
+
+
+if not st.query_params.get("dv") and not st.query_params.get("read") and _is_mobile_ua():
+    st.query_params.update({k: str(v) for k, v in MOBILE_DEFAULT.items()} | {"dv": "1"})
 
 
 def _qp_font(name: str) -> int:
