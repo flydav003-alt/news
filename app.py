@@ -806,13 +806,8 @@ def titles(row):
 
 
 def translate_link(row) -> str:
-    if str(row.get("language", "zh")) != "en":
-        return ""
-    url = str(row.get("url", "") or "")
-    if not url.startswith("http"):
-        return ""
-    return (f'<a class="tr" href="https://translate.google.com/translate?sl=auto&tl=zh-TW&u={quote(url, safe="")}" '
-            f'target="_blank" rel="noopener">🌐 翻譯全文</a>')
+    """「🌐 翻譯全文」連到 Google 翻譯，實際用處不大，已取消顯示（保留函式讓其他地方的呼叫不用改）"""
+    return ""
 
 
 def tickers_chips(row, n=3) -> str:
