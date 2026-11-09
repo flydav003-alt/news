@@ -1431,19 +1431,35 @@ def _rank_list(rows, n=15) -> str:
     return out
 
 
+def _stale_note(iso: str) -> str:
+    """沿用上次資料時的小提示：⏳ 沿用舊資料（上次成功 X 小時前）"""
+    when = ""
+    try:
+        from datetime import datetime as _dt
+        when = rel_epoch(_dt.fromisoformat(str(iso)).timestamp()) if iso else ""
+    except Exception:
+        when = ""
+    return f'<div class="rk-e" style="margin:2px 0 6px">⏳ 這次沒抓到，沿用舊資料' + (f'（上次成功：{esc(when)}）' if when else "") + '</div>'
+
+
 def social_html(sc: dict) -> tuple:
-    """回傳 (左欄 html, 右欄 html)：左＝Reddit（美國），右＝微博（大陸）"""
-    left = ""
-    rd = ""
-    for sub, lst in (sc.get("reddit") or {}).items():
-        rd += f'<div class="subhead"><b>r/{esc(sub)}</b></div>' + _rank_list(
-            [(p.get("z") or p["t"], p["u"], rel_epoch(p.get("p")), p["t"] if p.get("z") else "") for p in lst], 12)
-    rd = rd or '<div class="rk-e">（Reddit 目前連不上）</div>'
-    left += '<div class="sec">👽 Reddit（美國）</div>' + rd
+    """回傳 (左欄 html, 右欄 html)：左＝微博（大陸），右＝Reddit（美國）。手機上欄位會直向堆疊，微博在上、Reddit 在下。"""
     wb = sc.get("weibo") or []
     wb_h = _rank_list([(f'{i}. {p["t"]}', p["u"], (p.get("tag") or "") + (f' · {p["n"]:,}' if p.get("n") else ""))
                        for i, p in enumerate(wb, 1)], 20)
-    right = '<div class="sec">🇨🇳 微博熱搜（大陸）</div>' + wb_h
+    left = '<div class="sec">🇨🇳 微博熱搜（大陸）</div>' + (_stale_note(sc.get("weibo_at", "")) if sc.get("weibo_stale") and wb else "") + wb_h
+
+    rd = ""
+    stale = set(sc.get("reddit_stale") or [])
+    rat = sc.get("reddit_at") or {}
+    for sub, lst in (sc.get("reddit") or {}).items():
+        rd += f'<div class="subhead"><b>r/{esc(sub)}</b></div>'
+        if sub in stale:
+            rd += _stale_note(rat.get(sub, ""))
+        rd += _rank_list(
+            [(p.get("z") or p["t"], p["u"], rel_epoch(p.get("p")), p["t"] if p.get("z") else "") for p in lst], 12)
+    rd = rd or '<div class="rk-e">（Reddit 目前連不上）</div>'
+    right = '<div class="sec">👽 Reddit（美國）</div>' + rd
     return left, right
 
 
