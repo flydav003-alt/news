@@ -275,6 +275,7 @@ div[role="radiogroup"][aria-label="快速篩選"] label:nth-of-type(3):has(input
 .bd-g{background:var(--warn-bg);color:var(--warn)}
 .tk{font-size:11px;background:var(--soft);border-radius:4px;padding:1px 6px;font-family:'JetBrains Mono',monospace;color:var(--tx2)}
 .tr{font-size:11.5px;color:var(--accent)!important;text-decoration:none!important}
+.rd{font-size:12px;font-weight:700;color:var(--accent)!important;text-decoration:none!important;white-space:nowrap}
 .tr:hover{text-decoration:underline!important}
 .fav{margin-left:auto;cursor:pointer;font-size:18px;line-height:1;color:var(--tx3);user-select:none;padding:0 2px}
 .fav:hover{color:var(--accent)}
@@ -490,6 +491,69 @@ FONT_CSS = f"""<style>
 .tbl{{display:block;overflow-x:auto}}
 </style>"""
 st.markdown(FONT_CSS, unsafe_allow_html=True)
+
+
+# ─────────────────────────────────────────────
+# 閱讀模式：網址 ?read=<原文網址> → 抓原文，只顯示標題 / 內文 / 圖片（無廣告）
+# ─────────────────────────────────────────────
+def _keep_qs() -> str:
+    """帶著目前的主題與字級，閱讀頁才會跟首頁長得一樣"""
+    return (f"theme={quote(st.session_state['theme_sel'])}&ts={st.session_state['font_title']}"
+            f"&bs={st.session_state['font_body']}&tb={st.session_state['font_tab']}")
+
+
+def reader_href(url: str) -> str:
+    return f"?read={quote(url, safe='')}&{_keep_qs()}"
+
+
+@st.cache_data(ttl=3600, show_spinner=False, max_entries=200)
+def _get_article(url: str) -> dict:
+    from reader import fetch_article          # 失敗會丟 RuntimeError（不會被快取）
+    return fetch_article(url)
+
+
+def render_reader(url: str) -> None:
+    st.markdown(f"""<style>
+.rdr{{max-width:780px;margin:0 auto;padding:4px 2px 40px}}
+.rdr-nav{{display:flex;justify-content:space-between;gap:10px;margin:6px 0 14px;font-size:14px}}
+.rdr-nav a{{color:var(--accent)!important;text-decoration:none!important;font-weight:700}}
+.rdr-t{{font-size:26px;font-weight:700;line-height:1.45;margin:6px 0 8px;zoom:{_ts}}}
+.rdr-m{{font-size:13px;color:var(--tx3);margin-bottom:16px}}
+.rdr-b{{zoom:{_bs};font-size:17px;line-height:1.95}}
+.rdr-b p{{margin:0 0 1.1em}} .rdr-b h3,.rdr-b h4{{margin:1.4em 0 .5em;line-height:1.45}}
+.rdr-b figure{{margin:1em 0}} .rdr-b img{{max-width:100%;height:auto;border-radius:10px;display:block}}
+.rdr-b blockquote{{margin:1em 0;padding:4px 14px;border-left:4px solid var(--accent);color:var(--tx2);background:var(--soft);border-radius:0 8px 8px 0}}
+.rdr-b ul,.rdr-b ol{{padding-left:1.4em;margin:0 0 1.1em}} .rdr-b pre{{overflow-x:auto;background:var(--soft);padding:10px;border-radius:8px}}
+.rdr-tbl{{overflow-x:auto}} .rdr-b table{{border-collapse:collapse;font-size:15px}}
+.rdr-b td{{border:1px solid var(--line);padding:4px 8px}}
+.rdr-warn{{background:var(--warn-bg);color:var(--warn);border-radius:8px;padding:8px 12px;font-size:13px;margin:8px 0}}
+</style>""", unsafe_allow_html=True)
+    home = "?" + _keep_qs()
+    nav = (f'<div class="rdr-nav"><a href="{esc(home, quote=True)}" target="_self">← 回首頁</a>'
+           f'<a href="{esc(url, quote=True)}" target="_blank" rel="noopener noreferrer">↗ 開啟原文</a></div>')
+    with st.spinner("讀取原文中…"):
+        try:
+            art = _get_article(url)
+            err = ""
+        except Exception as e:
+            art, err = None, str(e) or type(e).__name__
+    if not art:
+        st.markdown(_h(f'<div class="rdr">{nav}<div class="rdr-warn">⚠️ 無法在這裡顯示全文：{esc(err)}'
+                       f'<br>可以點右上角「開啟原文」直接前往。</div></div>'), unsafe_allow_html=True)
+        return
+    meta = " · ".join(x for x in (art["site"], art["author"], art["date"]) if x)
+    warn = ('<div class="rdr-warn">只抓到很少的內容，可能是付費牆或網站限制，完整內容請點「開啟原文」。</div>'
+            if art["chars"] < 200 else "")
+    st.markdown(_h(f'<div class="rdr">{nav}<div class="rdr-t">{esc(art["title"] or "（無標題）")}</div>'
+                   f'<div class="rdr-m">{esc(meta)}</div>{warn}'
+                   f'<div class="rdr-b">{art["image"]}{art["body_html"]}</div></div>'),
+                unsafe_allow_html=True)
+
+
+_read_url = st.query_params.get("read", "")
+if _read_url:
+    render_reader(_read_url)
+    st.stop()
 
 
 def _row_tickers(row) -> list:
@@ -856,6 +920,8 @@ def card_html(row, others=None) -> str:
             f'<li><a href="{esc(str(o.get("url", "#")), quote=True)}" target="_blank" rel="noopener">'
             f'{esc(titles(o)[0])}</a> <span>· {esc(str(o.get("source", "")))}</span></li>' for o in others[:8])
         more_h = (f'<details class="more"><summary>📚 另有 {len(others)} 則相關報導</summary><ul>{li}</ul></details>')
+    rd_h = (f'<a class="rd" href="{esc(reader_href(url), quote=True)}" target="_blank" rel="noopener">📖 閱讀</a>'
+            if url.startswith("http") else "")
     orig_h = f'<div class="co">{esc(orig)}</div>' if orig else ""
     summ_h = f'<div class="cs">✦ {esc(summ)}</div>' if summ else ""
     _sec = ",".join(x.strip() for x in str(row.get("sectors", "") or "").split(",") if x.strip())
@@ -878,7 +944,7 @@ def card_html(row, others=None) -> str:
         <a class="ct" href="{href}" target="_blank" rel="noopener">{esc(main)}</a>
         {orig_h}{summ_h}{more_h}
         <div class="cm cm-a">{badge_html(sent, sv)}{geo}{tickers_chips(row)}</div>
-        <div class="cm cm-b"><span>{esc(str(row.get("source", "")))}</span><span>· {relative_time(row.get("published_at"))}</span>{translate_link(row)}<span class="fav" role="button" title="收藏">☆</span></div>
+        <div class="cm cm-b"><span>{esc(str(row.get("source", "")))}</span><span>· {relative_time(row.get("published_at"))}</span>{rd_h}{translate_link(row)}<span class="fav" role="button" title="收藏">☆</span></div>
       </div>
     </div>""")
 
@@ -2104,7 +2170,7 @@ _READ_JS = """
       if (P.confirm('確定清除全部收藏？')) { saveFavs([]); markFav(); buildFav(); }
       return;
     }
-    var a = e.target.closest ? e.target.closest('a[href^="http"]') : null;
+    var a = e.target.closest ? e.target.closest('a[href^="http"], a.rd') : null;
     var clr = e.target.closest ? e.target.closest('.fn-reco-clear') : null;
     if (clr) {
       e.preventDefault();
