@@ -55,8 +55,9 @@ HEADERS = {
     "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.5",
     "Accept-Encoding": "gzip, deflate",
 }
-TIMEOUT   = 20
+TIMEOUT   = (5, 12)     # (連線, 讀取) 秒；以前單一來源最久會卡 20 秒
 MAX_ITEMS = 50
+CRAWL_WORKERS = 10       # 同時抓幾個來源（Google News 約 20 個，太高可能被限流，可視情況調 6~12）
 
 
 def _gnews(query: str, en: bool = False, when: str = "1d", cn: bool = False) -> str:
@@ -308,7 +309,7 @@ def _parse_feed(url: str):
         txt = _CTRL_RE.sub("", txt)
         # feedparser 對含 encoding 宣告的 str 會警告，改丟 bytes
         feed = feedparser.parse(txt.encode("utf-8"))
-        if feed.entries:
+        if feed.entries or r.status_code < 400:
             return feed
     except Exception as e:
         logger.debug(f"requests 抓取失敗，改用 feedparser 直連：{e}")
@@ -385,21 +386,26 @@ def run_crawl(enabled_names: Optional[list[str]] = None,
     """
     all_articles, logs = [], []
 
+    todo = []
     for src in SOURCES:
         if enabled_names is not None:
             if src["name"] not in enabled_names:
                 continue
         elif not src["enabled"]:
             continue
+        todo.append(src)
 
-        articles = fetch_rss(src)
+    # 以前是一個一個排隊抓（約 55 個來源，慢的來源最多各等 20 秒），現在同時抓 CRAWL_WORKERS 個。
+    # ex.map 會照 SOURCES 原本順序回傳，所以文章與 log 順序、下游行為都跟以前一樣。
+    with ThreadPoolExecutor(max_workers=CRAWL_WORKERS) as ex:
+        results = list(ex.map(fetch_rss, todo))
+    for src, articles in zip(todo, results):
         logs.append({
             "source": src["name"],
             "status": "success" if articles else "empty",
             "count":  len(articles),
         })
         all_articles.extend(articles)
-        time.sleep(0.3)
 
     if fetch_og:
         known = known_urls or set()
