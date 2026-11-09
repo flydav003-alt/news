@@ -171,11 +171,7 @@ def _calc_importance(data: dict) -> float:
 
 
 # ── 存入 ──────────────────────────────────────────────────────────────────────
-def save_article(db: Session, data: dict) -> bool:
-    if _is_duplicate(db, data.get("title", ""), data.get("url", "")):
-        return False
-
-    hash_id = _make_hash(data.get("title", ""), data.get("url", ""))
+def _add_article(db: Session, data: dict, hash_id: str) -> bool:
 
     td = data.get("ticker_details", [])
     if td and hasattr(td[0], "__dataclass_fields__"):
@@ -220,8 +216,46 @@ def save_article(db: Session, data: dict) -> bool:
         fetched_at          = datetime.now(timezone.utc),
     )
     db.add(art)
+    return True
+
+
+def save_article(db: Session, data: dict) -> bool:
+    if _is_duplicate(db, data.get("title", ""), data.get("url", "")):
+        return False
+    _add_article(db, data, _make_hash(data.get("title", ""), data.get("url", "")))
     db.commit()
     return True
+
+
+def save_articles(db: Session, items: list) -> tuple:
+    """批次版 save_article：判斷邏輯與 _is_duplicate 相同（hash 相同 或 近 6 小時標題相似度 > 0.82），
+    但近 6 小時標題只查一次（以前每篇都重查 + 逐篇比對 + 逐篇 commit，395 篇要約 19 秒），最後一次 commit。
+    回傳 (新增數, 略過數)。"""
+    existing = {h for (h,) in db.query(NewsArticle.hash_id).all()}
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=6)
+    recent = [t.lower() for (t,) in db.query(NewsArticle.title).filter(NewsArticle.fetched_at >= cutoff).all()]
+    saved = skipped = 0
+    for data in items:
+        title, url = data.get("title", ""), data.get("url", "")
+        h = _make_hash(title, url)
+        low = title.lower()
+        dup = h in existing
+        if not dup:
+            sm = SequenceMatcher(None, "", low)          # 固定 seq2，SequenceMatcher 會快取它的分析
+            for et in recent:
+                sm.set_seq1(et)
+                if sm.real_quick_ratio() > 0.82 and sm.quick_ratio() > 0.82 and sm.ratio() > 0.82:
+                    dup = True
+                    break
+        if dup:
+            skipped += 1
+            continue
+        if _add_article(db, data, h):
+            existing.add(h)
+            recent.append(low)
+            saved += 1
+    db.commit()
+    return saved, skipped
 
 
 def log_crawl(db: Session, source: str, status: str,
