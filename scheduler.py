@@ -21,7 +21,7 @@ from datetime import datetime, timezone, timedelta
 
 from analyzer import Analyzer
 from crawler import run_crawl, is_routine_revenue
-from database import (SessionLocal, init_db, save_article, log_crawl,
+from database import (SessionLocal, init_db, save_article, save_articles, log_crawl,
                       known_urls, export_json, import_json)
 from groq_analyzer import (should_use_ai, groq_analyze, groq_tech_summary, groq_translate_titles,
                            _clear_ai_fields, _is_rate_limited)
@@ -52,15 +52,18 @@ def _needs_translation(title: str) -> bool:
 
 
 _translate_err_logged = False
+_translate_blocked = False          # Google 回 TooManyRequests 後設為 True，備援翻譯就不再繼續撞
 
 
 def _translate_one(title: str) -> str:
     """備援：Google 翻譯（deep_translator）。錯誤只記一次 WARNING，方便從 log 診斷。"""
-    global _translate_err_logged
+    global _translate_err_logged, _translate_blocked
     try:
         from deep_translator import GoogleTranslator
         return GoogleTranslator(source="auto", target="zh-TW").translate(title) or ""
     except Exception as e:
+        if "TooManyRequests" in type(e).__name__ or "too many requests" in str(e).lower():
+            _translate_blocked = True
         if not _translate_err_logged:
             logger.warning(f"deep_translator 失敗（之後同類錯誤不再重複）：{type(e).__name__}: {e}")
             _translate_err_logged = True
@@ -80,7 +83,13 @@ def translate_titles(items: list[dict], limit: int = 150, api_key: str = "") -> 
     if api_key:
         for i in range(0, len(todo), 25):
             chunk = todo[i:i + 25]
-            out = groq_translate_titles([it["title"] for it in chunk], api_key)
+            titles = [it["title"] for it in chunk]
+            out = groq_translate_titles(titles, api_key)
+            if (not out or len(out) != len(titles)) and not _is_rate_limited():
+                h = len(titles) // 2
+                a = groq_translate_titles(titles[:h], api_key) if h else []
+                b = groq_translate_titles(titles[h:], api_key)
+                out = (a if len(a) == h else [""] * h) + (b if len(b) == len(titles) - h else [""] * (len(titles) - h))
             for it, zh in zip(chunk, out):
                 if zh and zh != it["title"]:
                     it["title_zh"] = zh
@@ -91,8 +100,17 @@ def translate_titles(items: list[dict], limit: int = 150, api_key: str = "") -> 
 
     left = [it for it in todo if not it.get("title_zh")]
     if left:
-        with ThreadPoolExecutor(max_workers=8) as ex:
-            results = list(ex.map(lambda it: _translate_one(it["title"]), left))
+        blocked = {"v": False}
+
+        def _tr(it):
+            if blocked["v"]:
+                return ""
+            zh = _translate_one(it["title"])
+            if not zh and _translate_err_logged and _translate_blocked:
+                blocked["v"] = True
+            return zh
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            results = list(ex.map(_tr, left))
         for it, zh in zip(left, results):
             if zh and zh != it["title"]:
                 it["title_zh"] = zh
@@ -237,11 +255,7 @@ def crawl_and_save(enabled_names=None,
     # ── Step 4：存庫 ───────────────────────────────────────────
     db = SessionLocal()
     try:
-        for item in fresh:
-            if save_article(db, item):
-                saved += 1
-            else:
-                skipped += 1
+        saved, skipped = save_articles(db, fresh)       # 批次存庫（一次 commit），比逐篇 save_article 快很多
         for lg in logs:
             log_crawl(db, source=lg["source"], status=lg["status"],
                       count=lg["count"], new_saved=0, skipped=0)
