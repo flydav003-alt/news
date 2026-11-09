@@ -49,7 +49,7 @@ PROXY_FIRST = {"www.ptt.cc", "s.weibo.com", "www.reddit.com", "old.reddit.com",
 PROXY_AFTER = {"www.twse.com.tw", "openapi.twse.com.tw", "weibo.com"}   # weibo.com：代理一律 403，直連才通，所以改先直連
 
 
-def _once(url, params, headers, timeout, cookies, via_proxy):
+def _once(url, params, headers, timeout, cookies, via_proxy, proxy_extra=10):
     try:
         if via_proxy:
             full = requests.Request("GET", url, params=params).prepare().url
@@ -57,7 +57,7 @@ def _once(url, params, headers, timeout, cookies, via_proxy):
             if cookies:
                 h["X-Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
             h["X-Proxy-Key"] = PROXY_KEY   # 金鑰放標頭，不再出現在網址 / Cloudflare 存取紀錄
-            r = requests.get(PROXY_URL, params={"url": full}, headers=h, timeout=timeout + 10)
+            r = requests.get(PROXY_URL, params={"url": full}, headers=h, timeout=timeout + proxy_extra)
         else:
             r = requests.get(url, params=params, headers=headers or UA, timeout=timeout, cookies=cookies)
         if r.status_code != 200:
@@ -69,7 +69,7 @@ def _once(url, params, headers, timeout, cookies, via_proxy):
         return None
 
 
-def _get(url, params=None, headers=None, timeout=25, gap=1.0, cookies=None):
+def _get(url, params=None, headers=None, timeout=25, gap=1.0, cookies=None, deadline=None, proxy_extra=10):
     """禮貌地 GET：兩次請求至少間隔 gap 秒。依網站決定直連或走代理。失敗回 None。"""
     from urllib.parse import urlparse
     wait = gap - (time.time() - _last_call[0])
@@ -84,7 +84,13 @@ def _get(url, params=None, headers=None, timeout=25, gap=1.0, cookies=None):
     else:
         order = (False,)
     for via in order:
-        r = _once(url, params, headers, timeout, cookies, via)
+        tmo = timeout
+        if deadline is not None:                      # 有整體時間上限：剩多少時間就最多等多少，用完就不再試
+            rem = deadline - time.time()
+            if rem <= 0.5:
+                break
+            tmo = min(timeout, rem)
+        r = _once(url, params, headers, tmo, cookies, via, proxy_extra)
         if r is not None:
             return r
     return None
@@ -643,12 +649,14 @@ PTT_ENABLED = False
 PTT_BOARDS = ["Gossiping", "HatePolitics", "Stock", "Baseball", "NBA"]
 REDDIT_SUBS = [("popular", 12), ("worldnews", 8), ("technology", 8)]
 REDDIT_HOSTS = ("www.reddit.com",)      # old.reddit.com 在歷次 log 都是 403，先不試（要的話加回 "old.reddit.com"）
-REDDIT_GAP = 3.0                        # 兩次 Reddit 請求至少間隔幾秒（連續請求容易被 429）
+REDDIT_GAP = 2.0                        # 兩次 Reddit 請求至少間隔幾秒
+REDDIT_TIMEOUT = 6                      # 單次請求最多等幾秒（代理也一樣，不再額外加 10 秒）
+REDDIT_BUDGET = 20                      # 整段 Reddit 抓取最多花幾秒，用完就放棄、沿用舊資料
 
 
-def _feed(url, gap=1.0):
+def _feed(url, gap=1.0, **kw):
     import feedparser
-    r = _get(url, headers={"User-Agent": UA["User-Agent"], "Accept": "application/atom+xml,application/xml,*/*"}, gap=gap)
+    r = _get(url, headers={"User-Agent": UA["User-Agent"], "Accept": "application/atom+xml,application/xml,*/*"}, gap=gap, **kw)
     if r is None:
         return None
     fp = feedparser.parse(r.content)
@@ -710,12 +718,17 @@ def fetch_ptt(pages: int = 2):
 
 def fetch_reddit():
     out, errs = {}, []
+    deadline = time.time() + REDDIT_BUDGET
     for sub, n in REDDIT_SUBS:
         ent = None
-        for host in REDDIT_HOSTS:
-            ent = _feed(f"https://{host}/r/{sub}/hot/.rss?limit=25", gap=REDDIT_GAP)
-            if ent:
-                break
+        if time.time() < deadline:
+            for host in REDDIT_HOSTS:
+                ent = _feed(f"https://{host}/r/{sub}/hot/.rss?limit=25", gap=REDDIT_GAP,
+                            timeout=REDDIT_TIMEOUT, deadline=deadline, proxy_extra=0)
+                if ent:
+                    break
+        else:
+            logger.warning(f"Reddit 時間預算（{REDDIT_BUDGET} 秒）用完，略過 r/{sub}，沿用舊資料")
         if ent:
             out[sub] = [{"t": _tags(e.get("title", "")), "u": e.get("link", ""), "p": _ts(e)} for e in ent[:n]]
         else:
