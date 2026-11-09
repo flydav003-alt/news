@@ -275,7 +275,15 @@ div[role="radiogroup"][aria-label="快速篩選"] label:nth-of-type(3):has(input
 .bd-g{background:var(--warn-bg);color:var(--warn)}
 .tk{font-size:11px;background:var(--soft);border-radius:4px;padding:1px 6px;font-family:'JetBrains Mono',monospace;color:var(--tx2)}
 .tr{font-size:11.5px;color:var(--accent)!important;text-decoration:none!important}
-.rd{font-size:12px;font-weight:700;color:var(--accent)!important;text-decoration:none!important;white-space:nowrap}
+/* 頭條大圖外層 / 頭條右側小列表：左邊是連結區 */
+.hero-mw{position:relative;display:flex}.hero-mw .hero-main{flex:1}
+.si-a{display:flex;gap:10px;flex:1;min-width:0;align-items:center;text-decoration:none!important;color:inherit!important}
+.si-a>div{min-width:0}
+.sg-l li{margin:0 0 6px}
+/* 閱讀頁底部「開啟原文」 */
+.rdr-src{display:flex;align-items:center;justify-content:center;min-height:46px;margin:28px 0 0;border:1px solid var(--accent);border-radius:12px;
+  background:var(--soft);color:var(--accent)!important;font-weight:700;font-size:15px;text-decoration:none!important}
+.rdr-src:hover,.rdr-src:active{background:var(--accent);color:#fff!important}
 .tr:hover{text-decoration:underline!important}
 .fav{margin-left:auto;cursor:pointer;font-size:18px;line-height:1;color:var(--tx3);user-select:none;padding:0 2px}
 .fav:hover{color:var(--accent)}
@@ -529,8 +537,9 @@ def render_reader(url: str) -> None:
 .rdr-warn{{background:var(--warn-bg);color:var(--warn);border-radius:8px;padding:8px 12px;font-size:13px;margin:8px 0}}
 </style>""", unsafe_allow_html=True)
     home = "?" + _keep_qs()
-    nav = (f'<div class="rdr-nav"><a href="{esc(home, quote=True)}" target="_self">← 回首頁</a>'
-           f'<a href="{esc(url, quote=True)}" target="_blank" rel="noopener noreferrer">↗ 開啟原文</a></div>')
+    nav = f'<div class="rdr-nav"><a href="{esc(home, quote=True)}" target="_self">← 回首頁</a></div>'
+    src_btn = (f'<a class="rdr-src" href="{esc(url, quote=True)}" target="_blank" rel="noopener noreferrer">'
+               f'↗ 開啟原文網頁</a>')
     with st.spinner("讀取原文中…"):
         try:
             art = _get_article(url)
@@ -539,14 +548,14 @@ def render_reader(url: str) -> None:
             art, err = None, str(e) or type(e).__name__
     if not art:
         st.markdown(_h(f'<div class="rdr">{nav}<div class="rdr-warn">⚠️ 無法在這裡顯示全文：{esc(err)}'
-                       f'<br>可以點右上角「開啟原文」直接前往。</div></div>'), unsafe_allow_html=True)
+                       f'</div>{src_btn}</div>'), unsafe_allow_html=True)
         return
     meta = " · ".join(x for x in (art["site"], art["author"], art["date"]) if x)
-    warn = ('<div class="rdr-warn">只抓到很少的內容，可能是付費牆或網站限制，完整內容請點「開啟原文」。</div>'
+    warn = ('<div class="rdr-warn">只抓到很少的內容，可能是付費牆或網站限制，完整內容請點最下方「開啟原文網頁」。</div>'
             if art["chars"] < 200 else "")
     st.markdown(_h(f'<div class="rdr">{nav}<div class="rdr-t">{esc(art["title"] or "（無標題）")}</div>'
                    f'<div class="rdr-m">{esc(meta)}</div>{warn}'
-                   f'<div class="rdr-b">{art["image"]}{art["body_html"]}</div></div>'),
+                   f'<div class="rdr-b">{art["image"]}{art["body_html"]}</div>{src_btn}</div>'),
                 unsafe_allow_html=True)
 
 
@@ -909,7 +918,7 @@ def card_html(row, others=None) -> str:
     cls = {"bullish": "bull", "bearish": "bear"}.get(sent, "")
     main, orig = titles(row)
     url = str(row.get("url", "") or "")
-    href = esc(url, quote=True) if url else "#"
+    href = esc(reader_href(url), quote=True) if url.startswith("http") else "#"
     summ = str(row.get("ai_summary", "") or "")
     geo = '<span class="bd bd-g">⚑ 地緣</span>' if row.get("is_geo") else ""
     has_img = str(row.get("image_url", "") or "").startswith("http")
@@ -917,11 +926,9 @@ def card_html(row, others=None) -> str:
     more_h = ""
     if others:
         li = "".join(
-            f'<li><a href="{esc(str(o.get("url", "#")), quote=True)}" target="_blank" rel="noopener">'
+            f'<li><a href="{esc(reader_href(str(o.get("url", ""))) if str(o.get("url", "")).startswith("http") else "#", quote=True)}" target="_blank" rel="noopener">'
             f'{esc(titles(o)[0])}</a> <span>· {esc(str(o.get("source", "")))}</span></li>' for o in others[:8])
         more_h = (f'<details class="more"><summary>📚 另有 {len(others)} 則相關報導</summary><ul>{li}</ul></details>')
-    rd_h = (f'<a class="rd" href="{esc(reader_href(url), quote=True)}" target="_blank" rel="noopener">📖 閱讀</a>'
-            if url.startswith("http") else "")
     orig_h = f'<div class="co">{esc(orig)}</div>' if orig else ""
     summ_h = f'<div class="cs">✦ {esc(summ)}</div>' if summ else ""
     _sec = ",".join(x.strip() for x in str(row.get("sectors", "") or "").split(",") if x.strip())
@@ -944,7 +951,7 @@ def card_html(row, others=None) -> str:
         <a class="ct" href="{href}" target="_blank" rel="noopener">{esc(main)}</a>
         {orig_h}{summ_h}{more_h}
         <div class="cm cm-a">{badge_html(sent, sv)}{geo}{tickers_chips(row)}</div>
-        <div class="cm cm-b"><span>{esc(str(row.get("source", "")))}</span><span>· {relative_time(row.get("published_at"))}</span>{rd_h}{translate_link(row)}<span class="fav" role="button" title="收藏">☆</span></div>
+        <div class="cm cm-b"><span>{esc(str(row.get("source", "")))}</span><span>· {relative_time(row.get("published_at"))}</span>{translate_link(row)}<span class="fav" role="button" title="收藏">☆</span></div>
       </div>
     </div>""")
 
@@ -989,19 +996,22 @@ def hero_html(df) -> str:
     side = d.iloc[1:4]
     sent, sv = eff_sent(main)
     mt, mo = titles(main)
-    href = esc(str(main.get("url", "") or "#"), quote=True)
+    _mu = str(main.get("url", "") or "")
+    href = esc(reader_href(_mu), quote=True) if _mu.startswith("http") else "#"
     mo_h = f'<div class="hero-o">{esc(mo)}</div>' if mo else ""
     side_h = ""
     for _, r in side.iterrows():
         s2, v2 = eff_sent(r)
         t2, _o = titles(r)
-        h2 = esc(str(r.get("url", "") or "#"), quote=True)
-        side_h += (f'<a class="si" href="{h2}" target="_blank" rel="noopener">{thumb_html(r)}'
+        u2 = str(r.get("url", "") or "")
+        h2 = esc(reader_href(u2), quote=True) if u2.startswith("http") else "#"
+        side_h += (f'<div class="si"><a class="si-a" href="{h2}" target="_blank" rel="noopener">{thumb_html(r)}'
                    f'<div><div class="si-t">{esc(t2)}</div>'
                    f'<div class="si-m">{badge_html(s2, v2)} {esc(str(r.get("source", "")))} · '
-                   f'{relative_time(r.get("published_at"))}</div></div></a>')
+                   f'{relative_time(r.get("published_at"))}</div></div></a></div>')
     return _h(f"""
     <div class="hero">
+      <div class="hero-mw">
       <a class="hero-main" href="{href}" target="_blank" rel="noopener">
         {thumb_html(main)}
         <div class="hero-ov">
@@ -1009,7 +1019,7 @@ def hero_html(df) -> str:
           <div class="hero-m">{badge_html(sent, sv)}<span>{esc(str(main.get("source", "")))}</span>
           <span>{relative_time(main.get("published_at"))}</span></div>
         </div>
-      </a>
+      </a></div>
       <div class="hero-side">{side_h}</div>
     </div>""")
 
@@ -1104,8 +1114,8 @@ def detect_surge(df, top=6):
 def surge_html(items) -> str:
     cards = ""
     for it in items:
-        li = "".join(f'<li><a href="{esc(u, quote=True)}" target="_blank" rel="noopener">{esc(t)}</a></li>'
-                     for t, u in it["heads"])
+        li = "".join(f'<li><a href="{esc(reader_href(u) if str(u).startswith("http") else "#", quote=True)}" '
+                     f'target="_blank" rel="noopener">{esc(t)}</a></li>' for t, u in it["heads"])
         cards += (f'<div class="sg">'
                   f'<div class="sg-h"><span class="sg-tk">{esc(it["code"])}</span>'
                   f'<span class="sg-nm">{esc(it["name"])}</span>'
@@ -1577,7 +1587,7 @@ with tab_home:
                 s, _v = eff_sent(r)
                 imp = "利多" if s == "bullish" else ("利空" if s == "bearish" else "中性")
                 t, _o = titles(r)
-                g += (f'<div class="geo"><a href="{esc(str(r.get("url", "#")), quote=True)}" target="_blank" '
+                g += (f'<div class="geo"><a href="{esc(reader_href(str(r.get("url", ""))) if str(r.get("url", "")).startswith("http") else "#", quote=True)}" target="_blank" '
                       f'rel="noopener">{esc(t)}</a> <span style="color:var(--tx3)">· {imp}</span></div>')
             st.markdown(f'<div class="geo-grid">{g}</div>', unsafe_allow_html=True)
 
@@ -1913,6 +1923,8 @@ _READ_JS = """
   function jset(k, v){ try { P.localStorage.setItem(k, JSON.stringify(v)); } catch(e) {} }
   try { P.localStorage.removeItem('finnews_wl'); } catch(e) {}
   S = new Set(jget(K, '[]'));
+  function K2(h){ var m = /[?&]read=([^&]*)/.exec(h || ''); if (!m) return h; try { return decodeURIComponent(m[1]); } catch(e) { return h; } }
+  function rdHref(u){ try { var sp = new URLSearchParams(P.location.search); sp.set('read', K2(u)); return '?' + sp.toString(); } catch(e) { return u; } }
   function saveRead(){ jset(K, Array.from(S).slice(-2000)); }
   function mainLink(el){
     if (el.classList.contains('card')) return el.querySelector('a.ct');
@@ -1921,7 +1933,7 @@ _READ_JS = """
   function markRead(){
     D.querySelectorAll('.card, .si').forEach(function(el){
       var a = mainLink(el);
-      if (a && S.has(a.href)) el.classList.add('read');
+      if (a && S.has(K2(a.href))) el.classList.add('read');
     });
   }
   // ── 偏好：每次點擊替該卡片的股票/類股/類別/來源加分，半衰期 14 天 ──
@@ -1970,7 +1982,7 @@ _READ_JS = """
       .sort(function(a, b){ return eff(p, b) - eff(p, a); }).slice(0, 4).map(label);
     setText(chips, top.length ? '· 你常看：' + top.join('、') : '');
     var cards = Array.prototype.slice.call(pool.querySelectorAll('.card')).filter(function(c){
-      var a = mainLink(c); return a && !S.has(a.href);
+      var a = mainLink(c); return a && !S.has(K2(a.href));
     });
     var scored = cards.map(function(c){ return {c: c, s: score(c, p)}; }).sort(function(a, b){ return b.s - a.s; });
     var pick = [], secCount = {};
@@ -1995,19 +2007,19 @@ _READ_JS = """
   function favs(){ return jget(FK, '[]'); }
   function saveFavs(a){ jset(FK, a.slice(0, 300)); }
   function markFav(){
-    var set = new Set(favs().map(function(f){ return f.u; }));
+    var set = new Set(favs().map(function(f){ return K2(f.u); }));
     D.querySelectorAll('.card .fav').forEach(function(el){
       var c = el.closest('.card'), a = c && c.querySelector('a.ct');
-      var on = !!(a && set.has(a.href));
+      var on = !!(a && set.has(K2(a.href)));
       if (el.classList.contains('on') !== on) { el.classList.toggle('on', on); el.textContent = on ? '★' : '☆'; }
     });
   }
   function toggleFav(card){
     var a = card.querySelector('a.ct'); if (!a) return;
     var d = card.dataset || {}, list = favs(), i = -1;
-    list.forEach(function(f, k){ if (f.u === a.href) i = k; });
+    list.forEach(function(f, k){ if (K2(f.u) === K2(a.href)) i = k; });
     if (i >= 0) list.splice(i, 1);
-    else list.unshift({u: a.href, t: a.textContent.trim(), s: d.src || '', p: parseInt(d.ts || '0', 10), b: d.sent || '', a: Date.now()});
+    else list.unshift({u: K2(a.href), t: a.textContent.trim(), s: d.src || '', p: parseInt(d.ts || '0', 10), b: d.sent || '', a: Date.now()});
     saveFavs(list); markFav(); buildFav();
   }
   function removeFav(u){ saveFavs(favs().filter(function(f){ return f.u !== u; })); markFav(); buildFav(); }
@@ -2036,7 +2048,7 @@ _READ_JS = """
     box.innerHTML = '';
     list.forEach(function(f){
       var c = mk('div', 'favc'), b = mk('div', 'cb');
-      var a = mk('a', 'ct', f.t); a.href = f.u; a.target = '_blank'; a.rel = 'noopener';
+      var a = mk('a', 'ct', f.t); a.href = rdHref(f.u); a.target = '_blank'; a.rel = 'noopener';
       var m = mk('div', 'cm');
       if (f.b) m.appendChild(mk('span', 'bd ' + (f.b.indexOf('利多') === 0 ? 'bd-b' : (f.b.indexOf('利空') === 0 ? 'bd-d' : 'bd-n')), f.b));
       m.appendChild(mk('span', '', f.s));
@@ -2170,7 +2182,7 @@ _READ_JS = """
       if (P.confirm('確定清除全部收藏？')) { saveFavs([]); markFav(); buildFav(); }
       return;
     }
-    var a = e.target.closest ? e.target.closest('a[href^="http"], a.rd') : null;
+    var a = e.target.closest ? e.target.closest('a[href^="http"], a[href^="?read="]') : null;
     var clr = e.target.closest ? e.target.closest('.fn-reco-clear') : null;
     if (clr) {
       e.preventDefault();
@@ -2182,7 +2194,7 @@ _READ_JS = """
     var box = a.closest('.card, .si');
     if (!box) return;
     var m = mainLink(box);
-    S.add(a.href); if (m) S.add(m.href);
+    S.add(K2(a.href)); if (m) S.add(K2(m.href));
     saveRead();
     if (box.classList.contains('card')) learn(box);
     markRead();
