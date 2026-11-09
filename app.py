@@ -275,24 +275,7 @@ div[role="radiogroup"][aria-label="快速篩選"] label:nth-of-type(3):has(input
 .bd-g{background:var(--warn-bg);color:var(--warn)}
 .tk{font-size:11px;background:var(--soft);border-radius:4px;padding:1px 6px;font-family:'JetBrains Mono',monospace;color:var(--tx2)}
 .tr{font-size:11.5px;color:var(--accent)!important;text-decoration:none!important}
-.rd{display:inline-flex;align-items:center;justify-content:center;gap:4px;min-height:34px;padding:0 14px;box-sizing:border-box;
-  font-size:13px;font-weight:700;color:var(--accent)!important;background:var(--soft);border:1px solid var(--accent);
-  border-radius:999px;text-decoration:none!important;white-space:nowrap;cursor:pointer;-webkit-tap-highlight-color:transparent}
-.rd:hover,.rd:active{background:var(--accent);color:#fff!important}
-.cm-b .rd{margin-left:2px}
-/* 頭條大圖：浮在右上角 */
-.hero-mw{position:relative;display:flex}.hero-mw .hero-main{flex:1}
-.rd-ov{position:absolute;top:12px;right:12px;z-index:2;background:rgba(20,14,4,.62);color:#fff!important;border-color:rgba(255,255,255,.55);backdrop-filter:blur(4px)}
-.rd-ov:hover,.rd-ov:active{background:var(--accent)}
-/* 頭條右側小列表：左邊是原文連結區，右邊是閱讀鈕 */
-.si-a{display:flex;gap:10px;flex:1;min-width:0;align-items:center;text-decoration:none!important;color:inherit!important}
-.si-a>div{min-width:0}
-.si .rd{flex-shrink:0;padding:0 12px}
-@media(max-width:480px){.si .rd .rdt{display:none}.si .rd{padding:0;width:38px;min-height:38px}}
-/* 題材升溫清單：標題後面接小膠囊 */
-.sg-l li{margin:0 0 6px}
-.sg-l a.rd{min-height:28px;padding:0 10px;margin-left:6px;font-size:12px;color:var(--accent)!important;vertical-align:middle}
-.sg-l a.rd:hover,.sg-l a.rd:active{color:#fff!important}
+.rd{font-size:12px;font-weight:700;color:var(--accent)!important;text-decoration:none!important;white-space:nowrap}
 .tr:hover{text-decoration:underline!important}
 .fav{margin-left:auto;cursor:pointer;font-size:18px;line-height:1;color:var(--tx3);user-select:none;padding:0 2px}
 .fav:hover{color:var(--accent)}
@@ -1008,24 +991,17 @@ def hero_html(df) -> str:
     mt, mo = titles(main)
     href = esc(str(main.get("url", "") or "#"), quote=True)
     mo_h = f'<div class="hero-o">{esc(mo)}</div>' if mo else ""
-    _mu = str(main.get("url", "") or "")
-    main_rd = (f'<a class="rd rd-ov" href="{esc(reader_href(_mu), quote=True)}" target="_blank" rel="noopener">📖 閱讀</a>'
-               if _mu.startswith("http") else "")
     side_h = ""
     for _, r in side.iterrows():
         s2, v2 = eff_sent(r)
         t2, _o = titles(r)
         h2 = esc(str(r.get("url", "") or "#"), quote=True)
-        u2 = str(r.get("url", "") or "")
-        rd2 = (f'<a class="rd" href="{esc(reader_href(u2), quote=True)}" target="_blank" rel="noopener" '
-               f'title="閱讀">📖<span class="rdt">閱讀</span></a>' if u2.startswith("http") else "")
-        side_h += (f'<div class="si"><a class="si-a" href="{h2}" target="_blank" rel="noopener">{thumb_html(r)}'
+        side_h += (f'<a class="si" href="{h2}" target="_blank" rel="noopener">{thumb_html(r)}'
                    f'<div><div class="si-t">{esc(t2)}</div>'
                    f'<div class="si-m">{badge_html(s2, v2)} {esc(str(r.get("source", "")))} · '
-                   f'{relative_time(r.get("published_at"))}</div></div></a>{rd2}</div>')
+                   f'{relative_time(r.get("published_at"))}</div></div></a>')
     return _h(f"""
     <div class="hero">
-      <div class="hero-mw">{main_rd}
       <a class="hero-main" href="{href}" target="_blank" rel="noopener">
         {thumb_html(main)}
         <div class="hero-ov">
@@ -1033,7 +1009,7 @@ def hero_html(df) -> str:
           <div class="hero-m">{badge_html(sent, sv)}<span>{esc(str(main.get("source", "")))}</span>
           <span>{relative_time(main.get("published_at"))}</span></div>
         </div>
-      </a></div>
+      </a>
       <div class="hero-side">{side_h}</div>
     </div>""")
 
@@ -1128,9 +1104,7 @@ def detect_surge(df, top=6):
 def surge_html(items) -> str:
     cards = ""
     for it in items:
-        li = "".join(f'<li><a href="{esc(u, quote=True)}" target="_blank" rel="noopener">{esc(t)}</a>'
-                     + (f'<a class="rd" href="{esc(reader_href(u), quote=True)}" target="_blank" rel="noopener">📖 閱讀</a>'
-                        if str(u).startswith("http") else "") + '</li>'
+        li = "".join(f'<li><a href="{esc(u, quote=True)}" target="_blank" rel="noopener">{esc(t)}</a></li>'
                      for t, u in it["heads"])
         cards += (f'<div class="sg">'
                   f'<div class="sg-h"><span class="sg-tk">{esc(it["code"])}</span>'
