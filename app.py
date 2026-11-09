@@ -544,8 +544,11 @@ def render_reader(url: str) -> None:
 .rdr-b td{{border:1px solid var(--line);padding:4px 8px}}
 .rdr-warn{{background:var(--warn-bg);color:var(--warn);border-radius:8px;padding:8px 12px;font-size:13px;margin:8px 0}}
 </style>""", unsafe_allow_html=True)
+    _embed = st.query_params.get("embed", "") == "1"      # 在首頁覆蓋層（iframe）裡開啟時，關閉鈕由首頁提供
     home = "?" + _keep_qs() + "&back=1"      # back=1：首頁會回到剛剛的分頁與捲動位置
     nav = f'<div class="rdr-nav"><a href="{esc(home, quote=True)}" target="_self">← 回首頁</a></div>'
+    if _embed:
+        nav = ""
     src_btn = (f'<a class="rdr-src" href="{esc(url, quote=True)}" target="_blank" rel="noopener noreferrer">'
                f'↗ 開啟原文網頁</a>')
     with st.spinner("讀取原文中…"):
@@ -2248,6 +2251,38 @@ _READ_JS = """
       if (ok >= 3 || n > 40) { clearInterval(iv); restoring = false; }
     }, 150);
   }
+  // ── 手機：閱讀頁用全螢幕覆蓋層開啟（首頁不重新載入），關閉＝瞬間回到原位 ──
+  var ov = null;
+  function openReader(href){
+    if (ov) return;
+    var app = D.querySelector('.stApp') || D.body;
+    var cs = P.getComputedStyle(app);
+    var bg = cs.backgroundColor, ac = (cs.getPropertyValue('--accent') || '').trim() || '#b45309';
+    if (!bg || bg === 'rgba(0, 0, 0, 0)') bg = '#fff';
+    ov = D.createElement('div');
+    ov.style.cssText = 'position:fixed;left:0;top:0;right:0;bottom:0;z-index:2147483000;background:' + bg;
+    var ld = D.createElement('div');
+    ld.textContent = '讀取中…';
+    ld.style.cssText = 'position:absolute;left:0;right:0;top:40%;text-align:center;font-size:15px;opacity:.6';
+    var fr = D.createElement('iframe');
+    fr.src = href + (href.indexOf('?') >= 0 ? '&' : '?') + 'embed=1';
+    fr.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:100%;border:0;background:transparent';
+    var bk = D.createElement('a');
+    bk.textContent = '← 回首頁';
+    bk.href = '#';
+    bk.style.cssText = 'position:absolute;left:14px;bottom:calc(16px + env(safe-area-inset-bottom,0px));display:flex;align-items:center;min-height:46px;padding:0 18px;border-radius:999px;color:#fff;font-weight:700;font-size:15px;text-decoration:none;box-shadow:0 3px 12px rgba(0,0,0,.28);background:' + ac;
+    bk.addEventListener('click', function(ev){ ev.preventDefault(); ev.stopPropagation(); closeReader(false); });
+    ov.appendChild(ld); ov.appendChild(fr); ov.appendChild(bk);
+    D.body.appendChild(ov);
+    try { P.history.pushState({fnrd: 1}, ''); } catch(x) {}          // 讓手機「上一頁」也只是關閉覆蓋層
+  }
+  function closeReader(fromPop){
+    if (!ov) return;
+    ov.remove(); ov = null;
+    if (!fromPop) { try { if (P.history.state && P.history.state.fnrd) P.history.back(); } catch(x) {} }
+  }
+  function onPop(){ closeReader(true); }
+  P.addEventListener('popstate', onPop);
   function onClick(e){
     var tg = e.target, cl = function(sel){ return tg && tg.closest ? tg.closest(sel) : null; };
     var dn = cl('[data-dens]');
@@ -2266,8 +2301,8 @@ _READ_JS = """
     }
     var a = e.target.closest ? e.target.closest('a[href^="http"], a[href^="?read="]') : null;
     if (a && (a.getAttribute('href') || '').indexOf('?read=') === 0) {
-      savePos(a);                                         // 記住目前分頁與捲動位置
-      if (isMobile()) a.target = '_self';                 // 手機：同一個分頁進閱讀模式，不再開一堆分頁
+      if (isMobile()) { e.preventDefault(); openReader(a.getAttribute('href')); }   // 手機：覆蓋層開啟，不開新分頁、首頁不重載
+      else savePos(a);                                    // 電腦：維持開新分頁
     }
     var clr = e.target.closest ? e.target.closest('.fn-reco-clear') : null;
     if (clr) {
@@ -2290,7 +2325,7 @@ _READ_JS = """
   var obs = new MutationObserver(function(){ clearTimeout(t); t = setTimeout(function(){ markRead(); buildReco(); markFav(); buildFav(); applyDens(); markNew(); ensureLazy(); tagChips(); }, 200); });
   obs.observe(D.body, {childList: true, subtree: true});
   D.addEventListener('click', onClick, true);
-  P.__fnCleanup = function(){ obs.disconnect(); D.removeEventListener('click', onClick, true); D.removeEventListener('visibilitychange', onVis); clearInterval(tt); if (io) io.disconnect(); D.documentElement.removeAttribute('data-fnjs'); };
+  P.__fnCleanup = function(){ obs.disconnect(); D.removeEventListener('click', onClick, true); P.removeEventListener('popstate', onPop); if (ov) { ov.remove(); ov = null; } D.removeEventListener('visibilitychange', onVis); clearInterval(tt); if (io) io.disconnect(); D.documentElement.removeAttribute('data-fnjs'); };
   D.documentElement.setAttribute('data-fnjs', '1');
   initBase(); touch();
   var tt = setInterval(touch, 60000);
