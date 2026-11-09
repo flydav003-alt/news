@@ -12,7 +12,7 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import pandas as pd
 import requests
@@ -510,7 +510,14 @@ def _keep_qs() -> str:
             f"&bs={st.session_state['font_body']}&tb={st.session_state['font_tab']}")
 
 
+# 閱讀模式打不開的網站，點新聞改直接開原網站；目前先留空（先收集失敗原因），之後再把網域加進來
+READER_SKIP = ()
+
+
 def reader_href(url: str) -> str:
+    host = urlparse(url).netloc.lower()
+    if any(host == d or host.endswith("." + d) for d in READER_SKIP):
+        return url
     return f"?read={quote(url, safe='')}&{_keep_qs()}"
 
 
@@ -547,7 +554,7 @@ def render_reader(url: str) -> None:
         except Exception as e:
             art, err = None, str(e) or type(e).__name__
     if not art:
-        st.markdown(_h(f'<div class="rdr">{nav}<div class="rdr-warn">⚠️ 無法在這裡顯示全文：{esc(err)}'
+        st.markdown(_h(f'<div class="rdr">{nav}<div class="rdr-warn">⚠️ 無法在這裡顯示全文（{esc(urlparse(url).netloc)}）：{esc(err)}'
                        f'</div>{src_btn}</div>'), unsafe_allow_html=True)
         return
     src_btn = (f'<a class="rdr-src" href="{esc(art["final_url"], quote=True)}" target="_blank" rel="noopener noreferrer">'
@@ -1834,13 +1841,25 @@ with tab_ai:
 # ═══════════════════════════════════════════════
 # TAB：運動 / 娛樂 / 電玩（輕量，不做股市判斷）
 # ═══════════════════════════════════════════════
+# 大陸生活（Google News 簡體版轉繁體）裡的重要娛樂／電玩，併進對應分頁；運動不收
+CN_LIFE_SRC = {"娛樂": "GN-大陸娛樂", "電玩": "GN-大陸電玩"}
+CN_LIFE_N = 8
+
+
 def render_life_tab(cat: str, icon: str):
     d0 = df_all[df_all["category"] == cat]
+    cn_n = 0
+    if cat in CN_LIFE_SRC:
+        cn = df_all[(df_all["category"] == "大陸生活") & (df_all["source"] == CN_LIFE_SRC[cat])]
+        cn = cn.sort_values("published_at", ascending=False).head(CN_LIFE_N)
+        cn_n = len(cn)
+        d0 = pd.concat([d0, cn]).drop_duplicates(subset=["url"])
     if d0.empty:
         st.markdown(f'<div class="empty">{icon} {cat}還沒有資料，等下一次自動抓取就會出現。</div>', unsafe_allow_html=True)
         return
     d0, _ = recent(d0, hours_steps=(24, 48, 72, 168), min_n=6)
-    st.caption(f"共 {len(d0)} 則（只保留精華，每個來源 8～12 則）")
+    st.caption(f"共 {len(d0)} 則（只保留精華，每個來源 8～12 則"
+               + (f"；含大陸精選最新 {cn_n} 則" if cn_n else "") + "）")
     render_grid(d0.sort_values("published_at", ascending=False), max_items=200, lazy=18)
 
 
