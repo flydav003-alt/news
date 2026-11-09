@@ -22,6 +22,14 @@ _MAX_BYTES = 12_000_000
 esc = html.escape
 
 
+class ReaderError(RuntimeError):
+    """host：實際被抓取的網站（Google News 連結解析後的真實網域）；real：解析後的真實網址（可能為空）"""
+
+    def __init__(self, msg: str, host: str = "", real: str = ""):
+        super().__init__(msg)
+        self.host, self.real = host, real
+
+
 def _txt(el) -> str:
     return re.sub(r"\s+", " ", "".join(el.itertext())).strip()
 
@@ -207,7 +215,7 @@ def _paras(t: str) -> list:
     return [p for p in parts if p]
 
 
-def fetch_article(url: str) -> dict:
+def _fetch_real(url: str) -> dict:
     try:
         import trafilatura
         from lxml import etree
@@ -216,7 +224,6 @@ def fetch_article(url: str) -> dict:
 
     if not url.lower().startswith(("http://", "https://")):
         raise RuntimeError("網址格式不正確。")
-    url = _resolve_google(url)
     try:
         r = requests.get(url, timeout=15, allow_redirects=True, headers={
             "User-Agent": _UA,
@@ -286,3 +293,15 @@ def fetch_article(url: str) -> dict:
         "author": g("author"), "date": g("date"), "site": g("sitename") or urlparse(final).netloc,
         "image": lead, "body_html": "".join(out), "chars": chars, "final_url": final,
     }
+
+
+def fetch_article(url: str) -> dict:
+    """先還原 Google News 轉址，再抓真實網站。失敗一律丟 ReaderError（帶著真正失敗的網域）。"""
+    try:
+        real = _resolve_google(url)
+    except RuntimeError as e:
+        raise ReaderError(str(e), host=urlparse(url).netloc, real="") from None
+    try:
+        return _fetch_real(real)
+    except RuntimeError as e:
+        raise ReaderError(str(e), host=urlparse(real).netloc, real=real) from None
