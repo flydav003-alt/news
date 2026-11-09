@@ -18,7 +18,7 @@ _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, lik
        "Chrome/124.0 Safari/537.36")
 _BAD_IMG = ("pixel", "1x1", "spacer", "blank.gif", "/ads/", "adserver", "logo", "favicon",
             "doubleclick", "analytics", "beacon", "emoji")
-_MAX_BYTES = 5_000_000
+_MAX_BYTES = 12_000_000
 esc = html.escape
 
 
@@ -223,14 +223,20 @@ def fetch_article(url: str) -> dict:
             "Accept": "text/html,application/xhtml+xml",
             "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
         })
+    except requests.exceptions.Timeout:
+        raise RuntimeError("連線逾時（網站太慢，或刻意不回應雲端主機）。")
+    except requests.exceptions.SSLError:
+        raise RuntimeError("加密連線（SSL）失敗。")
+    except requests.exceptions.ConnectionError:
+        raise RuntimeError("連不上該網站（對方可能直接切斷了雲端主機的連線，或暫時無回應）。")
     except requests.RequestException as e:
         raise RuntimeError(f"連線失敗：{type(e).__name__}")
     if r.status_code in (401, 403, 429):
-        raise RuntimeError(f"網站拒絕這次抓取（HTTP {r.status_code}），可能擋掉了雲端主機。")
+        raise RuntimeError(f"網站拒絕這次抓取（HTTP {r.status_code}），多半是防機器人機制擋掉了雲端主機。")
     if r.status_code >= 400:
         raise RuntimeError(f"網站回應錯誤（HTTP {r.status_code}）。")
     if len(r.content) > _MAX_BYTES:
-        raise RuntimeError("頁面太大，略過。")
+        raise RuntimeError("頁面超過 12MB，略過（多半是靠 JavaScript 載入內容的網頁）。")
     final = r.url
     if "news.google.com" in urlparse(final).netloc:
         raise RuntimeError("仍停在 Google News 轉址頁，無法讀取原文。")
