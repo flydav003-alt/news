@@ -529,9 +529,10 @@ def _get_article(url: str) -> dict:
 
 def render_reader(url: str) -> None:
     st.markdown(f"""<style>
-.rdr{{max-width:780px;margin:0 auto;padding:4px 2px 40px}}
-.rdr-nav{{display:flex;justify-content:space-between;gap:10px;margin:6px 0 14px;font-size:14px}}
-.rdr-nav a{{color:var(--accent)!important;text-decoration:none!important;font-weight:700}}
+.rdr{{max-width:780px;margin:0 auto;padding:4px 2px 96px}}
+/* 回首頁：固定在畫面左下角，文章捲到哪都按得到 */
+.rdr-nav{{position:fixed;left:14px;bottom:calc(16px + env(safe-area-inset-bottom,0px));z-index:99999;margin:0}}
+.rdr-nav a{{display:flex;align-items:center;gap:4px;min-height:46px;padding:0 18px;border-radius:999px;background:var(--accent);color:#fff!important;text-decoration:none!important;font-weight:700;font-size:15px;box-shadow:0 3px 12px rgba(0,0,0,.28)}}
 .rdr-t{{font-size:26px;font-weight:700;line-height:1.45;margin:6px 0 8px;zoom:{_ts}}}
 .rdr-m{{font-size:13px;color:var(--tx3);margin-bottom:16px}}
 .rdr-b{{zoom:{_bs};font-size:17px;line-height:1.95}}
@@ -543,7 +544,7 @@ def render_reader(url: str) -> None:
 .rdr-b td{{border:1px solid var(--line);padding:4px 8px}}
 .rdr-warn{{background:var(--warn-bg);color:var(--warn);border-radius:8px;padding:8px 12px;font-size:13px;margin:8px 0}}
 </style>""", unsafe_allow_html=True)
-    home = "?" + _keep_qs()
+    home = "?" + _keep_qs() + "&back=1"      # back=1：首頁會回到剛剛的分頁與捲動位置
     nav = f'<div class="rdr-nav"><a href="{esc(home, quote=True)}" target="_self">← 回首頁</a></div>'
     src_btn = (f'<a class="rdr-src" href="{esc(url, quote=True)}" target="_blank" rel="noopener noreferrer">'
                f'↗ 開啟原文網頁</a>')
@@ -2207,13 +2208,53 @@ _READ_JS = """
     if (panel) target = Math.max(0, panel.getBoundingClientRect().top - base + cur - list.getBoundingClientRect().height);
     if (cur > target) { if (isDoc) P.scrollTo(0, target); else sc.scrollTop = target; }
   }
+  // ── 手機：點新聞不開新分頁，直接在本分頁進閱讀模式；回首頁時回到剛剛的分頁與捲動位置 ──
+  var PK2 = 'fn_pos', restoring = false;
+  function isMobile(){ try { return P.matchMedia('(hover: none) and (pointer: coarse)').matches; } catch(x) { return false; } }
+  function savePos(ref){
+    try {
+      var sc = scrollerOf(ref), isDoc = (sc === D.scrollingElement || sc === D.documentElement);
+      var tl = D.querySelector('[role="tablist"]'), idx = 0;
+      if (tl) Array.prototype.forEach.call(tl.querySelectorAll('[role="tab"]'), function(t, i){ if (t.getAttribute('aria-selected') === 'true') idx = i; });
+      P.sessionStorage.setItem(PK2, JSON.stringify({y: isDoc ? (P.pageYOffset || sc.scrollTop) : sc.scrollTop, tab: idx, t: Date.now()}));
+    } catch(x) {}
+  }
+  function restorePos(){
+    var raw = null, pos = null, nav = '';
+    try { raw = P.sessionStorage.getItem(PK2); } catch(x) {}
+    if (!raw) return;
+    try { pos = JSON.parse(raw); } catch(x) { return; }
+    var back = /[?&]back=1/.test(P.location.search);
+    try { var ne = P.performance.getEntriesByType('navigation')[0]; nav = ne ? ne.type : ''; } catch(x) {}
+    if (!pos || Date.now() - pos.t > 3600000 || !(back || nav === 'back_forward')) return;
+    try { P.sessionStorage.removeItem(PK2); } catch(x) {}
+    if (back) { try { var u = new URL(P.location.href); u.searchParams.delete('back'); P.history.replaceState(null, '', u.toString()); } catch(x) {} }
+    restoring = true;
+    var n = 0, ok = 0, tabDone = false;
+    var iv = setInterval(function(){
+      n++;
+      var tl = D.querySelector('[role="tablist"]');
+      if (!tl) { if (n > 60) { clearInterval(iv); restoring = false; } return; }
+      if (!tabDone) {
+        tabDone = true;
+        var ts = tl.querySelectorAll('[role="tab"]');
+        if (pos.tab > 0 && ts[pos.tab] && ts[pos.tab].getAttribute('aria-selected') !== 'true') { ts[pos.tab].click(); return; }
+      }
+      D.querySelectorAll('.card[data-lz]').forEach(function(c){ c.removeAttribute('data-lz'); });   // 先把延遲載入的卡片全展開，才捲得到深處
+      var sc = scrollerOf(tl), isDoc = (sc === D.scrollingElement || sc === D.documentElement);
+      if (isDoc) P.scrollTo(0, pos.y); else sc.scrollTop = pos.y;
+      var cur = isDoc ? (P.pageYOffset || sc.scrollTop) : sc.scrollTop;
+      if (Math.abs(cur - pos.y) < 4) ok++; else ok = 0;
+      if (ok >= 3 || n > 40) { clearInterval(iv); restoring = false; }
+    }, 150);
+  }
   function onClick(e){
     var tg = e.target, cl = function(sel){ return tg && tg.closest ? tg.closest(sel) : null; };
     var dn = cl('[data-dens]');
     if (dn) { e.preventDefault(); try { P.localStorage.setItem(DK, dn.getAttribute('data-dens')); } catch(x) {} applyDens(); return; }
     if (cl('[data-onlynew]')) { e.preventDefault(); D.body.classList.toggle('fn-onlynew'); markNew(true); return; }
     var tabEl = cl('[role="tab"]');
-    if (tabEl) { setTimeout(function(){ scrollToTabTop(tabEl); }, 80); setTimeout(function(){ scrollToTabTop(tabEl); }, 300); }
+    if (tabEl && !restoring) { setTimeout(function(){ scrollToTabTop(tabEl); }, 80); setTimeout(function(){ scrollToTabTop(tabEl); }, 300); }
     var fv = cl('.card .fav');
     if (fv) { e.preventDefault(); e.stopPropagation(); toggleFav(fv.closest('.card')); return; }
     var rm = cl('[data-rm]');
@@ -2224,6 +2265,10 @@ _READ_JS = """
       return;
     }
     var a = e.target.closest ? e.target.closest('a[href^="http"], a[href^="?read="]') : null;
+    if (a && (a.getAttribute('href') || '').indexOf('?read=') === 0) {
+      savePos(a);                                         // 記住目前分頁與捲動位置
+      if (isMobile()) a.target = '_self';                 // 手機：同一個分頁進閱讀模式，不再開一堆分頁
+    }
     var clr = e.target.closest ? e.target.closest('.fn-reco-clear') : null;
     if (clr) {
       e.preventDefault();
@@ -2251,6 +2296,7 @@ _READ_JS = """
   var tt = setInterval(touch, 60000);
   D.addEventListener('visibilitychange', onVis);
   markRead(); buildReco(); markFav(); buildFav(); applyDens(); markNew(); ensureLazy(); tagChips();
+  restorePos();
 })();
 </script>
 """
