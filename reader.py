@@ -9,7 +9,8 @@ import base64
 import html
 import json
 import re
-from urllib.parse import urljoin, urlparse
+import time
+from urllib.parse import quote, urljoin, urlparse
 
 import requests
 
@@ -87,32 +88,90 @@ def _walk(el, out: list, base: str, seen: set) -> None:
             out.append(f"<p>{esc(t)}</p>")
 
 
+def _gn_batchexecute(gid: str, why: list) -> str:
+    """Google News 新格式：先從文章頁拿簽章與時間戳，再呼叫 batchexecute 換回真實網址（同 googlenewsdecoder 的做法）。"""
+    sess = requests.Session()
+    sess.headers.update({"User-Agent": _UA, "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8"})
+    for k, v in (("CONSENT", "YES+cb"), ("SOCS", "CAI")):       # 略過歐盟同意頁
+        sess.cookies.set(k, v, domain=".google.com")
+    sg = ts = None
+    for base in ("https://news.google.com/articles/", "https://news.google.com/rss/articles/"):
+        try:
+            r = sess.get(base + gid, timeout=12)
+        except requests.RequestException as e:
+            why.append(f"取文章頁失敗（{type(e).__name__}）")
+            continue
+        if "consent." in r.url:
+            why.append("被導向 Google 同意頁")
+            continue
+        sg = re.search(r'data-n-a-sg="([^"]+)"', r.text)
+        ts = re.search(r'data-n-a-ts="([^"]+)"', r.text)
+        if sg and ts:
+            break
+        why.append(f"文章頁沒有簽章（HTTP {r.status_code}）")
+    if not (sg and ts):
+        return ""
+    inner = json.dumps(["garturlreq",
+                        [["X", "X", ["X", "X"], None, None, 1, 1, "US:en", None, 1, None, None, None, None, None, 0, 1],
+                         "X", "X", 1, [1, 1, 1], 1, 1, None, 0, 0, None, 0],
+                        gid, int(float(ts.group(1))), sg.group(1)], separators=(",", ":"))
+    payload = json.dumps([[["Fbv4je", inner, None, "generic"]]], separators=(",", ":"))
+    try:
+        r = sess.post("https://news.google.com/_/DotsSplashUi/data/batchexecute",
+                      data="f.req=" + quote(payload),
+                      headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"}, timeout=12)
+        if r.status_code != 200:
+            why.append(f"解析 API 回應 HTTP {r.status_code}")
+            return ""
+        arr = json.loads(r.text.split("\n\n")[1])[:-2]
+        real = json.loads(arr[0][2])[1]
+        return real if isinstance(real, str) else ""
+    except Exception as e:
+        why.append(f"解析 API 回傳格式不符（{type(e).__name__}）")
+        return ""
+
+
 def _resolve_google(url: str) -> str:
-    """Google News 的 RSS 連結是轉址：先試舊格式（網址直接編在 ID 裡），再用 googlenewsdecoder 解新格式。"""
+    """Google News 的 RSS 連結是轉址。依序嘗試：舊格式直接解碼 → batchexecute → googlenewsdecoder 套件 → 直接跟轉址。"""
     if "news.google.com" not in urlparse(url).netloc:
         return url
     m = re.search(r"/articles/([^/?#]+)", url)
-    if m:
+    gid = m.group(1) if m else ""
+    why: list = []
+    ok = lambda u: isinstance(u, str) and u.startswith("http") and "google.com" not in urlparse(u).netloc
+
+    if gid:
         try:
-            raw = base64.urlsafe_b64decode(m.group(1) + "===")
+            raw = base64.urlsafe_b64decode(gid + "===")
             mm = re.search(rb"https?://[\x21-\x7e]+", raw)
-            if mm:
-                real = mm.group(0).decode("ascii", "ignore")
-                if "news.google.com" not in real:
-                    return real
+            if mm and ok(mm.group(0).decode("ascii", "ignore")):
+                return mm.group(0).decode("ascii", "ignore")
         except Exception:
             pass
+        for _ in range(2):                                     # 偶爾會暫時失敗，重試一次
+            real = _gn_batchexecute(gid, why)
+            if ok(real):
+                return real
+            time.sleep(0.8)
     try:
         from googlenewsdecoder import gnewsdecoder
-        res = gnewsdecoder(url, interval=1)
-        real = (res or {}).get("decoded_url", "") if (res or {}).get("status") else ""
-        if real.startswith("http") and "news.google.com" not in real:
-            return real
+        res = gnewsdecoder(url, interval=1) or {}
+        if res.get("status") and ok(res.get("decoded_url", "")):
+            return res["decoded_url"]
+        why.append(f"套件回報：{str(res.get('message', ''))[:60]}")
     except ImportError:
-        raise RuntimeError("還沒安裝 googlenewsdecoder，請在 requirements.txt 加上 googlenewsdecoder。")
-    except Exception:
+        why.append("未安裝 googlenewsdecoder")
+    except Exception as e:
+        why.append(f"套件錯誤（{type(e).__name__}）")
+    try:                                                       # 最後手段：像瀏覽器一樣跟轉址
+        r = requests.get(url, timeout=12, allow_redirects=True, headers={"User-Agent": _UA},
+                         cookies={"CONSENT": "YES+cb", "SOCS": "CAI"})
+        if ok(r.url):
+            return r.url
+    except requests.RequestException:
         pass
-    raise RuntimeError("Google News 轉址連結解析失敗（Google 暫時擋住或格式改了），請稍後再試。")
+    detail = "；".join(dict.fromkeys(why))[:160]
+    raise RuntimeError("Google News 轉址連結解析失敗" + (f"（{detail}）" if detail else "") + "。")
 
 
 def _ld_body(text: str) -> str:
