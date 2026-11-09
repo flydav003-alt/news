@@ -476,13 +476,16 @@ def _qp_font(name: str) -> int:
 
 st.session_state.setdefault("font_title", _qp_font("ts"))
 st.session_state.setdefault("font_body", _qp_font("bs"))
-_ts, _bs = st.session_state["font_title"] / 100, st.session_state["font_body"] / 100
+st.session_state.setdefault("font_tab", _qp_font("tb"))
+_ts, _bs, _tb = (st.session_state[k] / 100 for k in ("font_title", "font_body", "font_tab"))
 FONT_CSS = f"""<style>
-/* 標題類：新聞標題、頂部 logo、分頁標籤、區塊標題 */
-.ct,.hero-t,.si-t,.logo,.sec,.ai-dir,.cal-d,.rk-h,[role="tab"] p{{zoom:{_ts}}}
+/* 標題類：新聞標題、頂部 logo、區塊標題（分頁標籤不動） */
+.ct,.hero-t,.si-t,.logo,.sec,.ai-dir,.cal-d,.rk-h{{zoom:{_ts}}}
 /* 內文類：摘要、來源、時間、標籤、表格、AI 內文 */
 .cs,.co,.cm,.si-m,.hero-o,.hero-m,.ai-body,.ai-rsn,.ai-ft,.tag,.tk,.bd,.tr,.chip-t,.pill,.subhead,
 .q-n,.q-p,.q-c,.m-l,.m-v,.tbl,.cal-r,.post,.sg-l,.sg-m,.geo,.fn-new,.parts,.hb,.rk-r{{zoom:{_bs}}}
+/* 分頁標籤 */
+[role="tab"] p{{zoom:{_tb}}}
 /* 避免放大後被橫向裁掉 */
 .tbl{{display:block;overflow-x:auto}}
 </style>"""
@@ -1780,14 +1783,16 @@ with tab_cfg:
     st.markdown('<div class="fn-fav-wrap"><div class="fn-fav-note"></div><div class="grid fn-fav"></div></div>',
                 unsafe_allow_html=True)
     st.markdown("#### 🔠 字型大小")
-    st.select_slider("標題大小（新聞標題、分頁、區塊標題）", options=FONT_STEPS, key="font_title",
+    st.select_slider("標題大小（新聞標題、區塊標題）", options=FONT_STEPS, key="font_title",
                      format_func=lambda v: f"{v}%")
     st.select_slider("內文大小（摘要、來源、時間、標籤）", options=FONT_STEPS, key="font_body",
                      format_func=lambda v: f"{v}%")
+    st.select_slider("分頁標籤大小（今日新聞、AI 專區…）", options=FONT_STEPS, key="font_tab",
+                     format_func=lambda v: f"{v}%")
     st.caption("100% 是預設。手機覺得字小的話，建議標題 130%、內文 115% 起試；設定會記在網址上，重新整理不會跑掉。")
     st.button("↩️ 還原預設字級", key="reset_font",
-              on_click=lambda: st.session_state.update(font_title=100, font_body=100))
-    for _k, _q in (("font_title", "ts"), ("font_body", "bs")):
+              on_click=lambda: st.session_state.update(font_title=100, font_body=100, font_tab=100))
+    for _k, _q in (("font_title", "ts"), ("font_body", "bs"), ("font_tab", "tb")):
         if st.query_params.get(_q) != str(st.session_state[_k]):
             st.query_params[_q] = str(st.session_state[_k])
     st.markdown("#### 🧹 顯示內容")
