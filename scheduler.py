@@ -164,7 +164,8 @@ def crawl_and_save(enabled_names=None,
         fresh.append(a)
 
     saved = skipped = ai_count = 0
-    groq_key = _get_groq_key() if use_ai else ""
+    groq_key_all = _get_groq_key()
+    groq_key = groq_key_all if use_ai else ""        # AI 分析只在 use_ai 時用
 
     # ── Step 1：關鍵字分析（全部新文章）────────────────────────
     for item in fresh:
@@ -250,7 +251,8 @@ def crawl_and_save(enabled_names=None,
         logger.warning("use_ai=True 但 Groq key 為空，AI 分析將跳過")
 
     # ── Step 3：英文標題翻譯 ───────────────────────────────────
-    tr_count = translate_titles(fresh, api_key=groq_key) if translate else 0
+    # 翻譯一律用 Groq（只要約 5 次呼叫）：以前跳過 AI 的時段連翻譯也沒 key，整批掉去 Google 被限流，英文標題一則都翻不出來
+    tr_count = translate_titles(fresh, api_key=groq_key_all) if translate else 0
 
     # ── Step 4：存庫 ───────────────────────────────────────────
     db = SessionLocal()
