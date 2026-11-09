@@ -460,6 +460,34 @@ div[data-baseweb="select"] svg{{fill:var(--tx)!important}}
 </style>"""
 st.markdown(THEME_CSS, unsafe_allow_html=True)
 
+# ─────────────────────────────────────────────
+# 字型大小（設定頁可調）：標題 / 內文 各一個比例，記在網址 ?ts= ?bs=，手機重新整理也會保留
+# ─────────────────────────────────────────────
+FONT_STEPS = [85, 100, 115, 130, 150, 170]
+
+
+def _qp_font(name: str) -> int:
+    try:
+        v = int(st.query_params.get(name, 100))
+    except (TypeError, ValueError):
+        v = 100
+    return v if v in FONT_STEPS else 100
+
+
+st.session_state.setdefault("font_title", _qp_font("ts"))
+st.session_state.setdefault("font_body", _qp_font("bs"))
+_ts, _bs = st.session_state["font_title"] / 100, st.session_state["font_body"] / 100
+FONT_CSS = f"""<style>
+/* 標題類：新聞標題、頂部 logo、分頁標籤、區塊標題 */
+.ct,.hero-t,.si-t,.logo,.sec,.ai-dir,.cal-d,.rk-h,[role="tab"] p{{zoom:{_ts}}}
+/* 內文類：摘要、來源、時間、標籤、表格、AI 內文 */
+.cs,.co,.cm,.si-m,.hero-o,.hero-m,.ai-body,.ai-rsn,.ai-ft,.tag,.tk,.bd,.tr,.chip-t,.pill,.subhead,
+.q-n,.q-p,.q-c,.m-l,.m-v,.tbl,.cal-r,.post,.sg-l,.sg-m,.geo,.fn-new,.parts,.hb,.rk-r{{zoom:{_bs}}}
+/* 避免放大後被橫向裁掉 */
+.tbl{{display:block;overflow-x:auto}}
+</style>"""
+st.markdown(FONT_CSS, unsafe_allow_html=True)
+
 
 def _row_tickers(row) -> list:
     raw = str(row.get("ai_affected_tickers", "") or row.get("tickers", "") or "")
@@ -1751,6 +1779,17 @@ with tab_cfg:
     # 內容由瀏覽器端 JS 依 localStorage 畫出；收藏的是標題/連結快照，不受 72 小時限制
     st.markdown('<div class="fn-fav-wrap"><div class="fn-fav-note"></div><div class="grid fn-fav"></div></div>',
                 unsafe_allow_html=True)
+    st.markdown("#### 🔠 字型大小")
+    st.select_slider("標題大小（新聞標題、分頁、區塊標題）", options=FONT_STEPS, key="font_title",
+                     format_func=lambda v: f"{v}%")
+    st.select_slider("內文大小（摘要、來源、時間、標籤）", options=FONT_STEPS, key="font_body",
+                     format_func=lambda v: f"{v}%")
+    st.caption("100% 是預設。手機覺得字小的話，建議標題 130%、內文 115% 起試；設定會記在網址上，重新整理不會跑掉。")
+    st.button("↩️ 還原預設字級", key="reset_font",
+              on_click=lambda: st.session_state.update(font_title=100, font_body=100))
+    for _k, _q in (("font_title", "ts"), ("font_body", "bs")):
+        if st.query_params.get(_q) != str(st.session_state[_k]):
+            st.query_params[_q] = str(st.session_state[_k])
     st.markdown("#### 🧹 顯示內容")
     st.checkbox("把同一事件的多家報導合併成一張卡片", value=True, key="merge_events")
     st.checkbox("顯示例行「月營收公布」快訊（預設隱藏）", key="show_rev",
