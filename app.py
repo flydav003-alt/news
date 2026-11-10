@@ -662,7 +662,7 @@ def load_all():
         db.close()
 
 
-LIFE_CATS = ("運動", "娛樂", "電玩")
+LIFE_CATS = ("運動", "娛樂", "旅遊", "電玩")
 
 
 def clean_images(df):
@@ -763,7 +763,7 @@ SECTOR_GRAD = {
 
 
 CAT_GRAD = {"AI": ("#2E86DE", "#6C5CE7"), "運動": ("#27AE60", "#16A0A8"), "娛樂": ("#D35D8C", "#E8A0BF"),
-            "電玩": ("#6C5CE7", "#A29BFE"), "科技": ("#4A6FA5", "#7C9BC9"), "國際": ("#8C7B63", "#B3A48C"),
+            "電玩": ("#6C5CE7", "#A29BFE"), "旅遊": ("#16A0A8", "#5CC6CC"), "科技": ("#4A6FA5", "#7C9BC9"), "國際": ("#8C7B63", "#B3A48C"),
             "大陸": ("#B03A2E", "#E08A6F")}
 
 
@@ -792,7 +792,7 @@ def thumb_html(row, extra_cls="") -> str:
             f'<span class="ph">{esc(ph)}</span>{img_tag}</div>')
 
 
-CAT_ICON = {"AI": "🤖", "運動": "⚽", "娛樂": "🎬", "電玩": "🎮", "科技": "💡", "國際": "🌐", "財經": "💹", "大陸": "🏮"}
+CAT_ICON = {"AI": "🤖", "運動": "⚽", "娛樂": "🎬", "旅遊": "🧳", "電玩": "🎮", "科技": "💡", "國際": "🌐", "財經": "💹", "大陸": "🏮"}
 
 
 def strip_html(row) -> str:
@@ -1546,8 +1546,8 @@ qs = fetch_quotes()
 if qs:
     st.markdown(quotes_html(qs), unsafe_allow_html=True)
 
-tab_home, tab_ai, tab_sports, tab_ent, tab_game, tab_cal, tab_cfg = st.tabs(
-    ["📰 今日新聞", "🤖 AI 專區", "⚽ 運動", "🎬 娛樂", "🎮 電玩", "📅 行事曆", "⚙️ 設定"])
+tab_home, tab_ai, tab_sports, tab_ent, tab_travel, tab_game, tab_cal, tab_cfg = st.tabs(
+    ["📰 今日新聞", "🤖 AI 專區", "⚽ 運動", "🎬 娛樂", "🧳 旅遊", "🎮 電玩", "📅 行事曆", "⚙️ 設定"])
 
 # ═══════════════════════════════════════════════
 # TAB 1：今日新聞
@@ -1942,7 +1942,7 @@ def _cn_life_kind(title) -> str:
 def render_life_tab(cat: str, icon: str):
     d0 = df_all[df_all["category"] == cat]
     cn_n = 0
-    if cat in ("娛樂", "電玩"):
+    if cat in ("娛樂", "電玩", "旅遊"):
         cn = df_all[df_all["category"] == "大陸生活"]
         if not cn.empty:
             cn = cn[cn["title"].apply(_cn_life_kind) == cat]
@@ -1951,6 +1951,37 @@ def render_life_tab(cat: str, icon: str):
             d0 = pd.concat([d0, cn]).drop_duplicates(subset=["url"])
     if d0.empty:
         st.markdown(f'<div class="empty">{icon} {cat}還沒有資料，等下一次自動抓取就會出現。</div>', unsafe_allow_html=True)
+        return
+    if cat == "旅遊":
+        # 區域：存在 sectors 欄位（區域:台灣 / 區域:國外 / 區域:大陸）；舊的「大陸生活」併進來的算大陸
+        def _region(r):
+            sec = str(r.get("sectors", "") or "")
+            for k in ("台灣", "國外", "大陸"):
+                if f"區域:{k}" in sec:
+                    return k
+            return "大陸" if r.get("category") == "大陸生活" else ("國外" if r.get("language") == "en" else "台灣")
+        d0 = d0.copy()
+        d0["_rg"] = d0.apply(_region, axis=1)
+        tc1, tc2 = st.columns([3, 1.4])
+        with tc1:
+            rg = st.radio("區域", ["全部", "🇹🇼 台灣", "🌍 國外（歐美）", "🏮 大陸"], horizontal=True,
+                          label_visibility="collapsed", key="travel_rg")
+        with tc2:
+            only_img = st.checkbox("🖼️ 只看有圖片", value=True, key="travel_img")
+        if rg.startswith("🇹🇼"):
+            d0 = d0[d0["_rg"] == "台灣"]
+        elif rg.startswith("🌍"):
+            d0 = d0[d0["_rg"] == "國外"]
+        elif rg.startswith("🏮"):
+            d0 = d0[d0["_rg"] == "大陸"]
+        if only_img:
+            d0 = d0[d0["image_url"].fillna("") != ""]
+        if d0.empty:
+            st.markdown('<div class="empty">🧳 這個條件下沒有符合的旅遊新聞（可以取消「只看有圖片」試試）</div>', unsafe_allow_html=True)
+            return
+        d0, _ = recent(d0, hours_steps=(72, 168, 336, 720), min_n=12)
+        st.caption(f"共 {len(d0)} 則" + (f"（含大陸精選 {cn_n} 則）" if cn_n else ""))
+        render_grid(d0.sort_values("published_at", ascending=False), max_items=200, lazy=18)
         return
     d0, _ = recent(d0, hours_steps=(24, 48, 72, 168), min_n=6)
     st.caption(f"共 {len(d0)} 則（只保留精華，每個來源 8～12 則"
@@ -1962,6 +1993,8 @@ with tab_sports:
     render_life_tab("運動", "⚽")
 with tab_ent:
     render_life_tab("娛樂", "🎬")
+with tab_travel:
+    render_life_tab("旅遊", "🧳")
 with tab_game:
     render_life_tab("電玩", "🎮")
 
