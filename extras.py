@@ -651,6 +651,11 @@ REDDIT_SUBS = [("popular", 12), ("worldnews", 8), ("technology", 8)]
 REDDIT_HOSTS = ("www.reddit.com",)      # old.reddit.com 在歷次 log 都是 403，先不試（要的話加回 "old.reddit.com"）
 REDDIT_GAP = 2.0                        # 兩次 Reddit 請求至少間隔幾秒
 REDDIT_TIMEOUT = 6                      # 單次請求最多等幾秒（代理也一樣，不再額外加 10 秒）
+# 置頂串／固定討論串：RSS 沒有「是否置頂」欄位，只能靠標題關鍵字＋發文太久還在榜上來猜
+STICKY_MODE = "hide"                    # "hide"＝直接濾掉；"mark"＝保留但在卡片上標「📌 置頂串」
+STICKY_RE = re.compile(r"discussion thread|live thread|megathread|mega thread|daily thread|daily discussion|"
+                       r"weekly thread|weekly discussion|moderator|rules? (?:update|reminder)", re.I)
+STICKY_MAX_AGE_H = 48                   # 發文超過幾小時還在熱門榜 → 視為置頂（0＝不用這條規則）
 REDDIT_BUDGET = 20                      # 整段 Reddit 抓取最多花幾秒，用完就放棄、沿用舊資料
 
 
@@ -716,6 +721,29 @@ def fetch_ptt(pages: int = 2):
     return posts[:30], ""
 
 
+def _reddit_img(e) -> str:
+    """Reddit RSS 的縮圖：先看 media:thumbnail，再從內文 <img> 找；純文字貼文沒有圖就回傳空字串"""
+    for m in (e.get("media_thumbnail") or []):
+        u = str(m.get("url", ""))
+        if u.startswith("http"):
+            return u.replace("&amp;", "&")
+    raw = ""
+    for c in (e.get("content") or []):
+        raw += c.get("value", "")
+    raw += str(e.get("summary", "") or "")
+    for m in re.finditer(r'<img[^>]+src=["\']([^"\']+)["\']', raw, re.I):
+        u = m.group(1).replace("&amp;", "&")
+        if u.startswith("http") and "styles.redditmedia" not in u and "emoji" not in u:
+            return u
+    return ""
+
+
+def _is_sticky(title: str, ts: int) -> bool:
+    if STICKY_RE.search(title or ""):
+        return True
+    return bool(STICKY_MAX_AGE_H and ts and (time.time() - ts) / 3600 > STICKY_MAX_AGE_H)
+
+
 def fetch_reddit():
     out, errs = {}, []
     deadline = time.time() + REDDIT_BUDGET
@@ -730,7 +758,22 @@ def fetch_reddit():
         else:
             logger.warning(f"Reddit 時間預算（{REDDIT_BUDGET} 秒）用完，略過 r/{sub}，沿用舊資料")
         if ent:
-            out[sub] = [{"t": _tags(e.get("title", "")), "u": e.get("link", ""), "p": _ts(e)} for e in ent[:n]]
+            rows = []
+            for e in ent:
+                t, ts = _tags(e.get("title", "")), _ts(e)
+                pin = _is_sticky(t, ts)
+                if pin and STICKY_MODE == "hide":
+                    continue
+                row = {"t": t, "u": e.get("link", ""), "p": ts}
+                img = _reddit_img(e)
+                if img:
+                    row["i"] = img
+                if pin:
+                    row["pin"] = 1
+                rows.append(row)
+                if len(rows) >= n:
+                    break
+            out[sub] = rows
         else:
             errs.append(sub)
     return out, errs
