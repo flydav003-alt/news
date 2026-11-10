@@ -1524,8 +1524,8 @@ qs = fetch_quotes()
 if qs:
     st.markdown(quotes_html(qs), unsafe_allow_html=True)
 
-tab_home, tab_ai, tab_sports, tab_ent, tab_game, tab_cal, tab_search, tab_cfg = st.tabs(
-    ["📰 今日新聞", "🤖 AI 專區", "⚽ 運動", "🎬 娛樂", "🎮 電玩", "📅 行事曆", "🔎 搜尋", "⚙️ 設定"])
+tab_home, tab_ai, tab_sports, tab_ent, tab_game, tab_cal, tab_cfg = st.tabs(
+    ["📰 今日新聞", "🤖 AI 專區", "⚽ 運動", "🎬 娛樂", "🎮 電玩", "📅 行事曆", "⚙️ 設定"])
 
 # ═══════════════════════════════════════════════
 # TAB 1：今日新聞
@@ -1571,118 +1571,143 @@ with tab_home:
         else:
             st.caption(f"📈 題材升溫：近 {SURGE_WIN_H} 小時沒有個股的提及量超過平均 {SURGE_RATIO:g} 倍")
 
-        # ── 頭條 ──
-        st.markdown('<div class="sec">🔥 今日頭條</div>', unsafe_allow_html=True)
-        st.markdown(hero_html(df_r), unsafe_allow_html=True)
-
-        # ── ✨ 為你推薦（內容由瀏覽器端依你的點擊紀錄挑選，這裡只放容器與候選池）──
-        st.markdown(_h("""
-        <div class="fn-reco-wrap"><div class="sec">✨ 為你推薦 <span class="fn-reco-chips"></span>
-        <a href="#" class="fn-reco-clear">清除偏好</a></div>
-        <div class="fn-reco-note"></div><div class="grid fn-reco"></div></div>"""), unsafe_allow_html=True)
-        _pool_src = df_all[df_all["published_at"].apply(age_hours) <= 48]
-        _pool_src = _pool_src.sort_values("published_at", ascending=False).head(160)
-        _pool_cards = "".join(card_html(rep_, oth_) for rep_, oth_ in cluster_events(_pool_src)[:80])
-        st.markdown(f'<div class="fn-pool" style="display:none">{_pool_cards}</div>', unsafe_allow_html=True)
-
-        # ── AI 市場總結 ──
-        st.markdown('<div class="sec">✦ AI 市場總結</div>', unsafe_allow_html=True)
-        if not GROQ_OK:
-            st.info("需要設定 GROQ_API_KEY 才能顯示 AI 市場總結")
-        elif ai_df_all.empty:
-            st.info("近期還沒有 AI 分析資料（等下一次 GitHub Actions 執行，或按「立即抓取」）")
+        with st.form("search_form", clear_on_submit=False):
+            sc1, sc3, sc4 = st.columns([3, 1.3, 0.8])
+            with sc1:
+                sq = st.text_input("搜尋標題（中英文皆可）", placeholder="搜尋標題（中英文皆可）：台積電 / Nvidia …",
+                                   label_visibility="collapsed")
+            with sc3:
+                sdays = st.selectbox("時間", [1, 3, 7, 30, 365], index=2,
+                                     format_func=lambda d: "近一年" if d == 365 else f"近 {d} 天",
+                                     label_visibility="collapsed")
+            with sc4:
+                go = st.form_submit_button("🔎 搜尋", type="primary", use_container_width=True)
+        if go:
+            if sq.strip():
+                st.session_state["last_search"] = (sq.strip(), "中英文都找", int(sdays))
+            else:
+                st.session_state.pop("last_search", None)
+        ls = st.session_state.get("last_search")
+        if ls:
+            with st.spinner(f"正在搜尋「{ls[0]}」…"):
+                try:
+                    sdf = live_search(*ls)
+                except Exception as e:
+                    sdf = None
+                    st.warning(f"搜尋失敗：{type(e).__name__}: {e}")
+            if sdf is not None:
+                if sdf.empty:
+                    st.markdown('<div class="empty">找不到結果，換個關鍵字試試</div>', unsafe_allow_html=True)
+                else:
+                    st.caption(f"「{ls[0]}」共 {len(sdf)} 則（清空搜尋框再按搜尋可回到最新新聞）")
+                    render_grid(sdf, max_items=40)
         else:
-            cache_key = f"{len(ai_df_all)}_{ai_df_all.iloc[0].get('published_at')}"
-            if st.session_state.get("_sum_key") != cache_key:
-                with st.spinner("AI 正在生成市場總結…"):
-                    sdata, serr = get_daily_ai_summary(
-                        ai_df_all.sort_values("importance_score", ascending=False))
-                st.session_state.update({"_sdata": sdata, "_serr": serr, "_sum_key": cache_key,
-                                         "_stime": datetime.now(TZ_TW).strftime("%H:%M")})
-            sdata, serr = st.session_state.get("_sdata", ""), st.session_state.get("_serr", "")
-            if sdata and isinstance(sdata, dict):
-                direction = sdata.get("direction", "震盪")
-                dcls = "up" if direction == "偏多" else ("dn" if direction == "偏空" else "flat")
-                icon = "↗" if direction == "偏多" else ("↘" if direction == "偏空" else "→")
-                bt = "".join(f'<span class="tag tag-b">📈 {esc(t)}</span>' for t in sdata.get("bull_themes", []))
-                dt = "".join(f'<span class="tag tag-d">📉 {esc(t)}</span>' for t in sdata.get("bear_themes", []))
-                kt = "".join(f'<span class="chip-t">{esc(str(t))}</span>' for t in sdata.get("key_tickers", []))
-                st.markdown(_h(f"""
-                <div class="ai-card"><span class="ai-badge">Groq AI · 市場總結</span>
-                <div class="ai-dir {dcls}">{icon} 整體{esc(direction)}</div>
-                <div class="ai-rsn">{esc(sdata.get("direction_reason", ""))}</div>
-                <div>{bt}{dt}</div><div>{kt}</div>
-                <div class="ai-body">{esc(sdata.get("summary", ""))}</div>
-                <div class="ai-ft">根據 {len(ai_df_all)} 則 AI 分析新聞 · {st.session_state.get("_stime", "")} 台灣時間</div></div>"""),
-                            unsafe_allow_html=True)
-                if st.button("🔄 重新生成總結", key="regen"):
-                    st.session_state.pop("_sum_key", None)
-                    st.rerun()
-            elif serr:
-                st.warning(f"⏳ {serr}")
-                if st.button("🔄 重試", key="regen_err"):
-                    st.session_state.pop("_sum_key", None)
-                    st.rerun()
+            # ── 頭條 ──
+            st.markdown('<div class="sec">🔥 今日頭條</div>', unsafe_allow_html=True)
+            st.markdown(hero_html(df_r), unsafe_allow_html=True)
 
-        # ── 地緣 ──
-        if not geo_df.empty:
-            st.markdown('<div class="sec">⚑ 地緣政治警示</div>', unsafe_allow_html=True)
-            g = ""
-            for _, r in geo_df.head(6).iterrows():
-                s, _v = eff_sent(r)
-                imp = "利多" if s == "bullish" else ("利空" if s == "bearish" else "中性")
-                t, _o = titles(r)
-                g += (f'<div class="geo"><a href="{esc(reader_href(str(r.get("url", ""))) if str(r.get("url", "")).startswith("http") else "#", quote=True)}" target="_blank" '
-                      f'rel="noopener">{esc(t)}</a> <span style="color:var(--tx3)">· {imp}</span></div>')
-            st.markdown(f'<div class="geo-grid">{g}</div>', unsafe_allow_html=True)
+            # ── ✨ 為你推薦（內容由瀏覽器端依你的點擊紀錄挑選，這裡只放容器與候選池）──
+            st.markdown(_h("""
+            <div class="fn-reco-wrap"><div class="sec">✨ 為你推薦 <span class="fn-reco-chips"></span>
+            <a href="#" class="fn-reco-clear">清除偏好</a></div>
+            <div class="fn-reco-note"></div><div class="grid fn-reco"></div></div>"""), unsafe_allow_html=True)
+            _pool_src = df_all[df_all["published_at"].apply(age_hours) <= 48]
+            _pool_src = _pool_src.sort_values("published_at", ascending=False).head(160)
+            _pool_cards = "".join(card_html(rep_, oth_) for rep_, oth_ in cluster_events(_pool_src)[:80])
+            st.markdown(f'<div class="fn-pool" style="display:none">{_pool_cards}</div>', unsafe_allow_html=True)
 
-        # ── 新聞牆 ──
-        st.markdown('<div class="sec">📋 最新新聞</div>', unsafe_allow_html=True)
-        chip = st.radio("快速篩選", ["全部", "🏮 大陸", "🌐 國際", "📈 利多", "📉 利空", "✦ AI 精選", "⚑ 地緣"],
-                        horizontal=True, label_visibility="collapsed", key="chip")
-        f1, f2, f3, f4 = st.columns([1.2, 2.4, 1, 1])
-        with f1:
-            src_list = sorted(df_r["source"].unique().tolist())
-            src_f = st.selectbox("來源", ["全部"] + src_list, key="d_src")
-        with f2:
-            kw = st.text_input("搜尋標題（中英文皆可）", placeholder="台積電 / Nvidia …", key="d_kw")
-        with f3:
-            sort_f = st.selectbox("排序", ["最新優先", "重要度"], key="d_sort")
-        with f4:
-            hide_neu = st.checkbox("隱藏中性", value=False, key="d_hide")
+            # ── AI 市場總結 ──
+            st.markdown('<div class="sec">✦ AI 市場總結</div>', unsafe_allow_html=True)
+            if not GROQ_OK:
+                st.info("需要設定 GROQ_API_KEY 才能顯示 AI 市場總結")
+            elif ai_df_all.empty:
+                st.info("近期還沒有 AI 分析資料（等下一次 GitHub Actions 執行，或按「立即抓取」）")
+            else:
+                cache_key = f"{len(ai_df_all)}_{ai_df_all.iloc[0].get('published_at')}"
+                if st.session_state.get("_sum_key") != cache_key:
+                    with st.spinner("AI 正在生成市場總結…"):
+                        sdata, serr = get_daily_ai_summary(
+                            ai_df_all.sort_values("importance_score", ascending=False))
+                    st.session_state.update({"_sdata": sdata, "_serr": serr, "_sum_key": cache_key,
+                                             "_stime": datetime.now(TZ_TW).strftime("%H:%M")})
+                sdata, serr = st.session_state.get("_sdata", ""), st.session_state.get("_serr", "")
+                if sdata and isinstance(sdata, dict):
+                    direction = sdata.get("direction", "震盪")
+                    dcls = "up" if direction == "偏多" else ("dn" if direction == "偏空" else "flat")
+                    icon = "↗" if direction == "偏多" else ("↘" if direction == "偏空" else "→")
+                    bt = "".join(f'<span class="tag tag-b">📈 {esc(t)}</span>' for t in sdata.get("bull_themes", []))
+                    dt = "".join(f'<span class="tag tag-d">📉 {esc(t)}</span>' for t in sdata.get("bear_themes", []))
+                    kt = "".join(f'<span class="chip-t">{esc(str(t))}</span>' for t in sdata.get("key_tickers", []))
+                    st.markdown(_h(f"""
+                    <div class="ai-card"><span class="ai-badge">Groq AI · 市場總結</span>
+                    <div class="ai-dir {dcls}">{icon} 整體{esc(direction)}</div>
+                    <div class="ai-rsn">{esc(sdata.get("direction_reason", ""))}</div>
+                    <div>{bt}{dt}</div><div>{kt}</div>
+                    <div class="ai-body">{esc(sdata.get("summary", ""))}</div>
+                    <div class="ai-ft">根據 {len(ai_df_all)} 則 AI 分析新聞 · {st.session_state.get("_stime", "")} 台灣時間</div></div>"""),
+                                unsafe_allow_html=True)
+                    if st.button("🔄 重新生成總結", key="regen"):
+                        st.session_state.pop("_sum_key", None)
+                        st.rerun()
+                elif serr:
+                    st.warning(f"⏳ {serr}")
+                    if st.button("🔄 重試", key="regen_err"):
+                        st.session_state.pop("_sum_key", None)
+                        st.rerun()
 
-        ddf = df_r.copy()
-        effs = ddf.apply(lambda r: eff_sent(r)[0], axis=1)
-        if chip == "📈 利多":
-            ddf = ddf[effs == "bullish"]
-        elif chip == "📉 利空":
-            ddf = ddf[effs == "bearish"]
-        elif chip == "✦ AI 精選":
-            ddf = ddf[(ddf["ai_summary"].fillna("") != "") & (ddf["ai_score"].abs() >= 5)]
-        elif chip == "⚑ 地緣":
-            ddf = ddf[ddf["is_geo"] == True]
-        elif chip == "🏮 大陸":
-            # 「大陸生活」（娛樂/電玩/旅遊）平常不進新聞牆，只在這個篩選底下才併進來顯示
-            life_cn = df_all[df_all["category"] == "大陸生活"]
-            ddf = pd.concat([ddf[ddf["category"] == "大陸"], life_cn]).drop_duplicates(subset=["url"])
-            ddf = ddf.sort_values("published_at", ascending=False)
-        elif chip == "🌐 國際":
-            ddf = ddf[ddf["language"] == "en"]
-        if hide_neu:
-            ddf = ddf[ddf.apply(lambda r: eff_sent(r)[0] != "neutral", axis=1)]
-        if src_f != "全部":
-            ddf = ddf[ddf["source"] == src_f]
-        if kw:
-            m = (ddf["title"].str.contains(kw, case=False, na=False)
-                 | ddf["title_zh"].fillna("").str.contains(kw, case=False, na=False))
-            ddf = ddf[m]
-        if sort_f == "重要度":
-            ddf = ddf.sort_values(["importance_score", "published_at"], ascending=False)
+            # ── 地緣 ──
+            if not geo_df.empty:
+                st.markdown('<div class="sec">⚑ 地緣政治警示</div>', unsafe_allow_html=True)
+                g = ""
+                for _, r in geo_df.head(6).iterrows():
+                    s, _v = eff_sent(r)
+                    imp = "利多" if s == "bullish" else ("利空" if s == "bearish" else "中性")
+                    t, _o = titles(r)
+                    g += (f'<div class="geo"><a href="{esc(reader_href(str(r.get("url", ""))) if str(r.get("url", "")).startswith("http") else "#", quote=True)}" target="_blank" '
+                          f'rel="noopener">{esc(t)}</a> <span style="color:var(--tx3)">· {imp}</span></div>')
+                st.markdown(f'<div class="geo-grid">{g}</div>', unsafe_allow_html=True)
 
-        st.markdown('<div class="fn-dens"><span data-dens="card">▦ 卡片</span><span data-dens="list">☰ 列表</span></div>',
-                    unsafe_allow_html=True)
-        st.caption(f"共 {len(ddf)} 則（往下捲會自動載入更多）")
-        render_grid(ddf, max_items=240, lazy=24, cls="wall")
+            # ── 新聞牆 ──
+            st.markdown('<div class="sec">📋 最新新聞</div>', unsafe_allow_html=True)
+            chip = st.radio("快速篩選", ["全部", "🏮 大陸", "🌐 國際", "📈 利多", "📉 利空", "✦ AI 精選", "⚑ 地緣"],
+                            horizontal=True, label_visibility="collapsed", key="chip")
+            f1, f3, f4 = st.columns([1.2, 1, 1])
+            with f1:
+                src_list = sorted(df_r["source"].unique().tolist())
+                src_f = st.selectbox("來源", ["全部"] + src_list, key="d_src")
+            with f3:
+                sort_f = st.selectbox("排序", ["最新優先", "重要度"], key="d_sort")
+            with f4:
+                hide_neu = st.checkbox("隱藏中性", value=False, key="d_hide")
+
+            ddf = df_r.copy()
+            effs = ddf.apply(lambda r: eff_sent(r)[0], axis=1)
+            if chip == "📈 利多":
+                ddf = ddf[effs == "bullish"]
+            elif chip == "📉 利空":
+                ddf = ddf[effs == "bearish"]
+            elif chip == "✦ AI 精選":
+                ddf = ddf[(ddf["ai_summary"].fillna("") != "") & (ddf["ai_score"].abs() >= 5)]
+            elif chip == "⚑ 地緣":
+                ddf = ddf[ddf["is_geo"] == True]
+            elif chip == "🏮 大陸":
+                # 「大陸生活」（娛樂/電玩/旅遊）平常不進新聞牆，只在這個篩選底下才併進來顯示
+                life_cn = df_all[df_all["category"] == "大陸生活"]
+                ddf = pd.concat([ddf[ddf["category"] == "大陸"], life_cn]).drop_duplicates(subset=["url"])
+                ddf = ddf.sort_values("published_at", ascending=False)
+            elif chip == "🌐 國際":
+                ddf = ddf[ddf["language"] == "en"]
+            if hide_neu:
+                ddf = ddf[ddf.apply(lambda r: eff_sent(r)[0] != "neutral", axis=1)]
+            if src_f != "全部":
+                ddf = ddf[ddf["source"] == src_f]
+            if sort_f == "重要度":
+                ddf = ddf.sort_values(["importance_score", "published_at"], ascending=False)
+
+            st.markdown('<div class="fn-dens"><span data-dens="card">▦ 卡片</span><span data-dens="list">☰ 列表</span></div>',
+                        unsafe_allow_html=True)
+            st.caption(f"共 {len(ddf)} 則（往下捲會自動載入更多）")
+            render_grid(ddf, max_items=240, lazy=24, cls="wall")
 
 
 # ═══════════════════════════════════════════════
@@ -1735,41 +1760,6 @@ with tab_cal:
             st.markdown(_r, unsafe_allow_html=True)
         st.markdown(_parts_html(_sc.get("parts")), unsafe_allow_html=True)
         st.caption("社群內容只代表網友討論熱度，不是消息來源，也不是買賣依據。")
-
-
-# ═══════════════════════════════════════════════
-# TAB：搜尋新聞（即時查 Google News）
-# ═══════════════════════════════════════════════
-with tab_search:
-    st.caption("輸入任何關鍵字，現場去 Google News 查（不限於資料庫裡已有的新聞），結果不會存起來。")
-    with st.form("search_form", clear_on_submit=False):
-        sc1, sc2, sc3, sc4 = st.columns([3, 1.3, 1.3, 0.8])
-        with sc1:
-            sq = st.text_input("關鍵字", placeholder="例：台積電 2奈米 / Nvidia Rubin / 聯準會 降息", label_visibility="collapsed")
-        with sc2:
-            slang = st.selectbox("語言", ["中文", "英文（標題自動翻中文）", "中英文都找"], label_visibility="collapsed")
-        with sc3:
-            sdays = st.selectbox("時間", [1, 3, 7, 30], index=2, format_func=lambda d: f"近 {d} 天", label_visibility="collapsed")
-        with sc4:
-            go = st.form_submit_button("🔎 搜尋", type="primary", use_container_width=True)
-    if go and sq.strip():
-        st.session_state["last_search"] = (sq.strip(), slang, int(sdays))
-    ls = st.session_state.get("last_search")
-    if ls:
-        with st.spinner(f"正在搜尋「{ls[0]}」…"):
-            try:
-                sdf = live_search(*ls)
-            except Exception as e:
-                sdf = None
-                st.warning(f"搜尋失敗：{type(e).__name__}: {e}")
-        if sdf is not None:
-            if sdf.empty:
-                st.markdown('<div class="empty">找不到結果，換個關鍵字或放寬時間試試</div>', unsafe_allow_html=True)
-            else:
-                st.caption(f"「{ls[0]}」共 {len(sdf)} 則")
-                render_grid(sdf, max_items=40)
-    else:
-        st.markdown('<div class="empty">🔎 在上面輸入關鍵字開始搜尋</div>', unsafe_allow_html=True)
 
 
 # ═══════════════════════════════════════════════
