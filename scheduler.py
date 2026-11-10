@@ -20,9 +20,9 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
 
 from analyzer import Analyzer
-from crawler import run_crawl, is_routine_revenue
+from crawler import run_crawl, is_routine_revenue, image_for_url
 from database import (SessionLocal, init_db, save_article, save_articles, log_crawl,
-                      known_urls, export_json, import_json)
+                      known_urls, export_json, import_json, update_image)
 from groq_analyzer import (should_use_ai, groq_analyze, groq_tech_summary, groq_translate_titles,
                            _clear_ai_fields, _is_rate_limited)
 
@@ -124,6 +124,48 @@ def translate_titles(items: list[dict], limit: int = 300, api_key: str = "") -> 
 
 # 生活類（運動/娛樂/電玩）不做股市情緒、個股、地緣判斷
 LIFESTYLE = {"運動", "娛樂", "電玩", "旅遊"}
+
+
+def _backfill_images(limit: int = 40) -> int:
+    """已經在庫、當初沒抓到縮圖的旅遊／大陸生活文章（14 天內），隨機挑 limit 篇再補一次。
+    以前只有「新文章」才會補圖，所以舊的大陸文章永遠沒圖。隨機挑是為了避免永遠失敗的那幾篇卡住名額。"""
+    import random
+    from database import NewsArticle
+    db = SessionLocal()
+    n = 0
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=336)
+        rows = (db.query(NewsArticle)
+                  .filter(NewsArticle.category.in_(("旅遊", "大陸生活")), NewsArticle.published_at >= cutoff,
+                          (NewsArticle.image_url == "") | (NewsArticle.image_url.is_(None)))
+                  .all())
+        urls = [r.url for r in rows if r.url and r.url.startswith("http")]
+        if len(urls) > limit:
+            urls = random.sample(urls, limit)
+        if not urls:
+            return 0
+        stat = {"ok": 0, "fail": 0}
+
+        def _one(u):
+            if stat["ok"] == 0 and stat["fail"] >= 8:      # 前 8 篇全失敗（多半被擋）→ 放棄這輪
+                return ""
+            img = image_for_url(u)
+            stat["ok" if img else "fail"] += 1
+            return img
+
+        with ThreadPoolExecutor(max_workers=6) as ex:
+            imgs = list(ex.map(_one, urls))
+        for u, img in zip(urls, imgs):
+            if img:
+                update_image(db, u, img)
+                n += 1
+        db.commit()
+        logger.info(f"補舊文章縮圖 {n}/{len(urls)} 篇（旅遊／大陸生活，共 {len(rows)} 篇缺圖）")
+    except Exception as e:
+        logger.warning(f"補舊縮圖失敗：{e}")
+    finally:
+        db.close()
+    return n
 
 
 def _backfill_titles(api_key: str, limit: int = 200) -> int:
@@ -296,6 +338,8 @@ def crawl_and_save(enabled_names=None,
                       count=lg["count"], new_saved=0, skipped=0)
         if translate and groq_key_all:
             tr_count += _backfill_titles(groq_key_all)
+        if fetch_og:
+            _backfill_images()
         logger.info(f"完成：抓取 {len(articles)}、新文章 {len(fresh)}、新增 {saved}、"
                     f"去重 {skipped}、AI {ai_count}、翻譯 {tr_count}")
     except Exception as e:
