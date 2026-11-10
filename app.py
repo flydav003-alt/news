@@ -1566,6 +1566,7 @@ _WB_CATS = [
      ("美國", "日本", "俄羅斯", "烏克蘭", "以色列", "伊朗", "川普", "特朗普", "外交", "總統", "戰爭", "韓國", "歐盟",
       "聯合國", "巴勒斯坦", "加沙")),
 ]
+WB_ICONS = False   # True＝微博話題前面顯示分類圖示方塊
 _WB_DEFAULT_CAT = ("社會", "🗞️", ("#8C7B63", "#B3A48C"))
 # 個股標籤要擋掉的「一般詞」：這些公司簡稱太容易誤中（例：東南亞→南亞、蘋果＝水果）
 _TK_BLOCK = {"創意", "統一", "理想", "大成", "互連", "光芯", "蘋果", "博智", "耀華", "元太", "南亞", "中航", "台航",
@@ -1662,7 +1663,7 @@ def weibo_cards(sc: dict, n=20) -> str:
         bd += _tk_chips(p["t"])
         meta = f'<span>{esc(rel_epoch(p["s"]))}上榜</span>' if p.get("s") and not f["new"] else ""
         cname, cic, (g1, g2) = _wb_cat(p["t"])
-        lead = (f'<div class="sc-ic" title="{esc(cname, quote=True)}" '
+        lead = "" if not WB_ICONS else (f'<div class="sc-ic" title="{esc(cname, quote=True)}" '
                 f'style="background:linear-gradient(135deg,{g1},{g2})">{cic}</div>')
         out += _sc_card(i, p["t"], p["u"], heat_html=heat, badges=bd, meta=meta, lead=lead, medal=True)
     return out
@@ -1692,7 +1693,7 @@ def reddit_cards(sc: dict) -> str:
                 bd += f'<span class="bd bd-b">▲ 升 {pr - i} 名</span>'
             meta = f'<span>{esc(rel_epoch(p.get("p")))}發文</span>' if p.get("p") else ""
             out += _sc_card(i, p.get("z") or p["t"], p["u"], orig=(p["t"] if p.get("z") else ""),
-                            badges=bd, meta=meta, img=p.get("i", ""), big=(i <= 2))
+                            badges=bd, meta=meta, img=p.get("i", ""), big=False)
     return out or '<div class="rk-e">（Reddit 目前連不上）</div>'
 
 
