@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Optional
-from urllib.parse import quote, urljoin
+from urllib.parse import quote, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -332,16 +332,49 @@ _OG_ALT_RE = re.compile(
 )
 
 
+_BODY_IMG_RE = re.compile(r'<img\b([^>]*)>', re.I)
+_ATTR_RE = re.compile(r'(src|data-src|data-original|data-lazy-src|data-actualsrc|width|height)\s*=\s*["\']?([^"\'\s>]+)', re.I)
+_SKIP_IMG = ("qrcode", "erweima", "avatar", "icon", "sprite", "loading", "default", "blank", "tracking",
+             "weixin", "weibo", "wechat", "share", "banner", "/ad/", "ads.", "button", "arrow", "head_",
+             "touxiang", "bg_", "line.", "gif;base64", "data:image", "1x1", "pixel", ".gif", ".svg")
+
+
+def _body_image(html: str, base: str) -> str:
+    """網頁沒有 og:image 時（很多大陸地方媒體／新浪觀潮就是這樣），改取內文第一張像樣的圖：
+    跳過 logo、二維碼、頭像、圖示；標明寬或高小於 200 的也跳過。"""
+    for m in _BODY_IMG_RE.finditer(html):
+        attrs = {k.lower(): v for k, v in _ATTR_RE.findall(m.group(1))}
+        src = attrs.get("data-original") or attrs.get("data-src") or attrs.get("data-lazy-src") \
+            or attrs.get("data-actualsrc") or attrs.get("src") or ""
+        if not src:
+            continue
+        low = src.lower()
+        if any(k in low for k in _SKIP_IMG):
+            continue
+        try:
+            if (attrs.get("width") and int(re.sub(r"\D", "", attrs["width"]) or 999) < 200) or \
+               (attrs.get("height") and int(re.sub(r"\D", "", attrs["height"]) or 999) < 120):
+                continue
+        except ValueError:
+            pass
+        u = urljoin(base, _html.unescape(src))
+        if _ok_img(u):
+            return u
+    return ""
+
+
 def _fetch_og_image(url: str) -> str:
-    """抓頁面 <head> 的縮圖。大陸網站常給 //img.xxx.com/... 這種省略 http 的網址（以前被當成無效而丟掉），
-    這裡用 urljoin 補全；也處理 &amp; 與相對路徑，並多找 itemprop=image / image_src。"""
+    """抓頁面縮圖：先找 <head> 的 og:image 等；找不到再取內文第一張像樣的圖。
+    大陸網站常給 //img.xxx.com/... 這種省略 http 的網址（以前被當成無效而丟掉），用 urljoin 補全。"""
     try:
         r = requests.get(url, headers=HEADERS, timeout=(4, 7), stream=True, allow_redirects=True)
-        raw = r.raw.read(200_000, decode_content=True)
+        raw = r.raw.read(300_000, decode_content=True)
         enc = r.encoding or "utf-8"
         try:
             html = raw.decode(enc, "ignore")
         except LookupError:
+            html = raw.decode("utf-8", "ignore")
+        if enc.lower() in ("iso-8859-1", "latin-1", "latin1"):      # requests 對沒標 charset 的頁面會亂猜成 latin-1
             html = raw.decode("utf-8", "ignore")
         base = r.url or url
         for m in _OG_ALT_RE.finditer(html):
@@ -351,6 +384,7 @@ def _fetch_og_image(url: str) -> str:
             u = urljoin(base, _html.unescape(u))
             if _ok_img(u):
                 return u
+        return _body_image(html, base)
     except Exception:
         pass
     return ""
@@ -364,6 +398,16 @@ def _with_deadline(fn, secs: float, *args):
     return box[0] if box else ""
 
 
+IMG_STATS = {"resolve_fail": 0, "no_img": {}}
+
+
+def log_img_stats(tag: str) -> None:
+    """列出補圖失敗的原因：還原 Google News 網址失敗幾篇、還原了但頁面找不到圖的網域前幾名。"""
+    top = sorted(IMG_STATS["no_img"].items(), key=lambda kv: -kv[1])[:6]
+    logger.info(f"{tag}：還原網址失敗 {IMG_STATS['resolve_fail']} 篇；頁面抓不到圖的網域：" +
+                (", ".join(f"{h}×{n}" for h, n in top) or "無"))
+
+
 def image_for_url(url: str) -> str:
     """給任何文章網址找縮圖（Google News 連結會先還原）。補舊文章用。"""
     if "news.google.com" in url:
@@ -372,13 +416,20 @@ def image_for_url(url: str) -> str:
 
 
 def _gn_real_image(gn_url: str) -> str:
-    """Google News 連結 → 還原真實網址（reader.py 的解析）→ 抓 og:image。任何失敗回傳空字串。"""
+    """Google News 連結 → 還原真實網址（reader.py 的解析）→ 抓縮圖。任何失敗回傳空字串（並記錄原因）。"""
     try:
         from reader import _resolve_google
         real = _resolve_google(gn_url)
     except Exception:
+        real = ""
+    if not real:
+        IMG_STATS["resolve_fail"] += 1
         return ""
-    return _fetch_og_image(real) if real else ""
+    img = _fetch_og_image(real)
+    if not img:
+        h = urlparse(real).netloc
+        IMG_STATS["no_img"][h] = IMG_STATS["no_img"].get(h, 0) + 1
+    return img
 
 
 GN_IMG_LIMIT = 45     # 每輪最多還原幾篇 Google News 旅遊連結（每篇要多打 1~2 次請求）
@@ -426,6 +477,7 @@ def fill_missing_images(articles: list[dict], limit: int = 400) -> int:
                 a["image_url"] = img
                 got += 1
         logger.info(f"Google News 連結還原補圖：嘗試 {stat['ok'] + stat['fail']}/{len(gn)} 篇，補到 {got} 張")
+        log_img_stats("新文章補圖失敗原因")
         n += got
     return n
 
