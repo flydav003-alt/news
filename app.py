@@ -1972,7 +1972,9 @@ def render_life_tab(cat: str, icon: str):
             cn = cn[cn["title"].apply(_cn_life_kind) == cat]
             if cat == "旅遊":      # 擋掉「文旅規劃／基金／示範區」這類政策產業稿，只留看得出是玩的
                 cn = cn[~cn["title"].fillna("").str.contains("|".join(_CN_TRAVEL_NOISE), regex=True)]
-            cn = cn.sort_values("published_at", ascending=False).head(CN_LIFE_N)
+            cn = cn.sort_values("published_at", ascending=False)
+            if cat != "旅遊":                      # 旅遊不限則數（全部都顯示）；娛樂／電玩維持精選
+                cn = cn.head(CN_LIFE_N)
             cn_n = len(cn)
             d0 = pd.concat([d0, cn]).drop_duplicates(subset=["url"])
     if d0.empty:
@@ -2006,8 +2008,7 @@ def render_life_tab(cat: str, icon: str):
             st.markdown('<div class="empty">🧳 這個條件下沒有符合的旅遊新聞（可以取消「只看有圖片」試試）</div>', unsafe_allow_html=True)
             return
         d0, _ = recent(d0, hours_steps=(336, 720), min_n=1)      # 放寬：旅遊文章最多顯示 14 天內的
-        _cn_shown = int((d0["category"] == "大陸生活").sum())
-        st.caption(f"共 {len(d0)} 則" + (f"（含大陸精選 {_cn_shown} 則）" if _cn_shown else ""))
+        st.caption(f"共 {len(d0)} 則")
         render_grid(d0.sort_values("published_at", ascending=False), max_items=200, lazy=18)
         return
     d0, _ = recent(d0, hours_steps=(24, 48, 72, 168), min_n=6)
