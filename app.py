@@ -1524,8 +1524,8 @@ qs = fetch_quotes()
 if qs:
     st.markdown(quotes_html(qs), unsafe_allow_html=True)
 
-tab_home, tab_ai, tab_sports, tab_ent, tab_game, tab_cal, tab_search, tab_cfg = st.tabs(
-    ["📰 今日新聞", "🤖 AI 專區", "⚽ 運動", "🎬 娛樂", "🎮 電玩", "📅 行事曆", "🔎 搜尋", "⚙️ 設定"])
+tab_home, tab_ai, tab_sports, tab_ent, tab_game, tab_cal, tab_cfg = st.tabs(
+    ["📰 今日新聞", "🤖 AI 專區", "⚽ 運動", "🎬 娛樂", "🎮 電玩", "📅 行事曆", "⚙️ 設定"])
 
 # ═══════════════════════════════════════════════
 # TAB 1：今日新聞
@@ -1638,51 +1638,72 @@ with tab_home:
 
         # ── 新聞牆 ──
         st.markdown('<div class="sec">📋 最新新聞</div>', unsafe_allow_html=True)
-        chip = st.radio("快速篩選", ["全部", "🏮 大陸", "🌐 國際", "📈 利多", "📉 利空", "✦ AI 精選", "⚑ 地緣"],
-                        horizontal=True, label_visibility="collapsed", key="chip")
-        f1, f2, f3, f4 = st.columns([1.2, 2.4, 1, 1])
-        with f1:
-            src_list = sorted(df_r["source"].unique().tolist())
-            src_f = st.selectbox("來源", ["全部"] + src_list, key="d_src")
-        with f2:
-            kw = st.text_input("搜尋標題（中英文皆可）", placeholder="台積電 / Nvidia …", key="d_kw")
-        with f3:
-            sort_f = st.selectbox("排序", ["最新優先", "重要度"], key="d_sort")
-        with f4:
-            hide_neu = st.checkbox("隱藏中性", value=False, key="d_hide")
+        with st.form("search_form", clear_on_submit=False):
+            sc1, sc2 = st.columns([5, 1])
+            with sc1:
+                sq = st.text_input("搜尋標題（中英文皆可）", placeholder="搜尋標題（中英文皆可）：台積電 / Nvidia …",
+                                   label_visibility="collapsed")
+            with sc2:
+                go = st.form_submit_button("🔎 搜尋", type="primary", use_container_width=True)
+        if go:
+            if sq.strip():
+                st.session_state["last_search"] = (sq.strip(), "中英文都找", 7)
+            else:
+                st.session_state.pop("last_search", None)
+        ls = st.session_state.get("last_search")
+        if ls:
+            with st.spinner(f"正在搜尋「{ls[0]}」…"):
+                try:
+                    sdf = live_search(*ls)
+                except Exception as e:
+                    sdf = None
+                    st.warning(f"搜尋失敗：{type(e).__name__}: {e}")
+            if sdf is not None:
+                if sdf.empty:
+                    st.markdown('<div class="empty">找不到結果，換個關鍵字試試</div>', unsafe_allow_html=True)
+                else:
+                    st.caption(f"「{ls[0]}」共 {len(sdf)} 則（清空搜尋框再按搜尋可回到最新新聞）")
+                    render_grid(sdf, max_items=40)
+        else:
+            chip = st.radio("快速篩選", ["全部", "🏮 大陸", "🌐 國際", "📈 利多", "📉 利空", "✦ AI 精選", "⚑ 地緣"],
+                            horizontal=True, label_visibility="collapsed", key="chip")
+            f1, f3, f4 = st.columns([1.2, 1, 1])
+            with f1:
+                src_list = sorted(df_r["source"].unique().tolist())
+                src_f = st.selectbox("來源", ["全部"] + src_list, key="d_src")
+            with f3:
+                sort_f = st.selectbox("排序", ["最新優先", "重要度"], key="d_sort")
+            with f4:
+                hide_neu = st.checkbox("隱藏中性", value=False, key="d_hide")
 
-        ddf = df_r.copy()
-        effs = ddf.apply(lambda r: eff_sent(r)[0], axis=1)
-        if chip == "📈 利多":
-            ddf = ddf[effs == "bullish"]
-        elif chip == "📉 利空":
-            ddf = ddf[effs == "bearish"]
-        elif chip == "✦ AI 精選":
-            ddf = ddf[(ddf["ai_summary"].fillna("") != "") & (ddf["ai_score"].abs() >= 5)]
-        elif chip == "⚑ 地緣":
-            ddf = ddf[ddf["is_geo"] == True]
-        elif chip == "🏮 大陸":
-            # 「大陸生活」（娛樂/電玩/旅遊）平常不進新聞牆，只在這個篩選底下才併進來顯示
-            life_cn = df_all[df_all["category"] == "大陸生活"]
-            ddf = pd.concat([ddf[ddf["category"] == "大陸"], life_cn]).drop_duplicates(subset=["url"])
-            ddf = ddf.sort_values("published_at", ascending=False)
-        elif chip == "🌐 國際":
-            ddf = ddf[ddf["language"] == "en"]
-        if hide_neu:
-            ddf = ddf[ddf.apply(lambda r: eff_sent(r)[0] != "neutral", axis=1)]
-        if src_f != "全部":
-            ddf = ddf[ddf["source"] == src_f]
-        if kw:
-            m = (ddf["title"].str.contains(kw, case=False, na=False)
-                 | ddf["title_zh"].fillna("").str.contains(kw, case=False, na=False))
-            ddf = ddf[m]
-        if sort_f == "重要度":
-            ddf = ddf.sort_values(["importance_score", "published_at"], ascending=False)
+            ddf = df_r.copy()
+            effs = ddf.apply(lambda r: eff_sent(r)[0], axis=1)
+            if chip == "📈 利多":
+                ddf = ddf[effs == "bullish"]
+            elif chip == "📉 利空":
+                ddf = ddf[effs == "bearish"]
+            elif chip == "✦ AI 精選":
+                ddf = ddf[(ddf["ai_summary"].fillna("") != "") & (ddf["ai_score"].abs() >= 5)]
+            elif chip == "⚑ 地緣":
+                ddf = ddf[ddf["is_geo"] == True]
+            elif chip == "🏮 大陸":
+                # 「大陸生活」（娛樂/電玩/旅遊）平常不進新聞牆，只在這個篩選底下才併進來顯示
+                life_cn = df_all[df_all["category"] == "大陸生活"]
+                ddf = pd.concat([ddf[ddf["category"] == "大陸"], life_cn]).drop_duplicates(subset=["url"])
+                ddf = ddf.sort_values("published_at", ascending=False)
+            elif chip == "🌐 國際":
+                ddf = ddf[ddf["language"] == "en"]
+            if hide_neu:
+                ddf = ddf[ddf.apply(lambda r: eff_sent(r)[0] != "neutral", axis=1)]
+            if src_f != "全部":
+                ddf = ddf[ddf["source"] == src_f]
+            if sort_f == "重要度":
+                ddf = ddf.sort_values(["importance_score", "published_at"], ascending=False)
 
-        st.markdown('<div class="fn-dens"><span data-dens="card">▦ 卡片</span><span data-dens="list">☰ 列表</span></div>',
-                    unsafe_allow_html=True)
-        st.caption(f"共 {len(ddf)} 則（往下捲會自動載入更多）")
-        render_grid(ddf, max_items=240, lazy=24, cls="wall")
+            st.markdown('<div class="fn-dens"><span data-dens="card">▦ 卡片</span><span data-dens="list">☰ 列表</span></div>',
+                        unsafe_allow_html=True)
+            st.caption(f"共 {len(ddf)} 則（往下捲會自動載入更多）")
+            render_grid(ddf, max_items=240, lazy=24, cls="wall")
 
 
 # ═══════════════════════════════════════════════
@@ -1735,41 +1756,6 @@ with tab_cal:
             st.markdown(_r, unsafe_allow_html=True)
         st.markdown(_parts_html(_sc.get("parts")), unsafe_allow_html=True)
         st.caption("社群內容只代表網友討論熱度，不是消息來源，也不是買賣依據。")
-
-
-# ═══════════════════════════════════════════════
-# TAB：搜尋新聞（即時查 Google News）
-# ═══════════════════════════════════════════════
-with tab_search:
-    st.caption("輸入任何關鍵字，現場去 Google News 查（不限於資料庫裡已有的新聞），結果不會存起來。")
-    with st.form("search_form", clear_on_submit=False):
-        sc1, sc2, sc3, sc4 = st.columns([3, 1.3, 1.3, 0.8])
-        with sc1:
-            sq = st.text_input("關鍵字", placeholder="例：台積電 2奈米 / Nvidia Rubin / 聯準會 降息", label_visibility="collapsed")
-        with sc2:
-            slang = st.selectbox("語言", ["中文", "英文（標題自動翻中文）", "中英文都找"], label_visibility="collapsed")
-        with sc3:
-            sdays = st.selectbox("時間", [1, 3, 7, 30], index=2, format_func=lambda d: f"近 {d} 天", label_visibility="collapsed")
-        with sc4:
-            go = st.form_submit_button("🔎 搜尋", type="primary", use_container_width=True)
-    if go and sq.strip():
-        st.session_state["last_search"] = (sq.strip(), slang, int(sdays))
-    ls = st.session_state.get("last_search")
-    if ls:
-        with st.spinner(f"正在搜尋「{ls[0]}」…"):
-            try:
-                sdf = live_search(*ls)
-            except Exception as e:
-                sdf = None
-                st.warning(f"搜尋失敗：{type(e).__name__}: {e}")
-        if sdf is not None:
-            if sdf.empty:
-                st.markdown('<div class="empty">找不到結果，換個關鍵字或放寬時間試試</div>', unsafe_allow_html=True)
-            else:
-                st.caption(f"「{ls[0]}」共 {len(sdf)} 則")
-                render_grid(sdf, max_items=40)
-    else:
-        st.markdown('<div class="empty">🔎 在上面輸入關鍵字開始搜尋</div>', unsafe_allow_html=True)
 
 
 # ═══════════════════════════════════════════════
