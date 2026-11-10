@@ -852,10 +852,10 @@ def live_search(q: str, lang: str, days: int):
     srcs = []
     if lang in ("中文", "中英文都找"):
         srcs.append({"name": "GN-搜尋", "url": _gnews(q, en=False, when=f"{days}d"), "language": "zh",
-                     "category": "財經", "strip_suffix": True, "max_items": 40})
+                     "category": "財經", "strip_suffix": True, "max_items": 100})
     if lang in ("英文（標題自動翻中文）", "中英文都找"):
         srcs.append({"name": "GN-搜尋EN", "url": _gnews(q, en=True, when=f"{days}d"), "language": "en",
-                     "category": "國際", "strip_suffix": True, "max_items": 40})
+                     "category": "國際", "strip_suffix": True, "max_items": 100})
     items = []
     for s in srcs:
         items.extend(fetch_rss(s))
@@ -874,7 +874,7 @@ def live_search(q: str, lang: str, days: int):
                                                 ensure_ascii=False),
                    "ai_sentiment": "", "ai_score": 0.0, "ai_summary": "", "ai_affected_tickers": "",
                    "importance_score": 0.0, "title_zh": "", "image_url": ""})
-    translate_titles(uniq, limit=40, api_key=_secret("GROQ_API_KEY"))
+    translate_titles(uniq, limit=100, api_key=_secret("GROQ_API_KEY"))
     df = pd.DataFrame(uniq)
     if not df.empty:
         df = df.sort_values("published_at", ascending=False).reset_index(drop=True)
@@ -1589,18 +1589,38 @@ with tab_home:
                 st.session_state.pop("last_search", None)
         ls = st.session_state.get("last_search")
         if ls:
+            # ① 先找網站資料庫裡符合的（標題含全部關鍵字，且在所選時間內）
+            _toks = [t for t in ls[0].lower().split() if t]
+            _blob_t = (df_all["title"].fillna("") + " " + df_all["title_zh"].fillna("")).str.lower()
+            _m = pd.Series(True, index=df_all.index)
+            for _t in _toks:
+                _m &= _blob_t.str.contains(_t, regex=False)
+            _m &= df_all["published_at"].apply(age_hours) <= ls[2] * 24
+            db_hit = df_all[_m].sort_values("published_at", ascending=False)
+
+            # ② 再即時去 Google News 找
             with st.spinner(f"正在搜尋「{ls[0]}」…"):
                 try:
                     sdf = live_search(*ls)
                 except Exception as e:
                     sdf = None
-                    st.warning(f"搜尋失敗：{type(e).__name__}: {e}")
-            if sdf is not None:
-                if sdf.empty:
+                    st.warning(f"Google News 搜尋失敗：{type(e).__name__}: {e}")
+            if sdf is not None and not sdf.empty and not db_hit.empty:
+                _seen_u = set(db_hit["url"].astype(str))
+                _seen_t = set(db_hit["title"].fillna("").str.strip())
+                sdf = sdf[~sdf["url"].astype(str).isin(_seen_u) & ~sdf["title"].fillna("").str.strip().isin(_seen_t)]
+
+            if db_hit.empty and (sdf is None or sdf.empty):
+                if sdf is not None:
                     st.markdown('<div class="empty">找不到結果，換個關鍵字試試</div>', unsafe_allow_html=True)
-                else:
-                    st.caption(f"「{ls[0]}」共 {len(sdf)} 則（清空搜尋框再按搜尋可回到最新新聞）")
-                    render_grid(sdf, max_items=40)
+            else:
+                if not db_hit.empty:
+                    st.markdown(f'<div class="sec">📚 網站內的新聞（{len(db_hit)} 則）</div>', unsafe_allow_html=True)
+                    render_grid(db_hit, max_items=200)
+                if sdf is not None and not sdf.empty:
+                    st.markdown(f'<div class="sec">🌐 Google News 搜尋結果（{len(sdf)} 則）</div>', unsafe_allow_html=True)
+                    render_grid(sdf, max_items=200)
+                st.caption("清空搜尋框再按搜尋，可回到最新新聞")
         else:
             # ── 頭條 ──
             st.markdown('<div class="sec">🔥 今日頭條</div>', unsafe_allow_html=True)
