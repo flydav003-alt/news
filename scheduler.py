@@ -20,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
 
 from analyzer import Analyzer
-from crawler import run_crawl, is_routine_revenue, image_for_url
+from crawler import run_crawl, is_routine_revenue, image_for_url, log_img_stats
 from database import (SessionLocal, init_db, save_article, save_articles, log_crawl,
                       known_urls, export_json, import_json, update_image)
 from groq_analyzer import (should_use_ai, groq_analyze, groq_tech_summary, groq_translate_titles,
@@ -126,7 +126,7 @@ def translate_titles(items: list[dict], limit: int = 300, api_key: str = "") -> 
 LIFESTYLE = {"運動", "娛樂", "電玩", "旅遊"}
 
 
-def _backfill_images(limit: int = 40) -> int:
+def _backfill_images(limit: int = 60) -> int:
     """已經在庫、當初沒抓到縮圖的旅遊／大陸生活文章（14 天內），隨機挑 limit 篇再補一次。
     以前只有「新文章」才會補圖，所以舊的大陸文章永遠沒圖。隨機挑是為了避免永遠失敗的那幾篇卡住名額。"""
     import random
@@ -161,6 +161,7 @@ def _backfill_images(limit: int = 40) -> int:
                 n += 1
         db.commit()
         logger.info(f"補舊文章縮圖 {n}/{len(urls)} 篇（旅遊／大陸生活，共 {len(rows)} 篇缺圖）")
+        log_img_stats("補舊圖失敗原因")
     except Exception as e:
         logger.warning(f"補舊縮圖失敗：{e}")
     finally:
