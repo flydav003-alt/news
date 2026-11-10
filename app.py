@@ -2294,6 +2294,30 @@ with tab_cfg:
             _e = EXTRAS.get(_k) or {}
             st.markdown(f'{_lab}：`{_e.get("status", "沒有資料")}`　更新於 {esc(str(_e.get("fetched_at", "—"))[:16])}'
                         + _parts_html(_e.get("parts")), unsafe_allow_html=True)
+
+    # ── 臨時診斷：測試 Streamlit 主機能否連到台灣社群網站（測完可整段刪除）──
+    st.markdown("#### 🔬 社群來源連線測試（臨時）")
+    st.caption("測試「Streamlit 這台主機」能不能連到這些網站。測完請把這段刪掉。")
+    if st.button("測試連線", key="diag_conn"):
+        _diag_urls = [
+            ("PTT 股板網頁", "https://www.ptt.cc/bbs/Stock/index.html"),
+            ("PTT 股板 RSS", "https://www.ptt.cc/atom/Stock.xml"),
+            ("pttweb 熱門", "https://www.pttweb.cc/hot/all/today"),
+            ("巴哈姆特", "https://forum.gamer.com.tw/"),
+            ("Dcard", "https://www.dcard.tw/f"),
+        ]
+        for _name, _u in _diag_urls:
+            try:
+                _r = requests.get(_u, timeout=10, cookies={"over18": "1"},
+                                  headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                                         "AppleWebKit/537.36 Chrome/124.0 Safari/537.36"})
+                _t = _r.text[:3000]
+                _cf = any(k in _t for k in ("Just a moment", "cf-chl", "Attention Required", "Enable JavaScript"))
+                _flag = "⚠️ 被 Cloudflare 擋" if _cf else ("✅ 看起來可用" if _r.status_code == 200 else "❌ 被拒絕")
+                st.write(f"**{_name}**　HTTP {_r.status_code}　{len(_r.text)} 字元　{_flag}")
+            except Exception as _e:
+                st.write(f"**{_name}**　❌ {type(_e).__name__}")
+
     st.divider()
     st.markdown("#### 📡「立即抓取」要用哪些來源")
     st.caption("GitHub Actions 的自動抓取固定用 crawler.py 裡 enabled=True 的來源；這裡只影響頁面上的手動按鈕。")
