@@ -744,6 +744,53 @@ def _is_sticky(title: str, ts: int) -> bool:
     return bool(STICKY_MAX_AGE_H and ts and (time.time() - ts) / 3600 > STICKY_MAX_AGE_H)
 
 
+_IMG_EXT = (".jpg", ".jpeg", ".png", ".webp", ".gif")
+_REDDIT_HOSTS = ("reddit.com", "redd.it", "redditmedia.com", "redditstatic.com")
+OG_FALLBACK_MAX = 10                    # 每輪最多去外部連結抓幾張 og:image（避免拖慢流程）
+
+
+def _reddit_extlink(e) -> str:
+    """貼文內文裡 [link] 指到的外部網址（連結貼文才有；站內貼文回傳空字串）"""
+    raw = ""
+    for c in (e.get("content") or []):
+        raw += c.get("value", "")
+    raw += str(e.get("summary", "") or "")
+    m = re.search(r'<a href="([^"]+)">\s*\[link\]\s*</a>', raw)
+    if not m:
+        return ""
+    u = m.group(1).replace("&amp;", "&")
+    host = re.sub(r"^https?://([^/]+).*$", r"\1", u).lower()
+    if any(host == h or host.endswith("." + h) for h in _REDDIT_HOSTS) and not host.startswith("i.redd.it"):
+        return ""
+    return u
+
+
+def _og_fill(rows_by_sub: dict) -> int:
+    """沒有縮圖的連結貼文：去外部網址抓 og:image（跟新聞卡片補圖同一套）。回傳補到幾張"""
+    todo = []
+    for lst in rows_by_sub.values():
+        for r in lst:
+            if r.get("_x") and not r.get("i"):
+                todo.append(r)
+    todo = todo[:OG_FALLBACK_MAX]
+    if not todo:
+        return 0
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        from crawler import _fetch_og_image
+        with ThreadPoolExecutor(max_workers=5) as ex:
+            imgs = list(ex.map(lambda r: _fetch_og_image(r["_x"]), todo))
+    except Exception as ex_:
+        logger.warning(f"Reddit og:image 補圖失敗：{type(ex_).__name__}: {ex_}")
+        return 0
+    n = 0
+    for r, img in zip(todo, imgs):
+        if img:
+            r["i"] = img
+            n += 1
+    return n
+
+
 def fetch_reddit():
     out, errs = {}, []
     deadline = time.time() + REDDIT_BUDGET
@@ -766,8 +813,13 @@ def fetch_reddit():
                     continue
                 row = {"t": t, "u": e.get("link", ""), "p": ts}
                 img = _reddit_img(e)
+                lk = _reddit_extlink(e)
+                if not img and lk and lk.lower().split("?")[0].endswith(_IMG_EXT):
+                    img = lk                                  # 直接就是圖片連結（i.redd.it 等）
                 if img:
                     row["i"] = img
+                elif lk:
+                    row["_x"] = lk                            # 之後去外部網址抓 og:image（暫存，輸出前會移除）
                 if pin:
                     row["pin"] = 1
                 rows.append(row)
@@ -776,6 +828,12 @@ def fetch_reddit():
             out[sub] = rows
         else:
             errs.append(sub)
+    got = _og_fill(out)
+    for lst in out.values():
+        for r in lst:
+            r.pop("_x", None)
+    logger.info("Reddit 縮圖：" + "、".join(f"r/{s} {sum(1 for p in l if p.get('i'))}/{len(l)}" for s, l in out.items())
+                + f"（og:image 補 {got} 張）")
     return out, errs
 
 
