@@ -12,6 +12,7 @@ crawler.py — 新聞抓取模組 v3（中英文來源 + 縮圖）
 import logging
 import re
 import time
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -55,7 +56,8 @@ HEADERS = {
     "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.5",
     "Accept-Encoding": "gzip, deflate",
 }
-TIMEOUT   = (5, 12)     # (連線, 讀取) 秒；以前單一來源最久會卡 20 秒
+TIMEOUT   = (4, 8)      # (連線, 讀取) 秒
+SOURCE_DEADLINE = 8     # 單一來源整體硬上限（秒）：超過就放棄、回傳 0 則，不拖慢整輪
 MAX_ITEMS = 50
 CRAWL_WORKERS = 10       # 同時抓幾個來源（Google News 約 20 個，太高可能被限流，可視情況調 6~12）
 
@@ -251,8 +253,6 @@ SOURCES = [
     # ── 📷 風景／攝影專站（照片為主；直連 RSS 多半有大圖，網址同樣沒辦法連線驗證，看來源健康度）──
     {"name": "Wikimedia 每日精選圖", "url": "https://commons.wikimedia.org/w/api.php?action=featuredfeed&feed=potd&feedformat=rss&language=en",
      "language": "en", "category": "旅遊", "region": "國外", "enabled": True, "max_items": 8},
-    {"name": "NASA 地球觀測每日圖", "url": "https://earthobservatory.nasa.gov/feeds/image-of-the-day.rss",
-     "language": "en", "category": "旅遊", "region": "國外", "enabled": True, "max_items": 6},
     {"name": "Outdoor Photographer", "url": "https://www.outdoorphotographer.com/feed/",
      "language": "en", "category": "旅遊", "region": "國外", "enabled": True, "max_items": 8},
     {"name": "500px ISO",     "url": "https://iso.500px.com/feed/",
@@ -441,6 +441,25 @@ def fetch_rss(source: dict) -> list[dict]:
 
 
 # ── 主執行入口 ────────────────────────────────────────────────────────────────
+def _fetch_limited(source: dict) -> list[dict]:
+    """單一來源最多等 SOURCE_DEADLINE 秒（含 requests 失敗後 feedparser 直連那段，那段本身沒有逾時）。"""
+    box: list = []
+
+    def _run():
+        try:
+            box.append(fetch_rss(source))
+        except Exception as e:
+            logger.warning(f"[{source['name']}] 抓取例外：{type(e).__name__}")
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(SOURCE_DEADLINE)
+    if t.is_alive():
+        logger.warning(f"[{source['name']}] 超過 {SOURCE_DEADLINE} 秒，放棄")
+        return []
+    return box[0] if box else []
+
+
 def run_crawl(enabled_names: Optional[list[str]] = None,
               fetch_og: bool = False,
               known_urls: Optional[set] = None) -> tuple[list[dict], list[dict]]:
@@ -465,7 +484,7 @@ def run_crawl(enabled_names: Optional[list[str]] = None,
     # 以前是一個一個排隊抓（約 55 個來源，慢的來源最多各等 20 秒），現在同時抓 CRAWL_WORKERS 個。
     # ex.map 會照 SOURCES 原本順序回傳，所以文章與 log 順序、下游行為都跟以前一樣。
     with ThreadPoolExecutor(max_workers=CRAWL_WORKERS) as ex:
-        results = list(ex.map(fetch_rss, todo))
+        results = list(ex.map(_fetch_limited, todo))
     for src, articles in zip(todo, results):
         logs.append({
             "source": src["name"],
