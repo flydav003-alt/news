@@ -399,6 +399,12 @@ body.fn-compact .cm-b .tr{display:none}
   [data-testid="stHorizontalBlock"]:has(.topbar)>div:nth-child(1){flex:1 1 0!important}
   [data-testid="stHorizontalBlock"]:has(.topbar)>div:nth-child(2){flex:0 0 92px!important}
   [data-testid="stHorizontalBlock"]:has(.topbar)>div:nth-child(3){flex:0 0 84px!important}
+  [data-testid="stForm"]{padding:10px!important}
+  [data-testid="stForm"] [data-testid="stHorizontalBlock"]{flex-direction:row!important;flex-wrap:wrap!important;gap:8px!important}
+  [data-testid="stForm"] [data-testid="stHorizontalBlock"]>div{min-width:0!important;width:auto!important}
+  [data-testid="stForm"] [data-testid="stHorizontalBlock"]>div:nth-child(1){flex:1 1 100%!important}
+  [data-testid="stForm"] [data-testid="stHorizontalBlock"]>div:nth-child(2){flex:1.5 1 0!important}
+  [data-testid="stForm"] [data-testid="stHorizontalBlock"]>div:nth-child(3){flex:1 1 0!important}
   .qbar{display:flex;overflow-x:auto;gap:6px;margin:2px 0 6px;scrollbar-width:none}.qbar::-webkit-scrollbar{display:none}
   .q{flex:0 0 auto;min-width:98px;padding:4px 8px}.q-p{font-size:14px}.q-n,.q-c{font-size:11px}
   .mrow{gap:6px}.m{padding:5px 10px;min-width:0;flex:1 1 28%}.m-v{font-size:16px}
@@ -1608,7 +1614,7 @@ with tab_home:
             with _bc1:
                 st.button("✕ 取消搜尋，回到今日新聞", on_click=_clear_search, key="clear_search")
             with _bc2:
-                s_sort = st.radio("排序", ["預設（各版由新到舊）", "🕒 時間排序（不分版本）"], horizontal=True,
+                s_sort = st.radio("排序", ["預設", "🕒 時間排序"], horizontal=True,
                                   label_visibility="collapsed", key="search_sort")
             # ① 先找網站資料庫裡符合的（標題含全部關鍵字，且在所選時間內）
             _toks = [t for t in ls[0].lower().split() if t]
