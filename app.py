@@ -850,15 +850,27 @@ def live_search(q: str, lang: str, days: int):
     from analyzer import Analyzer
     from scheduler import translate_titles
     srcs = []
+    # 排序：① 繁中台灣版 → ② 美國英文版 → ③ 中國大陸簡體版
     if lang in ("中文", "中英文都找"):
         srcs.append({"name": "GN-搜尋", "url": _gnews(q, en=False, when=f"{days}d"), "language": "zh",
-                     "category": "財經", "strip_suffix": True, "max_items": 100})
+                     "category": "財經", "strip_suffix": True, "max_items": 100, "_rank": 0})
     if lang in ("英文（標題自動翻中文）", "中英文都找"):
         srcs.append({"name": "GN-搜尋EN", "url": _gnews(q, en=True, when=f"{days}d"), "language": "en",
-                     "category": "國際", "strip_suffix": True, "max_items": 100})
+                     "category": "國際", "strip_suffix": True, "max_items": 100, "_rank": 1})
+    if lang in ("中文", "中英文都找"):
+        try:                                           # 大陸簡體版要用簡體關鍵字才搜得準
+            from opencc import OpenCC
+            q_cn = OpenCC("t2s").convert(q)
+        except Exception:
+            q_cn = q
+        srcs.append({"name": "GN-搜尋大陸", "url": _gnews(q_cn, cn=True, when=f"{days}d"), "language": "zh",
+                     "category": "大陸", "strip_suffix": True, "s2t": True, "max_items": 100, "_rank": 2})
     items = []
     for s in srcs:
-        items.extend(fetch_rss(s))
+        got = fetch_rss(s)
+        for it in got:
+            it["_rank"] = s["_rank"]
+        items.extend(got)
     seen, uniq = set(), []
     for it in items:
         if it["url"] in seen:
@@ -877,7 +889,7 @@ def live_search(q: str, lang: str, days: int):
     translate_titles(uniq, limit=100, api_key=_secret("GROQ_API_KEY"))
     df = pd.DataFrame(uniq)
     if not df.empty:
-        df = df.sort_values("published_at", ascending=False).reset_index(drop=True)
+        df = df.sort_values(["_rank", "published_at"], ascending=[True, False]).reset_index(drop=True)
     return df
 
 
@@ -1623,7 +1635,7 @@ with tab_home:
                     render_grid(db_hit, max_items=200)
                 if sdf is not None and not sdf.empty:
                     st.markdown(f'<div class="sec">🌐 Google News 搜尋結果（{len(sdf)} 則）</div>', unsafe_allow_html=True)
-                    render_grid(sdf, max_items=200)
+                    render_grid(sdf, max_items=300)
         else:
             # ── 頭條 ──
             st.markdown('<div class="sec">🔥 今日頭條</div>', unsafe_allow_html=True)
