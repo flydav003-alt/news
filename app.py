@@ -399,8 +399,12 @@ body.fn-compact .cm-b .tr{display:none}
   [data-testid="stHorizontalBlock"]:has(.topbar)>div:nth-child(1){flex:1 1 0!important}
   [data-testid="stHorizontalBlock"]:has(.topbar)>div:nth-child(2){flex:0 0 92px!important}
   [data-testid="stHorizontalBlock"]:has(.topbar)>div:nth-child(3){flex:0 0 84px!important}
-  [data-testid="stForm"]{padding:10px!important}
-  [data-testid="stForm"] [data-testid="stHorizontalBlock"]{flex-direction:row!important;flex-wrap:wrap!important;gap:8px!important}
+  [data-testid="stForm"]{padding:6px 8px!important}
+  [data-testid="stForm"] [data-testid="stVerticalBlock"]{gap:.35rem!important}
+  [data-testid="stForm"] input{padding:5px 10px!important;font-size:15px!important;min-height:0!important}
+  [data-testid="stForm"] [data-baseweb="select"]>div{min-height:36px!important;font-size:15px!important}
+  [data-testid="stForm"] button{min-height:36px!important;padding:0 6px!important;font-size:15px!important}
+  [data-testid="stForm"] [data-testid="stHorizontalBlock"]{flex-direction:row!important;flex-wrap:wrap!important;gap:6px!important}
   [data-testid="stForm"] [data-testid="stHorizontalBlock"]>div{min-width:0!important;width:auto!important}
   [data-testid="stForm"] [data-testid="stHorizontalBlock"]>div:nth-child(1){flex:1 1 100%!important}
   [data-testid="stForm"] [data-testid="stHorizontalBlock"]>div:nth-child(2){flex:1.5 1 0!important}
@@ -1579,16 +1583,6 @@ with tab_home:
           <i style="width:{bear_n / tot * 100:.1f}%;background:var(--dn)"></i>
         </div>"""), unsafe_allow_html=True)
 
-        # ── 題材升溫（提及量暴增）──
-        _sg, _span = detect_surge(df_all)
-        if _sg:
-            st.markdown(f'<div class="sec">📈 題材升溫 <span class="fn-reco-chips">近 {SURGE_WIN_H} 小時被提及次數 ≥ 平均的 '
-                        f'{SURGE_RATIO:g} 倍</span></div>' + surge_html(_sg), unsafe_allow_html=True)
-        elif _span < SURGE_MIN_HISTORY_H:
-            st.caption(f"📈 題材升溫：資料只涵蓋 {_span:.0f} 小時，累積到 {SURGE_MIN_HISTORY_H} 小時以上才會開始偵測")
-        else:
-            st.caption(f"📈 題材升溫：近 {SURGE_WIN_H} 小時沒有個股的提及量超過平均 {SURGE_RATIO:g} 倍")
-
         with st.form("search_form", clear_on_submit=False):
             sc1, sc3, sc4 = st.columns([3, 1.3, 0.8])
             with sc1:
@@ -1651,6 +1645,16 @@ with tab_home:
                     st.markdown(f'<div class="sec">🌐 Google News 搜尋結果（{len(sdf)} 則）</div>', unsafe_allow_html=True)
                     render_grid(sdf, max_items=300)
         else:
+            # ── 題材升溫（提及量暴增）──
+            _sg, _span = detect_surge(df_all)
+            if _sg:
+                st.markdown(f'<div class="sec">📈 題材升溫 <span class="fn-reco-chips">近 {SURGE_WIN_H} 小時被提及次數 ≥ 平均的 '
+                            f'{SURGE_RATIO:g} 倍</span></div>' + surge_html(_sg), unsafe_allow_html=True)
+            elif _span < SURGE_MIN_HISTORY_H:
+                st.caption(f"📈 題材升溫：資料只涵蓋 {_span:.0f} 小時，累積到 {SURGE_MIN_HISTORY_H} 小時以上才會開始偵測")
+            else:
+                st.caption(f"📈 題材升溫：近 {SURGE_WIN_H} 小時沒有個股的提及量超過平均 {SURGE_RATIO:g} 倍")
+
             # ── 頭條 ──
             st.markdown('<div class="sec">🔥 今日頭條</div>', unsafe_allow_html=True)
             st.markdown(hero_html(df_r), unsafe_allow_html=True)
