@@ -1732,8 +1732,18 @@ def social_html(sc: dict) -> tuple:
 
 
 # ── PTT：由 Streamlit 主機即時抓（實測 Streamlit 連得上 PTT；GitHub Actions 的 IP 被擋）──
-PTT_BOARDS_LIVE = [("Gossiping", "八卦"), ("HatePolitics", "政黑"), ("Baseball", "棒球"),
-                   ("NBA", "NBA"), ("Stock", "股票")]
+# (看板代碼, 顯示名稱, 分類)。想增減看板只要改這裡；看板名稱打錯或不存在時，該板會在頁面下方顯示失敗，不影響其他板。
+PTT_BOARDS_LIVE = [
+    ("Gossiping", "八卦", "綜合"),
+    ("movie", "電影", "娛樂"), ("KoreaDrama", "韓劇", "娛樂"), ("KoreaStar", "韓星", "娛樂"),
+    ("C_Chat", "希洽", "電玩"), ("Steam", "Steam", "電玩"), ("Switch", "Switch", "電玩"),
+    ("PlayStation", "PS", "電玩"), ("LoL", "LoL", "電玩"),
+    ("Japan_Travel", "日本旅遊", "旅遊"), ("Korea_Travel", "韓國旅遊", "旅遊"),
+    ("Hiking", "登山", "風景"), ("Photo", "攝影", "風景"),
+    ("Baseball", "棒球", "運動"), ("NBA", "NBA", "運動"),
+    ("Stock", "股票", "股票"),
+]
+PTT_CATS = ["綜合", "娛樂", "電玩", "旅遊", "風景", "運動", "股票"]
 _PTT_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
            "Chrome/124.0 Safari/537.36")
 
@@ -1747,7 +1757,7 @@ def _ptt_push_n(txt: str) -> int:
     return int(txt) if txt.isdigit() else 0
 
 
-def _ptt_board(board: str, pages: int = 3) -> tuple:
+def _ptt_board(board: str, pages: int = 2) -> tuple:
     """抓單一看板最新 pages 頁索引，回傳 (文章清單, 錯誤訊息)"""
     from bs4 import BeautifulSoup
     posts, err = [], ""
@@ -1788,16 +1798,20 @@ def _ptt_board(board: str, pages: int = 3) -> tuple:
 def fetch_ptt_live() -> dict:
     """各看板平行抓取，快取 10 分鐘。回傳 {'posts': [...], 'errors': [...], 'at': 'HH:MM'}"""
     posts, errs = [], []
-    with ThreadPoolExecutor(max_workers=len(PTT_BOARDS_LIVE)) as ex:
-        for ps, er in ex.map(lambda b: _ptt_board(b[0]), PTT_BOARDS_LIVE):
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        for ps, er in ex.map(lambda b: _ptt_board(b[0], 3 if b[0] in ("Gossiping", "Stock") else 2),
+                              PTT_BOARDS_LIVE):
             posts += ps
             if er:
                 errs.append(er)
     # 綜合熱度：各看板推文量級不同 → 先除以該看板的「高標」（80 百分位）再比；
     # 發越久累積越多 → 再依發文時間遞減（約 6 小時後熱度剩一半左右）
+    cat_of = {b: c for b, _n, c in PTT_BOARDS_LIVE}
+    for x in posts:
+        x["c"] = cat_of.get(x["b"], "")
     now = time.time()
     ref = {}
-    for b, _ in PTT_BOARDS_LIVE:
+    for b, _n, _c in PTT_BOARDS_LIVE:
         ns_ = sorted(x["n"] for x in posts if x["b"] == b and x["n"] > 0)
         ref[b] = max(ns_[int(len(ns_) * 0.8)] if ns_ else 1, 5)
     for x in posts:
@@ -1811,7 +1825,7 @@ def ptt_html(posts: list, n: int = 20, by: str = "h") -> str:
     by="h"＝依綜合熱度；by="n"＝依推文數（熱度條也跟著換）"""
     if not posts:
         return '<div class="rk-e">（目前沒有資料）</div>'
-    names = dict(PTT_BOARDS_LIVE)
+    names = {b: n for b, n, _c in PTT_BOARDS_LIVE}
     top = posts[:n]
     mx = max(float(p.get(by) or 0) for p in top) or 1.0
     out = ""
@@ -2141,15 +2155,14 @@ with tab_soc:
         _psort = st.radio("排序", ["綜合熱度", "推文數"], horizontal=True, key="ptt_sort",
                           label_visibility="collapsed")
     with _pc1:
-        _pb = st.radio("看板", ["全部"] + [b for b, _ in PTT_BOARDS_LIVE], horizontal=True,
-                       format_func=lambda b: b if b == "全部" else f"{dict(PTT_BOARDS_LIVE)[b]}",
-                       key="ptt_board", label_visibility="collapsed")
+        _pb = st.radio("分類", ["全部"] + PTT_CATS, horizontal=True, key="ptt_board",
+                       label_visibility="collapsed")
     with _pc2:
         if st.button("🔄 重新抓取", key="ptt_refresh"):
             fetch_ptt_live.clear()
     with st.spinner("抓取 PTT 中…"):
         _ptt = fetch_ptt_live()
-    _pp = sorted([x for x in _ptt["posts"] if _pb == "全部" or x["b"] == _pb],
+    _pp = sorted([x for x in _ptt["posts"] if _pb == "全部" or x.get("c") == _pb],
                  key=lambda x: x["n"] if _psort == "推文數" else x["h"], reverse=True)
     if _ptt["posts"]:
         st.markdown(ptt_html(_pp, 20, "n" if _psort == "推文數" else "h"), unsafe_allow_html=True)
@@ -2158,7 +2171,7 @@ with tab_soc:
                     unsafe_allow_html=True)
     st.caption(("綜合熱度＝推文數 ÷ 該看板高標，再隨發文時間遞減（新文章升溫快的會排前面）"
                 if _psort == "綜合熱度" else "依推文數排序")
-               + f"（各板最新約 60 篇內）· 更新於 {_ptt['at']}"
+               + f"（各板最新約 40～60 篇內）· 更新於 {_ptt['at']}"
                + (f" · 部分看板失敗：{'；'.join(_ptt['errors'])}" if _ptt["errors"] and _ptt["posts"] else ""))
     st.divider()
 
