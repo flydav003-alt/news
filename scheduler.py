@@ -70,12 +70,15 @@ def _translate_one(title: str) -> str:
         return ""
 
 
-def translate_titles(items: list[dict], limit: int = 150, api_key: str = "") -> int:
+def translate_titles(items: list[dict], limit: int = 300, api_key: str = "") -> int:
     """
     替英文標題加上 title_zh。優先用 Groq 批次翻譯（25 則一批，台灣財經譯名較準），
     Groq 沒 key / 失敗的剩餘標題再用 Google 翻譯備援。失敗就留空（畫面退回顯示原文）。
     """
-    todo = [it for it in items if _needs_translation(it["title"])][:limit]
+    todo = [it for it in items if _needs_translation(it["title"])]
+    # 名額有限時，旅遊／運動／娛樂／電玩（沒有其他中文替代）先翻，財經的排後面
+    todo.sort(key=lambda it: 0 if it.get("category") in LIFESTYLE else 1)
+    todo = todo[:limit]
     if not todo:
         return 0
     n = 0
@@ -121,6 +124,35 @@ def translate_titles(items: list[dict], limit: int = 150, api_key: str = "") -> 
 
 # 生活類（運動/娛樂/電玩）不做股市情緒、個股、地緣判斷
 LIFESTYLE = {"運動", "娛樂", "電玩", "旅遊"}
+
+
+def _backfill_titles(api_key: str, limit: int = 200) -> int:
+    """以前存進去、當時名額不夠沒翻到的英文標題，這裡補翻（旅遊等生活類優先）。"""
+    from database import NewsArticle, update_title_zh
+    db = SessionLocal()
+    n = 0
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=72)
+        rows = (db.query(NewsArticle)
+                  .filter(NewsArticle.language == "en", NewsArticle.published_at >= cutoff,
+                          (NewsArticle.title_zh == "") | (NewsArticle.title_zh.is_(None)))
+                  .order_by(NewsArticle.published_at.desc()).all())
+        rows = [r for r in rows if _needs_translation(r.title or "")]
+        rows.sort(key=lambda r: 0 if r.category in LIFESTYLE else 1)
+        items = [{"title": r.title, "url": r.url, "category": r.category} for r in rows[:limit]]
+        if items:
+            translate_titles(items, limit=limit, api_key=api_key)
+            for it in items:
+                if it.get("title_zh"):
+                    update_title_zh(db, it["url"], it["title_zh"])
+                    n += 1
+            db.commit()
+        logger.info(f"補翻舊文章標題 {n}/{len(items)} 則")
+    except Exception as e:
+        logger.warning(f"補翻舊標題失敗：{e}")
+    finally:
+        db.close()
+    return n
 
 
 # ── 主流程 ────────────────────────────────────────────────────────────────────
@@ -262,6 +294,8 @@ def crawl_and_save(enabled_names=None,
         for lg in logs:
             log_crawl(db, source=lg["source"], status=lg["status"],
                       count=lg["count"], new_saved=0, skipped=0)
+        if translate and groq_key_all:
+            tr_count += _backfill_titles(groq_key_all)
         logger.info(f"完成：抓取 {len(articles)}、新文章 {len(fresh)}、新增 {saved}、"
                     f"去重 {skipped}、AI {ai_count}、翻譯 {tr_count}")
     except Exception as e:
