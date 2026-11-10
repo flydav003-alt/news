@@ -443,6 +443,13 @@ body.fn-compact .cm-b .tr{display:none}
   .mrow{gap:6px}.m{padding:5px 10px;min-width:0;flex:1 1 28%}.m-v{font-size:16px}
   [role="tab"]{padding:6px 10px!important}[role="tab"] p{font-size:14px!important}
 }
+/* 手機分頁：9 個分頁固定排成 5＋4 兩列（每顆佔約 1/5 寬，第二列自動撐滿） */
+@media(max-width:700px){
+  [role="tablist"]{gap:6px!important}
+  [role="tab"]{flex:1 1 calc(20% - 6px)!important;min-width:0!important;justify-content:center!important;padding:6px 3px!important;white-space:nowrap}
+  [role="tab"] p{font-size:14px!important}
+}
+@media(max-width:400px){[role="tab"] p{font-size:13px!important}}
 .stButton>button{border-radius:8px;font-weight:500;border:1px solid var(--line);background:var(--card);color:var(--tx)}
 .stButton>button[kind="primary"]{background:var(--accent);border-color:var(--accent);color:#fff}
 .stSelectbox>div>div,.stTextInput>div>div>input{background:var(--card)!important;border:1px solid var(--line)!important;border-radius:8px!important}
@@ -1766,8 +1773,9 @@ qs = fetch_quotes()
 if qs:
     st.markdown(quotes_html(qs), unsafe_allow_html=True)
 
-tab_home, tab_ai, tab_sports, tab_ent, tab_travel, tab_game, tab_cal, tab_cfg = st.tabs(
-    ["📰 今日新聞", "🤖 AI 專區", "⚽ 運動", "🎬 娛樂", "🧳 旅遊", "🎮 電玩", "📅 行事曆", "⚙️ 設定"])
+# 分頁名稱刻意縮短：手機版 9 個分頁剛好排成 5＋4 兩列（見 CSS「手機分頁」）
+tab_home, tab_ai, tab_sports, tab_ent, tab_travel, tab_game, tab_soc, tab_cal, tab_cfg = st.tabs(
+    ["📰 新聞", "🤖 AI", "⚽ 運動", "🎬 娛樂", "🧳 旅遊", "🎮 電玩", "💬 社群", "🏦 法人", "⚙️ 設定"])
 
 # ═══════════════════════════════════════════════
 # TAB 1：今日新聞
@@ -2019,7 +2027,11 @@ with tab_cal:
         st.markdown('<div class="empty">📭 未來 2 個月沒有事件（請更新 calendar_manual.json）</div>', unsafe_allow_html=True)
     st.caption("自動更新：休市日用規則計算，FOMC 來自 Fed 官網，非農／CPI 來自 FRED／BLS，輝達財報來自 Nasdaq；時間已換成台灣時間，只顯示今天起 62 天內。")
 
-    # ③ 社群（最下）：Reddit、微博
+
+# ═══════════════════════════════════════════════
+# TAB：社群（微博熱搜、Reddit）
+# ═══════════════════════════════════════════════
+with tab_soc:
     st.markdown('<div class="sec">💬 社群熱門話題</div>', unsafe_allow_html=True)
     _sc = EXTRAS.get("social")
     if not _sc:
