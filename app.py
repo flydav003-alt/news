@@ -294,6 +294,7 @@ div[role="radiogroup"][aria-label="快速篩選"] label:nth-of-type(3):has(input
 .sc-bar i{display:block;height:100%;border-radius:4px;background:linear-gradient(90deg,var(--accent),var(--up))}
 .sc-n{font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;color:var(--tx2);white-space:nowrap}
 .sc-m{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:5px;font-size:11.5px;color:var(--tx3)}
+.sc-img{width:64px;height:64px;flex-shrink:0;border-radius:8px;object-fit:cover;background:var(--soft)}
 .sc-chip{display:inline-block;margin:0 6px 6px 0;padding:4px 11px;border-radius:14px;background:var(--warn-bg);color:var(--warn)!important;font-size:12.5px;font-weight:600;text-decoration:none!important}
 .sc-chip:hover{background:var(--accent);color:#fff!important}
 
@@ -1537,13 +1538,15 @@ def _wb_flags(p, rank) -> dict:
     return {"new": bool(p.get("new")), "rise": rise, "climb": climb}
 
 
-def _sc_card(rank, title, url, orig="", heat_html="", badges="", meta="") -> str:
+def _sc_card(rank, title, url, orig="", heat_html="", badges="", meta="", img="") -> str:
     tier = " t1" if rank <= 3 else (" t2" if rank <= 10 else "")
     o = f'<div class="sc-o">{esc(orig)}</div>' if orig else ""
     m = f'<div class="sc-m">{badges}{meta}</div>' if (badges or meta) else ""
+    im = (f'<img class="sc-img" src="{esc(img, quote=True)}" loading="lazy" referrerpolicy="no-referrer" alt="" '
+          f'onerror="this.style.display=\'none\'">') if str(img).startswith("http") else ""
     return (f'<div class="sc{tier}"><div class="sc-r">{rank}</div><div class="sc-b">'
             f'<a class="sc-t" href="{esc(url, quote=True)}" target="_blank" rel="noopener">{esc(title)}</a>{o}'
-            f'{heat_html}{m}</div></div>')
+            f'{heat_html}{m}</div>{im}</div>')
 
 
 def weibo_cards(sc: dict, n=20) -> str:
@@ -1583,6 +1586,8 @@ def reddit_cards(sc: dict) -> str:
             out += _stale_note(rat.get(sub, ""))
         for i, p in enumerate(lst[:12], 1):
             bd = ""
+            if p.get("pin"):
+                bd += '<span class="bd bd-n">📌 置頂串</span>'
             if p.get("new"):
                 bd += '<span class="bd bd-g">🆕 新進熱門</span>'
             pr = int(p.get("pr") or 0)
@@ -1590,7 +1595,7 @@ def reddit_cards(sc: dict) -> str:
                 bd += f'<span class="bd bd-b">▲ 升 {pr - i} 名</span>'
             meta = f'<span>{esc(rel_epoch(p.get("p")))}發文</span>' if p.get("p") else ""
             out += _sc_card(i, p.get("z") or p["t"], p["u"], orig=(p["t"] if p.get("z") else ""),
-                            badges=bd, meta=meta)
+                            badges=bd, meta=meta, img=p.get("i", ""))
     return out or '<div class="rk-e">（Reddit 目前連不上）</div>'
 
 
