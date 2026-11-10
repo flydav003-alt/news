@@ -1575,7 +1575,7 @@ with tab_home:
             sc1, sc3, sc4 = st.columns([3, 1.3, 0.8])
             with sc1:
                 sq = st.text_input("搜尋標題（中英文皆可）", placeholder="搜尋標題（中英文皆可）：台積電 / Nvidia …",
-                                   label_visibility="collapsed")
+                                   label_visibility="collapsed", key="home_sq")
             with sc3:
                 sdays = st.selectbox("時間", [1, 3, 7, 30, 365], index=2,
                                      format_func=lambda d: "近一年" if d == 365 else f"近 {d} 天",
@@ -1589,6 +1589,10 @@ with tab_home:
                 st.session_state.pop("last_search", None)
         ls = st.session_state.get("last_search")
         if ls:
+            def _clear_search():
+                st.session_state.pop("last_search", None)
+                st.session_state["home_sq"] = ""
+            st.button("✕ 取消搜尋，回到今日新聞", on_click=_clear_search, key="clear_search")
             # ① 先找網站資料庫裡符合的（標題含全部關鍵字，且在所選時間內）
             _toks = [t for t in ls[0].lower().split() if t]
             _blob_t = (df_all["title"].fillna("") + " " + df_all["title_zh"].fillna("")).str.lower()
@@ -1620,7 +1624,6 @@ with tab_home:
                 if sdf is not None and not sdf.empty:
                     st.markdown(f'<div class="sec">🌐 Google News 搜尋結果（{len(sdf)} 則）</div>', unsafe_allow_html=True)
                     render_grid(sdf, max_items=200)
-                st.caption("清空搜尋框再按搜尋，可回到最新新聞")
         else:
             # ── 頭條 ──
             st.markdown('<div class="sec">🔥 今日頭條</div>', unsafe_allow_html=True)
