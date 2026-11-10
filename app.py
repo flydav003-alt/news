@@ -679,9 +679,10 @@ def clean_images(df):
     return df
 
 
+BLOCKED_SOURCES = {"My Modern Met"}   # 永久隱藏的來源（舊資料庫 / Actions JSON 裡殘留的也一併濾掉）
 df_all = clean_images(load_all())
 if not df_all.empty:
-    df_all = df_all[df_all["source"] != "My Modern Met"]
+    df_all = df_all[~df_all["source"].isin(BLOCKED_SOURCES)]
 if not st.session_state.get("show_rev", False) and not df_all.empty:
     df_all = df_all[~df_all["title"].fillna("").apply(is_routine_revenue)]
 
@@ -692,6 +693,8 @@ if df_all.empty and not st.session_state.get("auto_crawled"):
         crawl_and_save(enabled_names=st.session_state["enabled_srcs"], use_ai=False)
     st.cache_data.clear()
     df_all = clean_images(load_all())
+    if not df_all.empty:
+        df_all = df_all[~df_all["source"].isin(BLOCKED_SOURCES)]
     if not st.session_state.get("show_rev", False) and not df_all.empty:
         df_all = df_all[~df_all["title"].fillna("").apply(is_routine_revenue)]
 
