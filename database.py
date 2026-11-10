@@ -436,11 +436,18 @@ def known_urls(db: Session) -> set:
     return {u for (u,) in db.query(NewsArticle.url).all() if u}
 
 
+LIFE_KEEP_CATS = ("旅遊", "大陸生活")     # 量少、不太會過時的生活類，保留比較久
+LIFE_KEEP_HOURS = 336                     # 14 天（以前一律 72 小時，GN 抓 14 天內的旅遊文章會被直接砍掉）
+
+
 def export_json(db: Session, path: str, keep_hours: int = 72) -> int:
-    """匯出最近 keep_hours 小時的文章到 JSON，回傳筆數"""
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=keep_hours)
+    """匯出最近 keep_hours 小時的文章到 JSON（旅遊／大陸生活保留 14 天），回傳筆數"""
+    now_utc = datetime.now(timezone.utc)
+    cutoff = now_utc - timedelta(hours=keep_hours)
+    life_cutoff = now_utc - timedelta(hours=max(keep_hours, LIFE_KEEP_HOURS))
     rows = (db.query(NewsArticle)
-              .filter(NewsArticle.published_at >= cutoff)
+              .filter((NewsArticle.published_at >= cutoff) |
+                      (NewsArticle.category.in_(LIFE_KEEP_CATS) & (NewsArticle.published_at >= life_cutoff)))
               .order_by(NewsArticle.published_at.desc())
               .all())
     out = []
