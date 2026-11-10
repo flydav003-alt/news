@@ -7,3 +7,4 @@ sqlalchemy
 pandas
 deep-translator
 opencc-python-reimplemented
+googlenewsdecoder
