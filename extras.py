@@ -814,6 +814,38 @@ def translate_reddit(red: dict, old: dict) -> None:
     logger.info(f"Reddit 標題翻譯 {groq_n + g_n}/{len(todo)}（Groq {groq_n}、Google {g_n}）")
 
 
+def add_trends(wb, prev_wb, now_ts: int):
+    """微博相對熱度：對照上一輪快照，記下首次上榜時間 s、上次熱度 pn、上次名次 pr、是否新上榜 new"""
+    old = {p.get("t"): (i, p) for i, p in enumerate(prev_wb or [], 1)}
+    for p in wb:
+        o = old.get(p["t"])
+        if o:
+            p["s"] = o[1].get("s") or now_ts
+            p["pn"] = int(o[1].get("n") or 0)
+            p["pr"] = o[0]
+        else:
+            p["s"] = now_ts
+            p["pn"] = 0
+            p["pr"] = 0
+            if old:                       # 有上一輪資料才敢說「新上榜」（第一次執行全部都不標）
+                p["new"] = True
+    return wb
+
+
+def reddit_trends(red: dict, old: dict) -> None:
+    """Reddit RSS 沒有 upvote 數，改用「是否新進熱門」「名次躍升」當相對熱度"""
+    for sub, lst in red.items():
+        prev = {p.get("u"): i for i, p in enumerate(old.get(sub) or [], 1)}
+        for i, p in enumerate(lst, 1):
+            p.pop("new", None)
+            p.pop("pr", None)
+            if prev:
+                if p["u"] in prev:
+                    p["pr"] = prev[p["u"]]
+                else:
+                    p["new"] = True
+
+
 def build_social(prev: dict, now: datetime) -> dict:
     prev = prev or {}
     parts = {}
@@ -836,6 +868,7 @@ def build_social(prev: dict, now: datetime) -> dict:
     for sub in red:                                  # 這次真的抓到的板：記下時間
         rat[sub] = now_iso
     stale = []
+    reddit_trends(red, old)                          # 先算趨勢（只算這次真的抓到的板）
     for sub, _n2 in REDDIT_SUBS:
         if sub not in red and old.get(sub):
             red[sub] = old[sub]
@@ -846,6 +879,8 @@ def build_social(prev: dict, now: datetime) -> dict:
     parts["reddit"] = "ok" if not errs else f"error: {', '.join(errs)} 抓不到（Reddit 常擋雲端 IP）"
 
     wb = fetch_weibo()
+    if wb:
+        wb = add_trends(wb, prev.get("weibo") if isinstance(prev.get("weibo"), list) else [], int(now.timestamp()))
     out["weibo"] = wb or prev.get("weibo") or []
     out["weibo_at"] = now_iso if wb else (prev.get("weibo_at") or "")
     out["weibo_stale"] = not wb
