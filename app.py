@@ -443,16 +443,15 @@ body.fn-compact .cm-b .tr{display:none}
   .mrow{gap:6px}.m{padding:5px 10px;min-width:0;flex:1 1 28%}.m-v{font-size:16px}
   [role="tab"]{padding:6px 10px!important}[role="tab"] p{font-size:14px!important}
 }
-/* 手機分頁：9 個分頁固定排成 5＋4 兩列（每顆佔約 1/5 寬，第二列自動撐滿） */
+/* 手機分頁：8 顆等大排成 4×2，⚙️設定獨立成最右邊一條直的窄欄 */
 @media(max-width:700px){
-  [role="tablist"]{gap:6px!important}
-  [role="tab"]{flex:1 1 calc(20% - 6px)!important;min-width:0!important;justify-content:center!important;padding:6px 3px!important;white-space:nowrap}
-  [role="tab"] p{font-size:13px!important}
-  /* 前 4 顆（新聞／AI／運動／娛樂）較大，後 5 顆較小 */
-  [role="tab"]:nth-of-type(-n+4){flex:1 1 calc(25% - 6px)!important;padding:9px 3px!important}
-  [role="tab"]:nth-of-type(-n+4) p{font-size:16px!important}
+  [role="tablist"]{display:grid!important;grid-template-columns:repeat(4,minmax(0,1fr)) 46px;gap:6px!important}
+  [role="tab"]{min-width:0!important;justify-content:center!important;padding:9px 2px!important;white-space:nowrap}
+  [role="tab"] p{font-size:15px!important}
+  [role="tab"]:nth-of-type(9){grid-column:5;grid-row:1 / span 2;padding:0!important}
+  [role="tab"]:nth-of-type(9) p{writing-mode:vertical-rl;letter-spacing:2px;font-size:14px!important}
 }
-@media(max-width:400px){[role="tab"]:nth-of-type(-n+4) p{font-size:15px!important}}
+@media(max-width:400px){[role="tab"] p{font-size:14px!important}}
 .stButton>button{border-radius:8px;font-weight:500;border:1px solid var(--line);background:var(--card);color:var(--tx)}
 .stButton>button[kind="primary"]{background:var(--accent);border-color:var(--accent);color:#fff}
 .stSelectbox>div>div,.stTextInput>div>div>input{background:var(--card)!important;border:1px solid var(--line)!important;border-radius:8px!important}
