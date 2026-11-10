@@ -500,6 +500,10 @@ def update_title_zh(db: Session, url: str, title_zh: str) -> None:
     db.query(NewsArticle).filter(NewsArticle.url == url).update({"title_zh": title_zh})
 
 
+def update_image(db: Session, url: str, image_url: str) -> None:
+    db.query(NewsArticle).filter(NewsArticle.url == url).update({"image_url": image_url})
+
+
 def get_crawl_logs(db: Session, limit=30) -> pd.DataFrame:
     rows = db.query(CrawlLog).order_by(CrawlLog.executed_at.desc()).limit(limit).all()
     if not rows:
