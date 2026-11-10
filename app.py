@@ -680,9 +680,20 @@ def clean_images(df):
 
 
 BLOCKED_SOURCES = {"My Modern Met"}   # 永久隱藏的來源（舊資料庫 / Actions JSON 裡殘留的也一併濾掉）
+BLOCKED_SOURCE_KEYS = ("fclnews.com", "www.nytimes.com", "twaslnews")   # 網域類來源：小寫包含就擋
+
+
+def _drop_blocked(d):
+    if d is None or d.empty:
+        return d
+    low = d["source"].fillna("").astype(str).str.lower()
+    m = d["source"].isin(BLOCKED_SOURCES)
+    for k in BLOCKED_SOURCE_KEYS:
+        m |= low.str.contains(k, regex=False)
+    return d[~m]
 df_all = clean_images(load_all())
 if not df_all.empty:
-    df_all = df_all[~df_all["source"].isin(BLOCKED_SOURCES)]
+    df_all = _drop_blocked(df_all)
 if not st.session_state.get("show_rev", False) and not df_all.empty:
     df_all = df_all[~df_all["title"].fillna("").apply(is_routine_revenue)]
 
@@ -694,7 +705,7 @@ if df_all.empty and not st.session_state.get("auto_crawled"):
     st.cache_data.clear()
     df_all = clean_images(load_all())
     if not df_all.empty:
-        df_all = df_all[~df_all["source"].isin(BLOCKED_SOURCES)]
+        df_all = _drop_blocked(df_all)
     if not st.session_state.get("show_rev", False) and not df_all.empty:
         df_all = df_all[~df_all["title"].fillna("").apply(is_routine_revenue)]
 
@@ -1927,9 +1938,10 @@ with tab_ai:
 # ═══════════════════════════════════════════════
 # 大陸生活（Google News 簡體版轉繁體）裡的重要娛樂／電玩，併進對應分頁；運動不收。
 # 這類文章的 source 會被換成媒體名，所以用標題關鍵字分成 旅遊 / 電玩 / 娛樂（沒命中的歸娛樂）
-CN_LIFE_N = 8
+CN_LIFE_N = 16
 _CN_TRAVEL = ("旅遊", "旅游", "景區", "景区", "景點", "景点", "免簽", "免签", "出境", "文旅", "機票", "酒店",
               "民宿", "簽證", "假期", "遊客", "游客", "旅客", "航班", "高鐵", "高铁")
+_CN_TRAVEL_NOISE = ("規劃", "规划", "基金", "產業", "产业", "示範區", "示范区", "投資", "投资", "經濟", "经济", "氣候", "气候", "會議", "会议", "政策", "招商", "股權", "股权", "COP")
 _CN_GAME = ("遊戲", "游戏", "手遊", "手游", "端遊", "電競", "电竞", "原神", "黑神話", "黑神话", "米哈遊", "米哈游",
             "騰訊", "腾讯", "網易", "网易", "Steam", "PS5", "Switch", "任天堂", "主機", "主机", "玩家", "版號",
             "版号", "崩壞", "崩坏", "絕區零", "绝区零", "王者榮耀", "王者荣耀", "和平精英", "明日方舟")
@@ -1951,6 +1963,8 @@ def render_life_tab(cat: str, icon: str):
         cn = df_all[df_all["category"] == "大陸生活"]
         if not cn.empty:
             cn = cn[cn["title"].apply(_cn_life_kind) == cat]
+            if cat == "旅遊":      # 擋掉「文旅規劃／基金／示範區」這類政策產業稿，只留看得出是玩的
+                cn = cn[~cn["title"].fillna("").str.contains("|".join(_CN_TRAVEL_NOISE), regex=True)]
             cn = cn.sort_values("published_at", ascending=False).head(CN_LIFE_N)
             cn_n = len(cn)
             d0 = pd.concat([d0, cn]).drop_duplicates(subset=["url"])
