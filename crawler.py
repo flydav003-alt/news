@@ -57,6 +57,8 @@ HEADERS = {
     "Accept-Encoding": "gzip, deflate",
 }
 TIMEOUT   = (4, 8)      # (連線, 讀取) 秒
+# 永久封鎖的來源（Google News 轉來的文章，source 會被換成媒體網域；比對小寫、包含即擋）
+BLOCKED_SOURCE_KEYS = ("fclnews.com", "www.nytimes.com", "twaslnews")
 SOURCE_DEADLINE = 8     # 單一來源整體硬上限（秒）：超過就放棄、回傳 0 則，不拖慢整輪
 MAX_ITEMS = 50
 CRAWL_WORKERS = 10       # 同時抓幾個來源（Google News 約 20 個，太高可能被限流，可視情況調 6~12）
@@ -194,8 +196,8 @@ SOURCES = [
      "language": "zh", "category": "大陸生活", "enabled": True, "strip_suffix": True, "s2t": True, "max_items": 15},
     {"name": "GN-大陸電玩", "url": _gnews("游戏 腾讯游戏 OR 网易游戏 OR 原神 OR 黑神话 OR 米哈游", cn=True),
      "language": "zh", "category": "大陸生活", "enabled": True, "strip_suffix": True, "s2t": True, "max_items": 15},
-    {"name": "GN-大陸旅遊", "url": _gnews("旅游 OR 景区 OR 免签 OR 出境游 OR 文旅", cn=True),
-     "language": "zh", "category": "大陸生活", "enabled": True, "strip_suffix": True, "s2t": True, "max_items": 15},
+    {"name": "GN-大陸旅遊", "url": _gnews("旅游攻略 OR 景点 OR 古镇 OR 打卡 OR 赏雪 OR 红叶 OR 自驾游 OR 民宿 -规划 -基金 -产业 -投资", cn=True, when="3d"),
+     "language": "zh", "category": "大陸生活", "enabled": True, "strip_suffix": True, "s2t": True, "max_items": 20},
     # 以下網址我沒辦法確認是否還有效，預設關閉；想試的話改成 True，再到設定頁「來源健康度」看有沒有抓到
     {"name": "FT中文網",     "url": "https://www.ftchinese.com/rss/feed",
      "language": "zh", "category": "大陸", "enabled": False, "s2t": True, "max_items": 20},
@@ -212,10 +214,10 @@ SOURCES = [
      "language": "zh", "category": "旅遊", "region": "台灣", "enabled": True, "max_items": 12},
     {"name": "GN-ETtoday旅遊", "url": _gnews("site:travel.ettoday.net", when="3d"),
      "language": "zh", "category": "旅遊", "region": "台灣", "enabled": True, "strip_suffix": True, "max_items": 10},
-    {"name": "GN-自由玩咖",   "url": _gnews("site:playing.ltn.com.tw 旅行 OR 景點 OR 住宿 OR 美食", when="3d"),
-     "language": "zh", "category": "旅遊", "region": "台灣", "enabled": True, "strip_suffix": True, "max_items": 12},
-    {"name": "GN-Yahoo奇摩旅遊", "url": _gnews("site:tw.news.yahoo.com 旅遊 OR 景點 OR 旅行 OR 美食", when="3d"),
-     "language": "zh", "category": "旅遊", "region": "台灣", "enabled": True, "strip_suffix": True, "max_items": 12},
+    {"name": "GN-自由玩咖",   "url": _gnews("site:playing.ltn.com.tw", when="14d"),
+     "language": "zh", "category": "旅遊", "region": "台灣", "enabled": True, "strip_suffix": True, "max_items": 15},
+    {"name": "GN-Yahoo奇摩旅遊", "url": _gnews("site:tw.news.yahoo.com 旅遊達人 OR 熱門景點 OR 賞花 OR 步道 OR 秘境 OR 懶人包 OR 日韓旅遊 -交通 -車禍 -航班 -罷工", when="7d"),
+     "language": "zh", "category": "旅遊", "region": "台灣", "enabled": True, "strip_suffix": True, "max_items": 15},
     {"name": "GN-台灣風景",   "url": _gnews("風景 OR 秘境 OR 步道 OR 雲海 OR 日出 OR 夕陽 OR 賞花 OR 楓葉 台灣 景點", when="3d"),
      "language": "zh", "category": "旅遊", "region": "台灣", "enabled": True, "strip_suffix": True, "max_items": 12},
     {"name": "GN-台灣美食旅遊", "url": _gnews("美食 OR 小吃 OR 夜市 OR 老街 OR 民宿 台灣 旅遊", when="3d"),
@@ -334,27 +336,68 @@ def _fetch_og_image(url: str) -> str:
     return ""
 
 
+def _with_deadline(fn, secs: float, *args):
+    box: list = []
+    t = threading.Thread(target=lambda: box.append(fn(*args)), daemon=True)
+    t.start()
+    t.join(secs)
+    return box[0] if box else ""
+
+
+def _gn_real_image(gn_url: str) -> str:
+    """Google News 連結 → 還原真實網址（reader.py 的解析）→ 抓 og:image。任何失敗回傳空字串。"""
+    try:
+        from reader import _resolve_google
+        real = _resolve_google(gn_url)
+    except Exception:
+        return ""
+    return _fetch_og_image(real) if real else ""
+
+
+GN_IMG_LIMIT = 30     # 每輪最多還原幾篇 Google News 旅遊連結（每篇要多打 1~2 次請求）
+
+
 def fill_missing_images(articles: list[dict], limit: int = 400) -> int:
-    """缺圖文章用 og:image 補（Google News 轉址連結跳過）。回傳補到幾張。
-    生活類／AI 排在前面：以前照來源順序補，名額被前面的財經來源用完，運動/娛樂就永遠沒圖。"""
+    """缺圖文章用 og:image 補。回傳補到幾張。
+    生活類／AI 排在前面：以前照來源順序補，名額被前面的財經來源用完，運動/娛樂就永遠沒圖。
+    Google News 轉址連結以前一律跳過 → 大陸旅遊等全靠 GN 的來源永遠沒圖；
+    現在旅遊／大陸生活的 GN 連結會先還原真實網址再抓圖（有上限與逾時，連續失敗會提早放棄）。"""
     prio = {"旅遊": 0, "運動": 0, "娛樂": 0, "電玩": 0, "AI": 1, "科技": 1}
-    todo = [a for a in articles
-            if not a.get("image_url")
-            and a.get("url", "").startswith("http")
-            and "news.google.com" not in a["url"]]
+    cand = [a for a in articles if not a.get("image_url") and a.get("url", "").startswith("http")]
+    todo = [a for a in cand if "news.google.com" not in a["url"]]
     todo.sort(key=lambda a: prio.get(a.get("category", ""), 2))
     todo = todo[:limit]
-    if not todo:
-        return 0
-    with ThreadPoolExecutor(max_workers=10) as ex:
-        imgs = list(ex.map(lambda a: _fetch_og_image(a["url"]), todo))
-    logger.info(f"og:image 嘗試 {len(todo)} 篇（各類別：" + ", ".join(
-        f"{c}={sum(1 for a in todo if a.get('category') == c)}" for c in sorted({a.get('category') for a in todo})) + "）")
     n = 0
-    for a, img in zip(todo, imgs):
-        if img:
-            a["image_url"] = img
-            n += 1
+    if todo:
+        with ThreadPoolExecutor(max_workers=10) as ex:
+            imgs = list(ex.map(lambda a: _fetch_og_image(a["url"]), todo))
+        logger.info(f"og:image 嘗試 {len(todo)} 篇（各類別：" + ", ".join(
+            f"{c}={sum(1 for a in todo if a.get('category') == c)}" for c in sorted({a.get('category') for a in todo})) + "）")
+        for a, img in zip(todo, imgs):
+            if img:
+                a["image_url"] = img
+                n += 1
+
+    gn = [a for a in cand if "news.google.com" in a["url"] and a.get("category") in ("旅遊", "大陸生活")][:GN_IMG_LIMIT]
+    if gn:
+        stat = {"ok": 0, "fail": 0}
+
+        def _one(a):
+            if stat["ok"] == 0 and stat["fail"] >= 6:      # 前 6 篇全失敗（多半被 Google 擋）→ 不再浪費時間
+                return ""
+            img = _with_deadline(_gn_real_image, 10, a["url"])
+            stat["ok" if img else "fail"] += 1
+            return img
+
+        with ThreadPoolExecutor(max_workers=6) as ex:
+            gimgs = list(ex.map(_one, gn))
+        got = 0
+        for a, img in zip(gn, gimgs):
+            if img:
+                a["image_url"] = img
+                got += 1
+        logger.info(f"Google News 連結還原補圖：嘗試 {stat['ok'] + stat['fail']}/{len(gn)} 篇，補到 {got} 張")
+        n += got
     return n
 
 
@@ -418,6 +461,8 @@ def fetch_rss(source: dict) -> list[dict]:
                 title, summary, src_name = _to_tw(title), _to_tw(summary), _to_tw(src_name)
 
             if not title or len(title) < 4:
+                continue
+            if any(k in src_name.lower() for k in BLOCKED_SOURCE_KEYS):
                 continue
 
             results.append({
