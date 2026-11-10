@@ -120,7 +120,7 @@ def translate_titles(items: list[dict], limit: int = 150, api_key: str = "") -> 
 
 
 # 生活類（運動/娛樂/電玩）不做股市情緒、個股、地緣判斷
-LIFESTYLE = {"運動", "娛樂", "電玩"}
+LIFESTYLE = {"運動", "娛樂", "電玩", "旅遊"}
 
 
 # ── 主流程 ────────────────────────────────────────────────────────────────────
@@ -172,7 +172,8 @@ def crawl_and_save(enabled_names=None,
         if item.get("category") in LIFESTYLE:
             item.update({"sentiment": "neutral", "sentiment_score": 0.0,
                          "sentiment_label": "中性", "tickers": [], "ticker_details": [],
-                         "sectors": [], "is_geo": False})
+                         "sectors": ([f"區域:{item['region']}"] if item.get("region") else []),
+                         "is_geo": False})
             _clear_ai_fields(item)
             item.setdefault("title_zh", "")
             continue
