@@ -445,11 +445,11 @@ body.fn-compact .cm-b .tr{display:none}
 }
 /* 手機分頁：8 顆等大排成 4×2，⚙️設定獨立成最右邊一條直的窄欄 */
 @media(max-width:700px){
-  [role="tablist"]{display:grid!important;grid-template-columns:repeat(4,minmax(0,1fr)) 46px;gap:6px!important}
+  [role="tablist"]{display:grid!important;grid-template-columns:repeat(4,minmax(0,1fr)) 30px;gap:6px!important}
   [role="tab"]{min-width:0!important;justify-content:center!important;padding:9px 2px!important;white-space:nowrap}
   [role="tab"] p{font-size:15px!important}
-  [role="tab"]:nth-of-type(9){grid-column:5;grid-row:1 / span 2;padding:0!important}
-  [role="tab"]:nth-of-type(9) p{writing-mode:vertical-rl;letter-spacing:2px;font-size:14px!important}
+  [role="tab"]:nth-of-type(9){grid-column:5;grid-row:1 / span 2;padding:0!important;border-radius:10px!important}
+  [role="tab"]:nth-of-type(9) p{writing-mode:vertical-rl;letter-spacing:1px;font-size:12px!important}
 }
 @media(max-width:400px){[role="tab"] p{font-size:14px!important}}
 .stButton>button{border-radius:8px;font-weight:500;border:1px solid var(--line);background:var(--card);color:var(--tx)}
