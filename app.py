@@ -1731,6 +1731,82 @@ def social_html(sc: dict) -> tuple:
     return left, right
 
 
+# ── PTT：由 Streamlit 主機即時抓（實測 Streamlit 連得上 PTT；GitHub Actions 的 IP 被擋）──
+PTT_BOARDS_LIVE = [("Stock", "股票"), ("Gossiping", "八卦"), ("HatePolitics", "政黑"),
+                   ("Baseball", "棒球"), ("NBA", "NBA")]
+_PTT_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+           "Chrome/124.0 Safari/537.36")
+
+
+def _ptt_push_n(txt: str) -> int:
+    txt = (txt or "").strip()
+    if txt == "爆":
+        return 100
+    if txt.startswith("X"):
+        return -int(txt[1:]) if txt[1:].isdigit() else -10
+    return int(txt) if txt.isdigit() else 0
+
+
+def _ptt_board(board: str, pages: int = 3) -> tuple:
+    """抓單一看板最新 pages 頁索引，回傳 (文章清單, 錯誤訊息)"""
+    from bs4 import BeautifulSoup
+    posts, err = [], ""
+    url = f"https://www.ptt.cc/bbs/{board}/index.html"
+    for _ in range(pages):
+        try:
+            r = requests.get(url, timeout=10, cookies={"over18": "1"},
+                             headers={"User-Agent": _PTT_UA, "Accept": "text/html,*/*"})
+        except requests.RequestException as e:
+            err = f"{board} 連線失敗（{type(e).__name__}）"
+            break
+        if r.status_code != 200:
+            err = f"{board} HTTP {r.status_code}"
+            break
+        soup = BeautifulSoup(r.text, "lxml")
+        for ent in soup.select("div.r-ent"):
+            a = ent.select_one("div.title a")
+            if not a:                      # 已刪除的文章沒有連結
+                continue
+            title = re.sub(r"\s+", " ", a.get_text()).strip()
+            if title.startswith("[公告]"):
+                continue
+            nr, dt = ent.select_one("div.nrec"), ent.select_one("div.date")
+            posts.append({"t": title, "u": "https://www.ptt.cc" + a.get("href", ""), "b": board,
+                          "n": _ptt_push_n(nr.get_text() if nr else ""),
+                          "d": dt.get_text().strip() if dt else ""})
+        prev = next((x for x in soup.select("div.btn-group-paging a") if "上頁" in x.get_text()), None)
+        if not prev or not prev.get("href"):
+            break
+        url = "https://www.ptt.cc" + prev["href"]
+    return posts, err
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_ptt_live() -> dict:
+    """各看板平行抓取，快取 10 分鐘。回傳 {'posts': [...], 'errors': [...], 'at': 'HH:MM'}"""
+    posts, errs = [], []
+    with ThreadPoolExecutor(max_workers=len(PTT_BOARDS_LIVE)) as ex:
+        for ps, er in ex.map(lambda b: _ptt_board(b[0]), PTT_BOARDS_LIVE):
+            posts += ps
+            if er:
+                errs.append(er)
+    posts.sort(key=lambda x: x["n"], reverse=True)
+    return {"posts": posts, "errors": errs, "at": datetime.now(TZ_TW).strftime("%H:%M")}
+
+
+def ptt_html(posts: list, n: int = 20) -> str:
+    if not posts:
+        return '<div class="rk-e">（目前沒有資料）</div>'
+    names = dict(PTT_BOARDS_LIVE)
+    rows = ""
+    for p in posts[:n]:
+        push = "爆" if p["n"] >= 100 else (f'{p["n"]}' if p["n"] > 0 else "")
+        rows += (f'<div class="post"><span class="pk">{esc(names.get(p["b"], p["b"]))}</span>'
+                 f'<a href="{esc(p["u"], quote=True)}" target="_blank" rel="noopener">{esc(p["t"])}</a>'
+                 f'<span class="pt">{("🔥" + push + "推　") if push else ""}{esc(p["d"])}</span></div>')
+    return rows
+
+
 gen_str, gen_age = _gen_time_str(sync.get("generated_at", ""))
 if sync["ok"] and gen_age is not None and gen_age <= 3:
     status = f'<span class="pill pill-ok">● 自動更新正常</span>'
@@ -2035,6 +2111,29 @@ with tab_cal:
 # ═══════════════════════════════════════════════
 with tab_soc:
     st.markdown('<div class="sec">💬 社群熱門話題</div>', unsafe_allow_html=True)
+
+    # ── PTT（台灣）：Streamlit 即時抓，快取 10 分鐘 ──
+    st.markdown('<div class="sec">🇹🇼 PTT 熱門（台灣）</div>', unsafe_allow_html=True)
+    _pc1, _pc2 = st.columns([4, 1])
+    with _pc1:
+        _pb = st.radio("看板", ["全部"] + [b for b, _ in PTT_BOARDS_LIVE], horizontal=True,
+                       format_func=lambda b: b if b == "全部" else f"{dict(PTT_BOARDS_LIVE)[b]}",
+                       key="ptt_board", label_visibility="collapsed")
+    with _pc2:
+        if st.button("🔄 重新抓取", key="ptt_refresh"):
+            fetch_ptt_live.clear()
+    with st.spinner("抓取 PTT 中…"):
+        _ptt = fetch_ptt_live()
+    _pp = [x for x in _ptt["posts"] if _pb == "全部" or x["b"] == _pb]
+    if _ptt["posts"]:
+        st.markdown(ptt_html(_pp, 20), unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="empty">PTT 目前抓不到：' + esc("；".join(_ptt["errors"]) or "沒有資料") + '</div>',
+                    unsafe_allow_html=True)
+    st.caption(f"依推文數排序（最新約 60 篇內）· 更新於 {_ptt['at']}"
+               + (f" · 部分看板失敗：{'；'.join(_ptt['errors'])}" if _ptt["errors"] and _ptt["posts"] else ""))
+    st.divider()
+
     _sc = EXTRAS.get("social")
     if not _sc:
         st.markdown(f'<div class="empty">💬 {_NO_EXTRAS}</div>', unsafe_allow_html=True)
@@ -2294,30 +2393,6 @@ with tab_cfg:
             _e = EXTRAS.get(_k) or {}
             st.markdown(f'{_lab}：`{_e.get("status", "沒有資料")}`　更新於 {esc(str(_e.get("fetched_at", "—"))[:16])}'
                         + _parts_html(_e.get("parts")), unsafe_allow_html=True)
-
-    # ── 臨時診斷：測試 Streamlit 主機能否連到台灣社群網站（測完可整段刪除）──
-    st.markdown("#### 🔬 社群來源連線測試（臨時）")
-    st.caption("測試「Streamlit 這台主機」能不能連到這些網站。測完請把這段刪掉。")
-    if st.button("測試連線", key="diag_conn"):
-        _diag_urls = [
-            ("PTT 股板網頁", "https://www.ptt.cc/bbs/Stock/index.html"),
-            ("PTT 股板 RSS", "https://www.ptt.cc/atom/Stock.xml"),
-            ("pttweb 熱門", "https://www.pttweb.cc/hot/all/today"),
-            ("巴哈姆特", "https://forum.gamer.com.tw/"),
-            ("Dcard", "https://www.dcard.tw/f"),
-        ]
-        for _name, _u in _diag_urls:
-            try:
-                _r = requests.get(_u, timeout=10, cookies={"over18": "1"},
-                                  headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                                                         "AppleWebKit/537.36 Chrome/124.0 Safari/537.36"})
-                _t = _r.text[:3000]
-                _cf = any(k in _t for k in ("Just a moment", "cf-chl", "Attention Required", "Enable JavaScript"))
-                _flag = "⚠️ 被 Cloudflare 擋" if _cf else ("✅ 看起來可用" if _r.status_code == 200 else "❌ 被拒絕")
-                st.write(f"**{_name}**　HTTP {_r.status_code}　{len(_r.text)} 字元　{_flag}")
-            except Exception as _e:
-                st.write(f"**{_name}**　❌ {type(_e).__name__}")
-
     st.divider()
     st.markdown("#### 📡「立即抓取」要用哪些來源")
     st.caption("GitHub Actions 的自動抓取固定用 crawler.py 裡 enabled=True 的來源；這裡只影響頁面上的手動按鈕。")
