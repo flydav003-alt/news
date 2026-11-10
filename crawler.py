@@ -12,12 +12,13 @@ crawler.py — 新聞抓取模組 v3（中英文來源 + 縮圖）
 import logging
 import re
 import time
+import html as _html
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Optional
-from urllib.parse import quote
+from urllib.parse import quote, urljoin
 
 import requests
 from bs4 import BeautifulSoup
@@ -323,14 +324,33 @@ def _extract_image(entry) -> str:
     return ""
 
 
+_OG_ALT_RE = re.compile(
+    r'<meta[^>]+(?:property|name|itemprop)=["\'](?:og:image:secure_url|og:image:url|og:image|twitter:image:src|twitter:image|image|thumbnail)["\'][^>]*?content=["\']([^"\']+)["\']'
+    r'|<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name|itemprop)=["\'](?:og:image:secure_url|og:image:url|og:image|twitter:image:src|twitter:image|image|thumbnail)["\']'
+    r'|<link[^>]+rel=["\']image_src["\'][^>]+href=["\']([^"\']+)["\']',
+    re.I,
+)
+
+
 def _fetch_og_image(url: str) -> str:
+    """抓頁面 <head> 的縮圖。大陸網站常給 //img.xxx.com/... 這種省略 http 的網址（以前被當成無效而丟掉），
+    這裡用 urljoin 補全；也處理 &amp; 與相對路徑，並多找 itemprop=image / image_src。"""
     try:
-        r = requests.get(url, headers=HEADERS, timeout=6, stream=True)
-        html = r.raw.read(80_000, decode_content=True).decode("utf-8", "ignore")
-        m = _OG_RE.search(html)
-        if m:
-            u = (m.group(1) or m.group(2) or "").strip()
-            return u if _ok_img(u) else ""
+        r = requests.get(url, headers=HEADERS, timeout=(4, 7), stream=True, allow_redirects=True)
+        raw = r.raw.read(200_000, decode_content=True)
+        enc = r.encoding or "utf-8"
+        try:
+            html = raw.decode(enc, "ignore")
+        except LookupError:
+            html = raw.decode("utf-8", "ignore")
+        base = r.url or url
+        for m in _OG_ALT_RE.finditer(html):
+            u = (m.group(1) or m.group(2) or m.group(3) or "").strip()
+            if not u:
+                continue
+            u = urljoin(base, _html.unescape(u))
+            if _ok_img(u):
+                return u
     except Exception:
         pass
     return ""
@@ -344,6 +364,13 @@ def _with_deadline(fn, secs: float, *args):
     return box[0] if box else ""
 
 
+def image_for_url(url: str) -> str:
+    """給任何文章網址找縮圖（Google News 連結會先還原）。補舊文章用。"""
+    if "news.google.com" in url:
+        return _with_deadline(_gn_real_image, 10, url)
+    return _with_deadline(_fetch_og_image, 10, url)
+
+
 def _gn_real_image(gn_url: str) -> str:
     """Google News 連結 → 還原真實網址（reader.py 的解析）→ 抓 og:image。任何失敗回傳空字串。"""
     try:
@@ -354,7 +381,7 @@ def _gn_real_image(gn_url: str) -> str:
     return _fetch_og_image(real) if real else ""
 
 
-GN_IMG_LIMIT = 30     # 每輪最多還原幾篇 Google News 旅遊連結（每篇要多打 1~2 次請求）
+GN_IMG_LIMIT = 45     # 每輪最多還原幾篇 Google News 旅遊連結（每篇要多打 1~2 次請求）
 
 
 def fill_missing_images(articles: list[dict], limit: int = 400) -> int:
@@ -378,7 +405,9 @@ def fill_missing_images(articles: list[dict], limit: int = 400) -> int:
                 a["image_url"] = img
                 n += 1
 
-    gn = [a for a in cand if "news.google.com" in a["url"] and a.get("category") in ("旅遊", "大陸生活")][:GN_IMG_LIMIT]
+    gn = [a for a in cand if "news.google.com" in a["url"] and a.get("category") in ("旅遊", "大陸生活")]
+    gn.sort(key=lambda a: 0 if (a.get("region") == "大陸" or a.get("category") == "大陸生活") else 1)   # 只影響補圖名額順序，不影響畫面排序
+    gn = gn[:GN_IMG_LIMIT]
     if gn:
         stat = {"ok": 0, "fail": 0}
 
