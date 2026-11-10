@@ -1806,17 +1806,27 @@ def fetch_ptt_live() -> dict:
     return {"posts": posts, "errors": errs, "at": datetime.now(TZ_TW).strftime("%H:%M")}
 
 
-def ptt_html(posts: list, n: int = 20) -> str:
+def ptt_html(posts: list, n: int = 20, by: str = "h") -> str:
+    """用跟微博／Reddit 同一個卡片樣式（_sc_card）：標題 14px 粗體、熱度條、看板標籤＋發文時間。
+    by="h"＝依綜合熱度；by="n"＝依推文數（熱度條也跟著換）"""
     if not posts:
         return '<div class="rk-e">（目前沒有資料）</div>'
     names = dict(PTT_BOARDS_LIVE)
-    rows = ""
-    for p in posts[:n]:
-        push = "爆" if p["n"] >= 100 else (f'{p["n"]}' if p["n"] > 0 else "")
-        rows += (f'<div class="post"><span class="pk">{esc(names.get(p["b"], p["b"]))}</span>'
-                 f'<a href="{esc(p["u"], quote=True)}" target="_blank" rel="noopener">{esc(p["t"])}</a>'
-                 f'<span class="pt">{("🔥" + push + "推　") if push else ""}{esc(rel_epoch(p["p"]) if p.get("p") else p["d"])}</span></div>')
-    return rows
+    top = posts[:n]
+    mx = max(float(p.get(by) or 0) for p in top) or 1.0
+    out = ""
+    for i, p in enumerate(top, 1):
+        ratio = max(float(p.get(by) or 0), 0) / mx
+        w = max(6.0, ratio ** 0.6 * 100) if ratio > 0 else 0
+        lvl = "" if ratio >= 0.66 else (" h2" if ratio >= 0.33 else " h3")
+        push = "爆" if p["n"] >= 100 else f'{max(p["n"], 0)} 推'
+        heat = (f'<div class="sc-h"><span class="sc-bar{lvl}"><i style="width:{w:.0f}%"></i></span>'
+                f'<span class="sc-n">🔥 {push}</span></div>')
+        bd = f'<span class="bd bd-n">{esc(names.get(p["b"], p["b"]))}</span>'
+        when = rel_epoch(p["p"]) + "發文" if p.get("p") else p.get("d", "")
+        out += _sc_card(i, p["t"], p["u"], heat_html=heat, badges=bd,
+                        meta=f"<span>{esc(when)}</span>", medal=True)
+    return out
 
 
 gen_str, gen_age = _gen_time_str(sync.get("generated_at", ""))
@@ -2142,7 +2152,7 @@ with tab_soc:
     _pp = sorted([x for x in _ptt["posts"] if _pb == "全部" or x["b"] == _pb],
                  key=lambda x: x["n"] if _psort == "推文數" else x["h"], reverse=True)
     if _ptt["posts"]:
-        st.markdown(ptt_html(_pp, 20), unsafe_allow_html=True)
+        st.markdown(ptt_html(_pp, 20, "n" if _psort == "推文數" else "h"), unsafe_allow_html=True)
     else:
         st.markdown('<div class="empty">PTT 目前抓不到：' + esc("；".join(_ptt["errors"]) or "沒有資料") + '</div>',
                     unsafe_allow_html=True)
