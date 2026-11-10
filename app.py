@@ -295,6 +295,17 @@ div[role="radiogroup"][aria-label="快速篩選"] label:nth-of-type(3):has(input
 .sc-n{font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;color:var(--tx2);white-space:nowrap}
 .sc-m{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:5px;font-size:11.5px;color:var(--tx3)}
 .sc-img{width:64px;height:64px;flex-shrink:0;border-radius:8px;object-fit:cover;background:var(--soft)}
+.sc-r.medal{font-size:20px;min-width:26px;padding-top:0}
+.sc-ic{width:38px;height:38px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:19px;flex-shrink:0;box-shadow:0 1px 3px rgba(0,0,0,.12)}
+.sc-bar.h2 i{background:linear-gradient(90deg,#D9B56A,var(--accent))}
+.sc-bar.h3 i{background:#D9B56A}
+.sc-big{flex-direction:column;gap:0;padding:0;overflow:hidden}
+.sc-bimg{display:block;line-height:0}
+.sc-bimg img{width:100%;height:150px;object-fit:cover;display:block}
+.sc-row{display:flex;gap:10px;align-items:flex-start;padding:9px 12px}
+.sc-m a.tk{text-decoration:none!important;color:var(--tx2)!important}
+.sc-m a.tk:hover{color:var(--accent)!important}
+@media(max-width:700px){.sc-ic{width:34px;height:34px;font-size:17px}.sc-bimg img{height:130px}}
 .sc-chip{display:inline-block;margin:0 6px 6px 0;padding:4px 11px;border-radius:14px;background:var(--warn-bg);color:var(--warn)!important;font-size:12.5px;font-weight:600;text-decoration:none!important}
 .sc-chip:hover{background:var(--accent);color:#fff!important}
 
@@ -1538,15 +1549,90 @@ def _wb_flags(p, rank) -> dict:
     return {"new": bool(p.get("new")), "rise": rise, "climb": climb}
 
 
-def _sc_card(rank, title, url, orig="", heat_html="", badges="", meta="", img="") -> str:
+# 微博話題自動分類（規則式，改關鍵字就能調）：用顏色圖示方塊取代縮圖。越前面的類別優先
+_WB_CATS = [
+    ("科技", "💡", ("#4A6FA5", "#7C9BC9"),
+     ("AI", "人工智慧", "手機", "華為", "小米", "晶片", "芯片", "電動車", "特斯拉", "蘋果", "機器人", "無人機",
+      "航天", "衛星", "火箭", "大模型", "科技", "新能源", "智駕", "自動駕駛")),
+    ("財經", "💹", ("#C98A2B", "#E5B25D"),
+     ("股", "基金", "房價", "樓市", "經濟", "央行", "利率", "工資", "月薪", "社保", "薪資", "銀行", "消費", "營收",
+      "上市", "通膨", "關稅", "人民幣", "工業", "貸款", "養老金", "退休", "裁員", "被裁", "稅")),
+    ("娛樂", "🎬", ("#D35D8C", "#E8A0BF"),
+     ("明星", "演員", "歌手", "電影", "影帝", "影后", "綜藝", "演唱會", "偶像", "出道", "戀情", "粉絲", "票房",
+      "導演", "春晚", "劇組", "官宣", "新劇", "主演", "電視劇", "愛豆", "藝人")),
+    ("體育", "⚽", ("#27AE60", "#16A0A8"),
+     ("奧運", "世界盃", "足球", "籃球", "NBA", "冠軍", "運動員", "乒乓", "羽毛球", "網球", "聯賽", "亞運", "馬拉松")),
+    ("國際", "🌐", ("#6C5CE7", "#A29BFE"),
+     ("美國", "日本", "俄羅斯", "烏克蘭", "以色列", "伊朗", "川普", "特朗普", "外交", "總統", "戰爭", "韓國", "歐盟",
+      "聯合國", "巴勒斯坦", "加沙")),
+]
+_WB_DEFAULT_CAT = ("社會", "🗞️", ("#8C7B63", "#B3A48C"))
+# 個股標籤要擋掉的「一般詞」：這些公司簡稱太容易誤中（例：東南亞→南亞、蘋果＝水果）
+_TK_BLOCK = {"創意", "統一", "理想", "大成", "互連", "光芯", "蘋果", "博智", "耀華", "元太", "南亞", "中航", "台航",
+             "裕民", "和大", "建大", "味全", "台糖", "卜蜂", "正新", "智原", "立積", "矽力", "台化"}
+_AN: dict = {}
+_S2T: dict = {}
+
+
+def _s2t(t: str) -> str:
+    """簡體→繁體（微博標籤「热」之類沒經過轉換）"""
+    try:
+        if "cc" not in _S2T:
+            from opencc import OpenCC
+            _S2T["cc"] = OpenCC("s2twp")
+        return _S2T["cc"].convert(t)
+    except Exception:
+        return t
+
+
+def _wb_cat(title: str):
+    for name, ic, grad, kws in _WB_CATS:
+        if any(k in title for k in kws):
+            return name, ic, grad
+    return _WB_DEFAULT_CAT
+
+
+def _tk_chips(title: str, n: int = 2) -> str:
+    """用既有的 Analyzer 掃標題，抓得到的公司掛成個股標籤（連到 Yahoo 報價）"""
+    try:
+        if "an" not in _AN:
+            from analyzer import Analyzer
+            _AN["an"] = Analyzer()
+        r = _AN["an"].analyze(title, "", "zh")
+    except Exception:
+        return ""
+    out, k = "", 0
+    for t in r.ticker_details:
+        nm = str(t.name or "")
+        if nm in _TK_BLOCK or nm.startswith("台股"):
+            continue
+        href = yahoo_tw(t.code) if t.market == "TW" else f"https://finance.yahoo.com/quote/{quote(str(t.code))}"
+        label = t.code if nm == t.code else f"{t.code} {nm}"
+        out += f'<a class="tk" href="{esc(href, quote=True)}" target="_blank" rel="noopener">{esc(label)}</a>'
+        k += 1
+        if k >= n:
+            break
+    return out
+
+
+def _sc_card(rank, title, url, orig="", heat_html="", badges="", meta="", img="",
+             lead="", medal=False, big=False) -> str:
     tier = " t1" if rank <= 3 else (" t2" if rank <= 10 else "")
+    is_medal = medal and rank <= 3
+    rk = ("🥇", "🥈", "🥉")[rank - 1] if is_medal else str(rank)
     o = f'<div class="sc-o">{esc(orig)}</div>' if orig else ""
     m = f'<div class="sc-m">{badges}{meta}</div>' if (badges or meta) else ""
-    im = (f'<img class="sc-img" src="{esc(img, quote=True)}" loading="lazy" referrerpolicy="no-referrer" alt="" '
-          f'onerror="this.style.display=\'none\'">') if str(img).startswith("http") else ""
-    return (f'<div class="sc{tier}"><div class="sc-r">{rank}</div><div class="sc-b">'
+    body = (f'<div class="sc-r{" medal" if is_medal else ""}">{rk}</div>{lead}<div class="sc-b">'
             f'<a class="sc-t" href="{esc(url, quote=True)}" target="_blank" rel="noopener">{esc(title)}</a>{o}'
-            f'{heat_html}{m}</div>{im}</div>')
+            f'{heat_html}{m}</div>')
+    has_img = str(img).startswith("http")
+    if big and has_img:
+        return (f'<div class="sc sc-big{tier}"><a class="sc-bimg" href="{esc(url, quote=True)}" target="_blank" '
+                f'rel="noopener"><img src="{esc(img, quote=True)}" loading="lazy" referrerpolicy="no-referrer" alt="" '
+                f'onerror="this.parentNode.style.display=\'none\'"></a><div class="sc-row">{body}</div></div>')
+    im = (f'<img class="sc-img" src="{esc(img, quote=True)}" loading="lazy" referrerpolicy="no-referrer" alt="" '
+          f'onerror="this.style.display=\'none\'">') if has_img else ""
+    return f'<div class="sc{tier}">{body}{im}</div>'
 
 
 def weibo_cards(sc: dict, n=20) -> str:
@@ -1557,12 +1643,14 @@ def weibo_cards(sc: dict, n=20) -> str:
     out = ""
     for i, p in enumerate(wb, 1):
         v = int(p.get("n") or 0)
-        w = max(6.0, (v / mx) ** 0.6 * 100) if v else 0
-        heat = (f'<div class="sc-h"><span class="sc-bar"><i style="width:{w:.0f}%"></i></span>'
+        ratio = v / mx if mx else 0
+        w = max(6.0, ratio ** 0.6 * 100) if v else 0
+        lvl = "" if ratio >= 0.66 else (" h2" if ratio >= 0.33 else " h3")
+        heat = (f'<div class="sc-h"><span class="sc-bar{lvl}"><i style="width:{w:.0f}%"></i></span>'
                 f'<span class="sc-n">🔥 {_fmt_n(v)}</span></div>') if v else ""
         f = _wb_flags(p, i)
         bd = ""
-        tag = str(p.get("tag") or "").strip()
+        tag = _s2t(str(p.get("tag") or "").strip())
         if tag:
             bd += f'<span class="bd {_WB_TAG.get(tag, "bd-n")}">{esc(tag)}</span>'
         if f["new"]:
@@ -1571,9 +1659,16 @@ def weibo_cards(sc: dict, n=20) -> str:
             bd += f'<span class="bd bd-b">🚀 較上次 +{f["rise"]}%</span>'
         if f["climb"]:
             bd += f'<span class="bd bd-b">▲ 升 {f["climb"]} 名</span>'
+        bd += _tk_chips(p["t"])
         meta = f'<span>{esc(rel_epoch(p["s"]))}上榜</span>' if p.get("s") and not f["new"] else ""
-        out += _sc_card(i, p["t"], p["u"], heat_html=heat, badges=bd, meta=meta)
+        cname, cic, (g1, g2) = _wb_cat(p["t"])
+        lead = (f'<div class="sc-ic" title="{esc(cname, quote=True)}" '
+                f'style="background:linear-gradient(135deg,{g1},{g2})">{cic}</div>')
+        out += _sc_card(i, p["t"], p["u"], heat_html=heat, badges=bd, meta=meta, lead=lead, medal=True)
     return out
+
+
+_RD_SUB = {"popular": ("🔥", "全站熱門"), "worldnews": ("🌍", "國際新聞"), "technology": ("💻", "科技")}
 
 
 def reddit_cards(sc: dict) -> str:
@@ -1581,7 +1676,9 @@ def reddit_cards(sc: dict) -> str:
     rat = sc.get("reddit_at") or {}
     out = ""
     for sub, lst in (sc.get("reddit") or {}).items():
-        out += f'<div class="subhead"><b>r/{esc(sub)}</b></div>'
+        ic, desc = _RD_SUB.get(sub, ("👽", ""))
+        out += (f'<div class="subhead"><b>{ic} r/{esc(sub)}</b>'
+                + (f' <span style="color:var(--tx3)">· {desc}</span>' if desc else "") + '</div>')
         if sub in stale:
             out += _stale_note(rat.get(sub, ""))
         for i, p in enumerate(lst[:12], 1):
@@ -1595,7 +1692,7 @@ def reddit_cards(sc: dict) -> str:
                 bd += f'<span class="bd bd-b">▲ 升 {pr - i} 名</span>'
             meta = f'<span>{esc(rel_epoch(p.get("p")))}發文</span>' if p.get("p") else ""
             out += _sc_card(i, p.get("z") or p["t"], p["u"], orig=(p["t"] if p.get("z") else ""),
-                            badges=bd, meta=meta, img=p.get("i", ""))
+                            badges=bd, meta=meta, img=p.get("i", ""), big=(i <= 2))
     return out or '<div class="rk-e">（Reddit 目前連不上）</div>'
 
 
