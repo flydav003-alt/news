@@ -657,7 +657,14 @@ sync = sync_remote(DATA_URL)
 def load_all():
     db = SessionLocal()
     try:
-        return get_articles_df(db, limit=1500)
+        d = get_articles_df(db, limit=1500)
+        # 只撈最新 1500 則大約只涵蓋最近一天，量少的旅遊／大陸生活會被擠掉 → 另外單獨再撈
+        extra = [get_articles_df(db, category=c, limit=600) for c in ("旅遊", "大陸生活")]
+        extra = [x for x in extra if x is not None and not x.empty]
+        if extra:
+            d = pd.concat([d] + extra, ignore_index=True) if d is not None and not d.empty else pd.concat(extra, ignore_index=True)
+            d = d.drop_duplicates(subset=["url"]).sort_values("published_at", ascending=False).reset_index(drop=True)
+        return d
     finally:
         db.close()
 
@@ -680,7 +687,7 @@ def clean_images(df):
 
 
 BLOCKED_SOURCES = {"My Modern Met"}   # 永久隱藏的來源（舊資料庫 / Actions JSON 裡殘留的也一併濾掉）
-BLOCKED_SOURCE_KEYS = ("fclnews.com", "www.nytimes.com", "twaslnews")   # 網域類來源：小寫包含就擋
+BLOCKED_SOURCE_KEYS = ("fclnews.com", "www.nytimes.com", "twaslnews", "pchome.com.tw")   # 網域類來源：小寫包含就擋
 
 
 def _drop_blocked(d):
@@ -1986,7 +1993,7 @@ def render_life_tab(cat: str, icon: str):
             rg = st.radio("區域", ["全部", "🇹🇼 台灣", "🌍 國外（歐美）", "🇨🇳 大陸"], horizontal=True,
                           label_visibility="collapsed", key="travel_rg")
         with tc2:
-            only_img = st.checkbox("🖼️ 只看有圖片", value=True, key="travel_img")
+            only_img = st.checkbox("🖼️ 只看有圖片", value=False, key="travel_img")
         if rg.startswith("🇹🇼"):
             d0 = d0[d0["_rg"] == "台灣"]
         elif rg.startswith("🌍"):
@@ -1998,8 +2005,9 @@ def render_life_tab(cat: str, icon: str):
         if d0.empty:
             st.markdown('<div class="empty">🧳 這個條件下沒有符合的旅遊新聞（可以取消「只看有圖片」試試）</div>', unsafe_allow_html=True)
             return
-        d0, _ = recent(d0, hours_steps=(72, 168, 336, 720), min_n=12)
-        st.caption(f"共 {len(d0)} 則" + (f"（含大陸精選 {cn_n} 則）" if cn_n else ""))
+        d0, _ = recent(d0, hours_steps=(336, 720), min_n=1)      # 放寬：旅遊文章最多顯示 14 天內的
+        _cn_shown = int((d0["category"] == "大陸生活").sum())
+        st.caption(f"共 {len(d0)} 則" + (f"（含大陸精選 {_cn_shown} 則）" if _cn_shown else ""))
         render_grid(d0.sort_values("published_at", ascending=False), max_items=200, lazy=18)
         return
     d0, _ = recent(d0, hours_steps=(24, 48, 72, 168), min_n=6)
