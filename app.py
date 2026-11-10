@@ -680,6 +680,8 @@ def clean_images(df):
 
 
 df_all = clean_images(load_all())
+if not df_all.empty:
+    df_all = df_all[df_all["source"] != "My Modern Met"]
 if not st.session_state.get("show_rev", False) and not df_all.empty:
     df_all = df_all[~df_all["title"].fillna("").apply(is_routine_revenue)]
 
@@ -769,7 +771,7 @@ CAT_GRAD = {"AI": ("#2E86DE", "#6C5CE7"), "運動": ("#27AE60", "#16A0A8"), "娛
 
 def _first_sector(row) -> str:
     for s in str(row.get("sectors", "") or "").split(","):
-        if s.strip():
+        if s.strip() and not s.strip().startswith("區域:"):     # 「區域:國外」是旅遊分頁的篩選標記，不當成顯示用的產業標籤
             return s.strip()
     return ""
 
@@ -1964,7 +1966,7 @@ def render_life_tab(cat: str, icon: str):
         d0["_rg"] = d0.apply(_region, axis=1)
         tc1, tc2 = st.columns([3, 1.4])
         with tc1:
-            rg = st.radio("區域", ["全部", "🇹🇼 台灣", "🌍 國外（歐美）", "🏮 大陸"], horizontal=True,
+            rg = st.radio("區域", ["全部", "🇹🇼 台灣", "🌍 國外（歐美）", "🇨🇳 大陸"], horizontal=True,
                           label_visibility="collapsed", key="travel_rg")
         with tc2:
             only_img = st.checkbox("🖼️ 只看有圖片", value=True, key="travel_img")
@@ -1972,7 +1974,7 @@ def render_life_tab(cat: str, icon: str):
             d0 = d0[d0["_rg"] == "台灣"]
         elif rg.startswith("🌍"):
             d0 = d0[d0["_rg"] == "國外"]
-        elif rg.startswith("🏮"):
+        elif rg.startswith("🇨🇳"):
             d0 = d0[d0["_rg"] == "大陸"]
         if only_img:
             d0 = d0[d0["image_url"].fillna("") != ""]
