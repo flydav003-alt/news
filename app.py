@@ -280,6 +280,23 @@ div[role="radiogroup"][aria-label="快速篩選"] label:nth-of-type(3):has(input
 .si-a{display:flex;gap:10px;flex:1;min-width:0;align-items:center;text-decoration:none!important;color:inherit!important}
 .si-a>div{min-width:0}
 .sg-l li{margin:0 0 6px}
+/* 社群卡片：熱度條 + 相對熱度徽章 */
+.sc{display:flex;gap:10px;align-items:flex-start;background:var(--card);border:1px solid var(--line);border-left:4px solid var(--line);border-radius:10px;padding:9px 12px;margin:0 0 8px;box-shadow:0 1px 3px rgba(80,60,20,.06)}
+.sc.t1{border-left-color:var(--up)} .sc.t2{border-left-color:var(--accent)} .sc.t3{border-left-color:#D9B56A}
+.sc-r{font-family:'JetBrains Mono',monospace;font-weight:700;font-size:15px;color:var(--tx3);min-width:22px;text-align:center;padding-top:1px}
+.sc.t1 .sc-r{color:var(--up)} .sc.t2 .sc-r{color:var(--accent)}
+.sc-b{flex:1;min-width:0}
+.sc-t{display:block;font-size:14px;font-weight:700;line-height:1.5;color:var(--tx)!important;text-decoration:none!important}
+.sc-t:hover{color:var(--accent)!important}
+.sc-o{font-size:11.5px;color:var(--tx3);line-height:1.4;margin-top:1px}
+.sc-h{display:flex;align-items:center;gap:8px;margin-top:6px}
+.sc-bar{flex:1;height:7px;border-radius:4px;background:var(--soft);overflow:hidden}
+.sc-bar i{display:block;height:100%;border-radius:4px;background:linear-gradient(90deg,var(--accent),var(--up))}
+.sc-n{font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;color:var(--tx2);white-space:nowrap}
+.sc-m{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:5px;font-size:11.5px;color:var(--tx3)}
+.sc-chip{display:inline-block;margin:0 6px 6px 0;padding:4px 11px;border-radius:14px;background:var(--warn-bg);color:var(--warn)!important;font-size:12.5px;font-weight:600;text-decoration:none!important}
+.sc-chip:hover{background:var(--accent);color:#fff!important}
+
 /* 閱讀頁底部「開啟原文」 */
 .rdr-src{display:flex;align-items:center;justify-content:center;min-height:46px;margin:28px 0 0;border:1px solid var(--accent);border-radius:12px;
   background:var(--soft);color:var(--accent)!important;font-weight:700;font-size:15px;text-decoration:none!important}
@@ -516,10 +533,10 @@ st.session_state.setdefault("font_tab", _qp_font("tb"))
 _ts, _bs, _tb = (st.session_state[k] / 100 for k in ("font_title", "font_body", "font_tab"))
 FONT_CSS = f"""<style>
 /* 標題類：新聞標題、頂部 logo、區塊標題（分頁標籤不動） */
-.ct,.hero-t,.si-t,.logo,.sec,.ai-dir,.cal-d,.rk-h{{zoom:{_ts}}}
+.ct,.hero-t,.si-t,.logo,.sec,.ai-dir,.cal-d,.rk-h,.sc-t{{zoom:{_ts}}}
 /* 內文類：摘要、來源、時間、標籤、表格、AI 內文 */
 .cs,.co,.cm,.si-m,.hero-o,.hero-m,.ai-body,.ai-rsn,.ai-ft,.tag,.tk,.bd,.tr,.chip-t,.pill,.subhead,
-.q-n,.q-p,.q-c,.m-l,.m-v,.tbl,.cal-r,.post,.sg-l,.sg-m,.geo,.fn-new,.parts,.hb,.rk-r{{zoom:{_bs}}}
+.q-n,.q-p,.q-c,.m-l,.m-v,.tbl,.cal-r,.post,.sg-l,.sg-m,.geo,.fn-new,.parts,.hb,.rk-r,.sc-o,.sc-n,.sc-m,.sc-chip{{zoom:{_bs}}}
 /* 分頁標籤 */
 [role="tab"] p{{zoom:{_tb}}}
 /* 避免放大後被橫向裁掉 */
@@ -1504,24 +1521,101 @@ def _stale_note(iso: str) -> str:
     return f'<div class="rk-e" style="margin:2px 0 6px">⏳ 這次沒抓到，沿用舊資料' + (f'（上次成功：{esc(when)}）' if when else "") + '</div>'
 
 
-def social_html(sc: dict) -> tuple:
-    """回傳 (左欄 html, 右欄 html)：左＝微博（大陸），右＝Reddit（美國）。手機上欄位會直向堆疊，微博在上、Reddit 在下。"""
-    wb = sc.get("weibo") or []
-    wb_h = _rank_list([(f'{i}. {p["t"]}', p["u"], (p.get("tag") or "") + (f' · {p["n"]:,}' if p.get("n") else ""))
-                       for i, p in enumerate(wb, 1)], 20)
-    left = '<div class="sec">🇨🇳 微博熱搜（大陸）</div>' + (_stale_note(sc.get("weibo_at", "")) if sc.get("weibo_stale") and wb else "") + wb_h
+def _fmt_n(n) -> str:
+    n = int(n or 0)
+    return f"{n / 1e4:.1f}萬" if n >= 10000 else f"{n:,}"
 
-    rd = ""
+
+_WB_TAG = {"爆": "bd-b", "沸": "bd-b", "熱": "bd-g", "热": "bd-g", "新": "bd-n"}
+
+
+def _wb_flags(p, rank) -> dict:
+    """微博相對熱度：新上榜 / 熱度較上次成長 / 名次躍升（資料來自 extras.py 記下的上一輪快照）"""
+    n, pn, pr = int(p.get("n") or 0), int(p.get("pn") or 0), int(p.get("pr") or 0)
+    rise = round((n / pn - 1) * 100) if pn > 0 and n >= pn * 1.25 else 0
+    climb = (pr - rank) if pr > 0 and pr - rank >= 5 else 0
+    return {"new": bool(p.get("new")), "rise": rise, "climb": climb}
+
+
+def _sc_card(rank, title, url, orig="", heat_html="", badges="", meta="") -> str:
+    tier = " t1" if rank <= 3 else (" t2" if rank <= 10 else "")
+    o = f'<div class="sc-o">{esc(orig)}</div>' if orig else ""
+    m = f'<div class="sc-m">{badges}{meta}</div>' if (badges or meta) else ""
+    return (f'<div class="sc{tier}"><div class="sc-r">{rank}</div><div class="sc-b">'
+            f'<a class="sc-t" href="{esc(url, quote=True)}" target="_blank" rel="noopener">{esc(title)}</a>{o}'
+            f'{heat_html}{m}</div></div>')
+
+
+def weibo_cards(sc: dict, n=20) -> str:
+    wb = (sc.get("weibo") or [])[:n]
+    if not wb:
+        return '<div class="rk-e">（目前沒有資料）</div>'
+    mx = max(int(p.get("n") or 0) for p in wb) or 1
+    out = ""
+    for i, p in enumerate(wb, 1):
+        v = int(p.get("n") or 0)
+        w = max(6.0, (v / mx) ** 0.6 * 100) if v else 0
+        heat = (f'<div class="sc-h"><span class="sc-bar"><i style="width:{w:.0f}%"></i></span>'
+                f'<span class="sc-n">🔥 {_fmt_n(v)}</span></div>') if v else ""
+        f = _wb_flags(p, i)
+        bd = ""
+        tag = str(p.get("tag") or "").strip()
+        if tag:
+            bd += f'<span class="bd {_WB_TAG.get(tag, "bd-n")}">{esc(tag)}</span>'
+        if f["new"]:
+            bd += '<span class="bd bd-g">🆕 新上榜</span>'
+        if f["rise"]:
+            bd += f'<span class="bd bd-b">🚀 較上次 +{f["rise"]}%</span>'
+        if f["climb"]:
+            bd += f'<span class="bd bd-b">▲ 升 {f["climb"]} 名</span>'
+        meta = f'<span>{esc(rel_epoch(p["s"]))}上榜</span>' if p.get("s") and not f["new"] else ""
+        out += _sc_card(i, p["t"], p["u"], heat_html=heat, badges=bd, meta=meta)
+    return out
+
+
+def reddit_cards(sc: dict) -> str:
     stale = set(sc.get("reddit_stale") or [])
     rat = sc.get("reddit_at") or {}
+    out = ""
     for sub, lst in (sc.get("reddit") or {}).items():
-        rd += f'<div class="subhead"><b>r/{esc(sub)}</b></div>'
+        out += f'<div class="subhead"><b>r/{esc(sub)}</b></div>'
         if sub in stale:
-            rd += _stale_note(rat.get(sub, ""))
-        rd += _rank_list(
-            [(p.get("z") or p["t"], p["u"], rel_epoch(p.get("p")), p["t"] if p.get("z") else "") for p in lst], 12)
-    rd = rd or '<div class="rk-e">（Reddit 目前連不上）</div>'
-    right = '<div class="sec">👽 Reddit（美國）</div>' + rd
+            out += _stale_note(rat.get(sub, ""))
+        for i, p in enumerate(lst[:12], 1):
+            bd = ""
+            if p.get("new"):
+                bd += '<span class="bd bd-g">🆕 新進熱門</span>'
+            pr = int(p.get("pr") or 0)
+            if pr > 0 and pr - i >= 3:
+                bd += f'<span class="bd bd-b">▲ 升 {pr - i} 名</span>'
+            meta = f'<span>{esc(rel_epoch(p.get("p")))}發文</span>' if p.get("p") else ""
+            out += _sc_card(i, p.get("z") or p["t"], p["u"], orig=(p["t"] if p.get("z") else ""),
+                            badges=bd, meta=meta)
+    return out or '<div class="rk-e">（Reddit 目前連不上）</div>'
+
+
+def social_hot_html(sc: dict) -> str:
+    """「🔥 升溫中」快訊：微博前 15 名裡，新上榜 / 熱度成長 ≥25% / 名次躍升 ≥5 的話題"""
+    hot = []
+    for i, p in enumerate((sc.get("weibo") or [])[:15], 1):
+        f = _wb_flags(p, i)
+        if f["new"] or f["rise"] or f["climb"]:
+            tag = "🆕" if f["new"] else ("🚀" if f["rise"] else "▲")
+            hot.append((int(p.get("n") or 0), tag, p))
+    hot.sort(key=lambda x: -x[0])
+    if not hot:
+        return ""
+    chips = "".join(f'<a class="sc-chip" href="{esc(p["u"], quote=True)}" target="_blank" rel="noopener">{t} {esc(p["t"])}</a>'
+                    for _n, t, p in hot[:6])
+    return f'<div class="sec">🔥 升溫中 <span class="fn-reco-chips">微博新上榜或熱度快速成長</span></div><div>{chips}</div>'
+
+
+def social_html(sc: dict) -> tuple:
+    """回傳 (左欄 html, 右欄 html)：左＝微博（大陸），右＝Reddit（美國）。手機上欄位會直向堆疊，微博在上、Reddit 在下。"""
+    left = ('<div class="sec">🇨🇳 微博熱搜（大陸）</div>'
+            + (_stale_note(sc.get("weibo_at", "")) if sc.get("weibo_stale") and sc.get("weibo") else "")
+            + weibo_cards(sc))
+    right = '<div class="sec">👽 Reddit（美國）</div>' + reddit_cards(sc)
     return left, right
 
 
@@ -1829,6 +1923,9 @@ with tab_cal:
         st.markdown(f'<div class="empty">💬 {_NO_EXTRAS}</div>', unsafe_allow_html=True)
     else:
         _l, _r = social_html(_sc)
+        _hot = social_hot_html(_sc)
+        if _hot:
+            st.markdown(_hot, unsafe_allow_html=True)
         _c1, _c2 = st.columns(2)
         with _c1:
             st.markdown(_l, unsafe_allow_html=True)
