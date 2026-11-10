@@ -1732,8 +1732,8 @@ def social_html(sc: dict) -> tuple:
 
 
 # ── PTT：由 Streamlit 主機即時抓（實測 Streamlit 連得上 PTT；GitHub Actions 的 IP 被擋）──
-PTT_BOARDS_LIVE = [("Stock", "股票"), ("Gossiping", "八卦"), ("HatePolitics", "政黑"),
-                   ("Baseball", "棒球"), ("NBA", "NBA")]
+PTT_BOARDS_LIVE = [("Gossiping", "八卦"), ("HatePolitics", "政黑"), ("Baseball", "棒球"),
+                   ("NBA", "NBA"), ("Stock", "股票")]
 _PTT_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
            "Chrome/124.0 Safari/537.36")
 
@@ -1771,9 +1771,12 @@ def _ptt_board(board: str, pages: int = 3) -> tuple:
             if title.startswith("[公告]"):
                 continue
             nr, dt = ent.select_one("div.nrec"), ent.select_one("div.date")
-            posts.append({"t": title, "u": "https://www.ptt.cc" + a.get("href", ""), "b": board,
+            href = a.get("href", "")
+            m = re.search(r"/M\.(\d{9,10})\.", href)          # 網址裡的 M.<unix 時間>.A.xxx ＝ 發文時間
+            posts.append({"t": title, "u": "https://www.ptt.cc" + href, "b": board,
                           "n": _ptt_push_n(nr.get_text() if nr else ""),
-                          "d": dt.get_text().strip() if dt else ""})
+                          "d": dt.get_text().strip() if dt else "",
+                          "p": int(m.group(1)) if m else 0})
         prev = next((x for x in soup.select("div.btn-group-paging a") if "上頁" in x.get_text()), None)
         if not prev or not prev.get("href"):
             break
@@ -1790,7 +1793,16 @@ def fetch_ptt_live() -> dict:
             posts += ps
             if er:
                 errs.append(er)
-    posts.sort(key=lambda x: x["n"], reverse=True)
+    # 綜合熱度：各看板推文量級不同 → 先除以該看板的「高標」（80 百分位）再比；
+    # 發越久累積越多 → 再依發文時間遞減（約 6 小時後熱度剩一半左右）
+    now = time.time()
+    ref = {}
+    for b, _ in PTT_BOARDS_LIVE:
+        ns_ = sorted(x["n"] for x in posts if x["b"] == b and x["n"] > 0)
+        ref[b] = max(ns_[int(len(ns_) * 0.8)] if ns_ else 1, 5)
+    for x in posts:
+        age_h = max((now - x["p"]) / 3600, 0) if x["p"] else 24
+        x["h"] = max(x["n"], 0) / ref[x["b"]] / ((age_h + 2) ** 0.7)
     return {"posts": posts, "errors": errs, "at": datetime.now(TZ_TW).strftime("%H:%M")}
 
 
@@ -1803,7 +1815,7 @@ def ptt_html(posts: list, n: int = 20) -> str:
         push = "爆" if p["n"] >= 100 else (f'{p["n"]}' if p["n"] > 0 else "")
         rows += (f'<div class="post"><span class="pk">{esc(names.get(p["b"], p["b"]))}</span>'
                  f'<a href="{esc(p["u"], quote=True)}" target="_blank" rel="noopener">{esc(p["t"])}</a>'
-                 f'<span class="pt">{("🔥" + push + "推　") if push else ""}{esc(p["d"])}</span></div>')
+                 f'<span class="pt">{("🔥" + push + "推　") if push else ""}{esc(rel_epoch(p["p"]) if p.get("p") else p["d"])}</span></div>')
     return rows
 
 
@@ -2114,7 +2126,10 @@ with tab_soc:
 
     # ── PTT（台灣）：Streamlit 即時抓，快取 10 分鐘 ──
     st.markdown('<div class="sec">🇹🇼 PTT 熱門（台灣）</div>', unsafe_allow_html=True)
-    _pc1, _pc2 = st.columns([4, 1])
+    _pc1, _pc2, _pc3 = st.columns([4, 2, 1.2])
+    with _pc3:
+        _psort = st.radio("排序", ["綜合熱度", "推文數"], horizontal=True, key="ptt_sort",
+                          label_visibility="collapsed")
     with _pc1:
         _pb = st.radio("看板", ["全部"] + [b for b, _ in PTT_BOARDS_LIVE], horizontal=True,
                        format_func=lambda b: b if b == "全部" else f"{dict(PTT_BOARDS_LIVE)[b]}",
@@ -2124,13 +2139,16 @@ with tab_soc:
             fetch_ptt_live.clear()
     with st.spinner("抓取 PTT 中…"):
         _ptt = fetch_ptt_live()
-    _pp = [x for x in _ptt["posts"] if _pb == "全部" or x["b"] == _pb]
+    _pp = sorted([x for x in _ptt["posts"] if _pb == "全部" or x["b"] == _pb],
+                 key=lambda x: x["n"] if _psort == "推文數" else x["h"], reverse=True)
     if _ptt["posts"]:
         st.markdown(ptt_html(_pp, 20), unsafe_allow_html=True)
     else:
         st.markdown('<div class="empty">PTT 目前抓不到：' + esc("；".join(_ptt["errors"]) or "沒有資料") + '</div>',
                     unsafe_allow_html=True)
-    st.caption(f"依推文數排序（最新約 60 篇內）· 更新於 {_ptt['at']}"
+    st.caption(("綜合熱度＝推文數 ÷ 該看板高標，再隨發文時間遞減（新文章升溫快的會排前面）"
+                if _psort == "綜合熱度" else "依推文數排序")
+               + f"（各板最新約 60 篇內）· 更新於 {_ptt['at']}"
                + (f" · 部分看板失敗：{'；'.join(_ptt['errors'])}" if _ptt["errors"] and _ptt["posts"] else ""))
     st.divider()
 
