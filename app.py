@@ -447,9 +447,12 @@ body.fn-compact .cm-b .tr{display:none}
 @media(max-width:700px){
   [role="tablist"]{gap:6px!important}
   [role="tab"]{flex:1 1 calc(20% - 6px)!important;min-width:0!important;justify-content:center!important;padding:6px 3px!important;white-space:nowrap}
-  [role="tab"] p{font-size:14px!important}
+  [role="tab"] p{font-size:13px!important}
+  /* 前 4 顆（新聞／AI／運動／娛樂）較大，後 5 顆較小 */
+  [role="tab"]:nth-of-type(-n+4){flex:1 1 calc(25% - 6px)!important;padding:9px 3px!important}
+  [role="tab"]:nth-of-type(-n+4) p{font-size:16px!important}
 }
-@media(max-width:400px){[role="tab"] p{font-size:13px!important}}
+@media(max-width:400px){[role="tab"]:nth-of-type(-n+4) p{font-size:15px!important}}
 .stButton>button{border-radius:8px;font-weight:500;border:1px solid var(--line);background:var(--card);color:var(--tx)}
 .stButton>button[kind="primary"]{background:var(--accent);border-color:var(--accent);color:#fff}
 .stSelectbox>div>div,.stTextInput>div>div>input{background:var(--card)!important;border:1px solid var(--line)!important;border-radius:8px!important}
