@@ -58,7 +58,7 @@ HEADERS = {
 }
 TIMEOUT   = (4, 8)      # (連線, 讀取) 秒
 # 永久封鎖的來源（Google News 轉來的文章，source 會被換成媒體網域；比對小寫、包含即擋）
-BLOCKED_SOURCE_KEYS = ("fclnews.com", "www.nytimes.com", "twaslnews")
+BLOCKED_SOURCE_KEYS = ("fclnews.com", "www.nytimes.com", "twaslnews", "pchome.com.tw")
 SOURCE_DEADLINE = 8     # 單一來源整體硬上限（秒）：超過就放棄、回傳 0 則，不拖慢整輪
 MAX_ITEMS = 50
 CRAWL_WORKERS = 10       # 同時抓幾個來源（Google News 約 20 個，太高可能被限流，可視情況調 6~12）
