@@ -1604,7 +1604,12 @@ with tab_home:
             def _clear_search():
                 st.session_state.pop("last_search", None)
                 st.session_state["home_sq"] = ""
-            st.button("✕ 取消搜尋，回到今日新聞", on_click=_clear_search, key="clear_search")
+            _bc1, _bc2 = st.columns([1, 2.4])
+            with _bc1:
+                st.button("✕ 取消搜尋，回到今日新聞", on_click=_clear_search, key="clear_search")
+            with _bc2:
+                s_sort = st.radio("排序", ["預設（各版由新到舊）", "🕒 時間排序（不分版本）"], horizontal=True,
+                                  label_visibility="collapsed", key="search_sort")
             # ① 先找網站資料庫裡符合的（標題含全部關鍵字，且在所選時間內）
             _toks = [t for t in ls[0].lower().split() if t]
             _blob_t = (df_all["title"].fillna("") + " " + df_all["title_zh"].fillna("")).str.lower()
@@ -1625,6 +1630,9 @@ with tab_home:
                 _seen_u = set(db_hit["url"].astype(str))
                 _seen_t = set(db_hit["title"].fillna("").str.strip())
                 sdf = sdf[~sdf["url"].astype(str).isin(_seen_u) & ~sdf["title"].fillna("").str.strip().isin(_seen_t)]
+
+            if s_sort.startswith("🕒") and sdf is not None and not sdf.empty:
+                sdf = sdf.sort_values("published_at", ascending=False).reset_index(drop=True)
 
             if db_hit.empty and (sdf is None or sdf.empty):
                 if sdf is not None:
