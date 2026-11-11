@@ -2733,7 +2733,7 @@ _READ_JS = """
     var pn = inl ? inl.closest('[role="tabpanel"]') : null;
     if (!inl || !tl || !snVis(inl) || (pn && pn.hasAttribute('hidden'))) { snBar.style.display = 'none'; return; }
     var tr = tl.getBoundingClientRect(), ir = inl.getBoundingClientRect();
-    if (ir.bottom > tr.bottom) { snBar.style.display = 'none'; return; }      // 內嵌那排還看得到 → 不需要固定列
+    if (ir.top > tr.bottom + 6) { snBar.style.display = 'none'; return; }      // 內嵌那排還沒碰到分頁列 → 不需要固定列（+6px＝固定列的上內距，兩排按鈕位置剛好重疊，換手時不會跳）
     snBar.style.display = 'flex';
     snBar.style.top = tr.bottom + 'px'; snBar.style.left = tr.left + 'px'; snBar.style.width = tr.width + 'px';
     var line = tr.bottom + snBar.offsetHeight + 60, cur = 'ptt', tops = {};
