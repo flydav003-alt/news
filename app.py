@@ -1734,16 +1734,17 @@ def social_html(sc: dict) -> tuple:
 # ── PTT：由 Streamlit 主機即時抓（實測 Streamlit 連得上 PTT；GitHub Actions 的 IP 被擋）──
 # (看板代碼, 顯示名稱, 分類)。想增減看板只要改這裡；看板名稱打錯或不存在時，該板會在頁面下方顯示失敗，不影響其他板。
 PTT_BOARDS_LIVE = [
-    ("Gossiping", "八卦", "綜合"),
-    ("movie", "電影", "娛樂"), ("KoreaDrama", "韓劇", "娛樂"), ("KoreaStar", "韓星", "娛樂"),
-    ("C_Chat", "希洽", "電玩"), ("Steam", "Steam", "電玩"), ("Switch", "Switch", "電玩"),
-    ("PlayStation", "PS", "電玩"), ("LoL", "LoL", "電玩"),
-    ("Japan_Travel", "日本旅遊", "旅遊"), ("Korea_Travel", "韓國旅遊", "旅遊"),
-    ("Hiking", "登山", "風景"), ("Photo", "攝影", "風景"),
-    ("Baseball", "棒球", "運動"), ("NBA", "NBA", "運動"),
     ("Stock", "股票", "股票"),
+    ("Gossiping", "八卦", "八卦"),
+    ("C_Chat", "電玩", "電玩"),
+    ("Lifeismoney", "省錢", "省錢"),
+    ("NBA", "籃球", "籃球"),
+    ("Baseball", "棒球", "棒球"),
+    ("China-Drama", "中劇", "戲劇"),
+    ("KoreaDrama", "韓劇", "戲劇"),
 ]
-PTT_CATS = ["綜合", "娛樂", "電玩", "旅遊", "風景", "運動", "股票"]
+PTT_CATS = ["股票", "八卦", "電玩", "省錢", "籃球", "棒球", "戲劇"]
+PTT_BIG = ("Stock", "Gossiping", "C_Chat")      # 文章流動快的大板多抓一頁
 _PTT_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
            "Chrome/124.0 Safari/537.36")
 
@@ -1799,7 +1800,7 @@ def fetch_ptt_live() -> dict:
     """各看板平行抓取，快取 10 分鐘。回傳 {'posts': [...], 'errors': [...], 'at': 'HH:MM'}"""
     posts, errs = [], []
     with ThreadPoolExecutor(max_workers=8) as ex:
-        for ps, er in ex.map(lambda b: _ptt_board(b[0], 3 if b[0] in ("Gossiping", "Stock") else 2),
+        for ps, er in ex.map(lambda b: _ptt_board(b[0], 3 if b[0] in PTT_BIG else 2),
                               PTT_BOARDS_LIVE):
             posts += ps
             if er:
