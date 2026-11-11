@@ -246,6 +246,13 @@ div[role="radiogroup"][aria-label="快速篩選"] label:nth-of-type(3):has(input
 .card.read,.si.read{opacity:.55;transition:opacity .15s} .card.read:hover,.si.read:hover{opacity:1}
 /* 關掉 Streamlit 重跑腳本時整頁變淡（約 2 秒的反白）：內容照常更新，只是不再被調暗 */
 [data-stale="true"],.stale-element,[data-testid="stale-element"]{opacity:1!important;transition:none!important}
+/* 社群分頁：PTT／微博／Reddit 快速跳轉列（內嵌一排＋往下捲時貼在分頁列下方的固定列） */
+.fn-snav,#fn-snav-fix{display:flex;gap:6px;align-items:center}
+.fn-snav{margin:2px 0 6px}
+.sn-b{display:inline-flex;align-items:center;height:30px;padding:0 14px;border-radius:999px;border:1px solid var(--line);background:var(--card);color:var(--tx);font-size:13px;font-weight:700;cursor:pointer;user-select:none;-webkit-tap-highlight-color:transparent;white-space:nowrap;font-family:inherit}
+.sn-b:hover{border-color:var(--accent)}
+.sn-b.on{background:var(--accent)!important;border-color:var(--accent)!important;color:#fff!important}
+#fn-snav-fix{position:fixed;z-index:998;display:none;padding:6px 2px;background:var(--bg);border-bottom:1px solid var(--line);box-sizing:border-box}
 .ct:visited{color:var(--tx3)!important}
 .fn-reco-wrap{margin-top:6px}
 .fn-reco-chips{font-weight:500;color:var(--accent);margin-left:6px}
@@ -1726,10 +1733,10 @@ def social_hot_html(sc: dict) -> str:
 
 def social_html(sc: dict) -> tuple:
     """回傳 (左欄 html, 右欄 html)：左＝微博（大陸），右＝Reddit（美國）。手機上欄位會直向堆疊，微博在上、Reddit 在下。"""
-    left = ('<div class="sec">🇨🇳 微博熱搜（大陸）</div>'
+    left = ('<div class="sec" data-sn="weibo">🇨🇳 微博熱搜（大陸）</div>'
             + (_stale_note(sc.get("weibo_at", "")) if sc.get("weibo_stale") and sc.get("weibo") else "")
             + weibo_cards(sc))
-    right = '<div class="sec">👽 Reddit（美國）</div>' + reddit_cards(sc)
+    right = '<div class="sec" data-sn="reddit">👽 Reddit（美國）</div>' + reddit_cards(sc)
     return left, right
 
 
@@ -2150,9 +2157,13 @@ with tab_cal:
 # ═══════════════════════════════════════════════
 with tab_soc:
     st.markdown('<div class="sec">💬 社群熱門話題</div>', unsafe_allow_html=True)
+    # 快速跳轉列：往下捲離開畫面後，JS 會在分頁列下方顯示同樣的固定列（見 _READ_JS 的 snav）
+    st.markdown('<div class="fn-snav"><span class="sn-b" data-snav="ptt">🇹🇼 PTT</span>'
+                '<span class="sn-b" data-snav="weibo">🇨🇳 微博</span>'
+                '<span class="sn-b" data-snav="reddit">👽 Reddit</span></div>', unsafe_allow_html=True)
 
     # ── PTT（台灣）：Streamlit 即時抓，快取 10 分鐘 ──
-    st.markdown('<div class="sec">🇹🇼 PTT 熱門（台灣）</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sec" data-sn="ptt">🇹🇼 PTT 熱門（台灣）</div>', unsafe_allow_html=True)
     _pc1, _pc2, _pc3 = st.columns([4, 2, 1.2])
     with _pc3:
         _psort = st.radio("排序", ["綜合熱度", "推文數"], horizontal=True, key="ptt_sort",
@@ -2707,6 +2718,46 @@ _READ_JS = """
     if (panel) target = Math.max(0, panel.getBoundingClientRect().top - base + cur - list.getBoundingClientRect().height);
     if (cur > target) { if (isDoc) P.scrollTo(0, target); else sc.scrollTop = target; }
   }
+  // ── 社群分頁：PTT／微博／Reddit 固定跳轉列 ──
+  var snBar = null, snPick = '', snRaf = 0;
+  function snVis(el){ return !!(el && el.getClientRects().length); }
+  function snavInit(){
+    var old = D.getElementById('fn-snav-fix'); if (old) old.remove();
+    snBar = D.createElement('div'); snBar.id = 'fn-snav-fix';
+    snBar.innerHTML = '<span class="sn-b" data-snav="ptt">🇹🇼 PTT</span><span class="sn-b" data-snav="weibo">🇨🇳 微博</span><span class="sn-b" data-snav="reddit">👽 Reddit</span>';
+    D.body.appendChild(snBar);
+  }
+  function snavUpdate(){
+    if (!snBar) return;
+    var inl = D.querySelector('.fn-snav'), tl = D.querySelector('[role="tablist"]');
+    var pn = inl ? inl.closest('[role="tabpanel"]') : null;
+    if (!inl || !tl || !snVis(inl) || (pn && pn.hasAttribute('hidden'))) { snBar.style.display = 'none'; return; }
+    var tr = tl.getBoundingClientRect(), ir = inl.getBoundingClientRect();
+    if (ir.bottom > tr.bottom) { snBar.style.display = 'none'; return; }      // 內嵌那排還看得到 → 不需要固定列
+    snBar.style.display = 'flex';
+    snBar.style.top = tr.bottom + 'px'; snBar.style.left = tr.left + 'px'; snBar.style.width = tr.width + 'px';
+    var line = tr.bottom + snBar.offsetHeight + 60, cur = 'ptt', tops = {};
+    ['ptt', 'weibo', 'reddit'].forEach(function(k){
+      var a = D.querySelector('[data-sn="' + k + '"]');
+      if (a && snVis(a)) { tops[k] = a.getBoundingClientRect().top; if (tops[k] <= line) cur = k; }
+    });
+    if (cur === 'reddit' && tops.weibo !== undefined && Math.abs(tops.weibo - tops.reddit) < 10) cur = (snPick === 'reddit') ? 'reddit' : 'weibo';   // 電腦版微博／Reddit 並排
+    snBar.querySelectorAll('.sn-b').forEach(function(b){ b.classList.toggle('on', b.getAttribute('data-snav') === cur); });
+  }
+  function onSnScroll(){ if (snRaf) return; snRaf = P.requestAnimationFrame(function(){ snRaf = 0; snavUpdate(); }); }
+  function snavGo(key){
+    snPick = key;
+    var el = D.querySelector('[data-sn="' + key + '"]'); if (!el || !snVis(el)) return;
+    var tl = D.querySelector('[role="tablist"]');
+    var off = (tl ? tl.getBoundingClientRect().height : 0) + 44;                // 分頁列高度 ＋ 固定列高度（約 44px）
+    var sc = scrollerOf(el), isDoc = (sc === D.scrollingElement || sc === D.documentElement);
+    var base = isDoc ? 0 : sc.getBoundingClientRect().top;
+    var cur = isDoc ? (P.pageYOffset || sc.scrollTop) : sc.scrollTop;
+    var y = Math.max(0, el.getBoundingClientRect().top - base + cur - off);
+    try { if (isDoc) P.scrollTo({top: y, behavior: 'smooth'}); else sc.scrollTo({top: y, behavior: 'smooth'}); }
+    catch(x) { if (isDoc) P.scrollTo(0, y); else sc.scrollTop = y; }
+    setTimeout(snavUpdate, 400);
+  }
   // ── 手機：點新聞不開新分頁，直接在本分頁進閱讀模式；回首頁時回到剛剛的分頁與捲動位置 ──
   var PK2 = 'fn_pos', restoring = false;
   function isMobile(){ try { return P.matchMedia('(hover: none) and (pointer: coarse)').matches; } catch(x) { return false; } }
@@ -2781,6 +2832,8 @@ _READ_JS = """
   P.addEventListener('popstate', onPop);
   function onClick(e){
     var tg = e.target, cl = function(sel){ return tg && tg.closest ? tg.closest(sel) : null; };
+    var sn = cl('[data-snav]');
+    if (sn) { e.preventDefault(); e.stopPropagation(); snavGo(sn.getAttribute('data-snav')); return; }
     var dn = cl('[data-dens]');
     if (dn) { e.preventDefault(); try { P.localStorage.setItem(DK, dn.getAttribute('data-dens')); } catch(x) {} applyDens(); return; }
     if (cl('[data-onlynew]')) { e.preventDefault(); D.body.classList.toggle('fn-onlynew'); markNew(true); return; }
@@ -2818,15 +2871,17 @@ _READ_JS = """
     setTimeout(buildReco, 400);
   }
   var t = null;
-  var obs = new MutationObserver(function(){ clearTimeout(t); t = setTimeout(function(){ markRead(); buildReco(); markFav(); buildFav(); applyDens(); markNew(); ensureLazy(); tagChips(); }, 200); });
+  var obs = new MutationObserver(function(){ clearTimeout(t); t = setTimeout(function(){ markRead(); buildReco(); markFav(); buildFav(); applyDens(); markNew(); ensureLazy(); tagChips(); snavUpdate(); }, 200); });
   obs.observe(D.body, {childList: true, subtree: true});
   D.addEventListener('click', onClick, true);
-  P.__fnCleanup = function(){ obs.disconnect(); D.removeEventListener('click', onClick, true); P.removeEventListener('popstate', onPop); if (ov) { ov.remove(); ov = null; } D.removeEventListener('visibilitychange', onVis); clearInterval(tt); if (io) io.disconnect(); D.documentElement.removeAttribute('data-fnjs'); };
+  D.addEventListener('scroll', onSnScroll, true);
+  P.addEventListener('resize', onSnScroll);
+  P.__fnCleanup = function(){ D.removeEventListener('scroll', onSnScroll, true); P.removeEventListener('resize', onSnScroll); if (snBar) { snBar.remove(); snBar = null; } obs.disconnect(); D.removeEventListener('click', onClick, true); P.removeEventListener('popstate', onPop); if (ov) { ov.remove(); ov = null; } D.removeEventListener('visibilitychange', onVis); clearInterval(tt); if (io) io.disconnect(); D.documentElement.removeAttribute('data-fnjs'); };
   D.documentElement.setAttribute('data-fnjs', '1');
-  initBase(); touch();
+  initBase(); touch(); snavInit();
   var tt = setInterval(touch, 60000);
   D.addEventListener('visibilitychange', onVis);
-  markRead(); buildReco(); markFav(); buildFav(); applyDens(); markNew(); ensureLazy(); tagChips();
+  markRead(); buildReco(); markFav(); buildFav(); applyDens(); markNew(); ensureLazy(); tagChips(); snavUpdate();
   restorePos();
 })();
 </script>
