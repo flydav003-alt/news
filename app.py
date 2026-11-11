@@ -244,6 +244,8 @@ div[role="radiogroup"][aria-label="快速篩選"] label:nth-of-type(3):has(input
 .strip{height:30px;display:flex;align-items:center;padding:0 13px;font-size:11.5px;font-weight:700;color:rgba(255,255,255,.95);letter-spacing:.5px}
 .grid{align-items:start}
 .card.read,.si.read{opacity:.55;transition:opacity .15s} .card.read:hover,.si.read:hover{opacity:1}
+/* 關掉 Streamlit 重跑腳本時整頁變淡（約 2 秒的反白）：內容照常更新，只是不再被調暗 */
+[data-stale="true"],.stale-element,[data-testid="stale-element"]{opacity:1!important;transition:none!important}
 .ct:visited{color:var(--tx3)!important}
 .fn-reco-wrap{margin-top:6px}
 .fn-reco-chips{font-weight:500;color:var(--accent);margin-left:6px}
