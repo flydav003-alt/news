@@ -252,6 +252,8 @@ div[role="radiogroup"][aria-label="快速篩選"] label:nth-of-type(3):has(input
 .sn-b{display:inline-flex;align-items:center;height:30px;padding:0 14px;border-radius:999px;border:1px solid var(--line);background:var(--card);color:var(--tx);font-size:13px;font-weight:700;cursor:pointer;user-select:none;-webkit-tap-highlight-color:transparent;white-space:nowrap;font-family:inherit}
 .sn-b:hover{border-color:var(--accent)}
 .sn-b.on{background:var(--accent)!important;border-color:var(--accent)!important;color:#fff!important}
+/* 國旗字型：這些元件裡有國旗 emoji，Streamlit 自己的字型設定會蓋掉繼承，所以直接指定（字型本身只在 Windows 偵測到不支援時才會載入） */
+.sn-b,.sec,.m-l,.fn-snav,[data-testid="stRadio"] label,[data-testid="stRadio"] label *{font-family:'Twemoji Country Flags','Noto Sans TC',sans-serif!important}
 #fn-snav-fix{position:fixed;z-index:998;display:none;padding:6px 2px;background:var(--bg);border-bottom:1px solid var(--line);box-sizing:border-box}
 .ct:visited{color:var(--tx3)!important}
 .fn-reco-wrap{margin-top:6px}
