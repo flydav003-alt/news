@@ -111,7 +111,7 @@ CSS = """
   --up:#C0392B; --up-bg:#FBE9E5; --dn:#1B7A34; --dn-bg:#E4F2E8;
   --warn:#92400E; --warn-bg:#FFF3D6; --accent:#B8742A;
 }
-html,body,[class*="css"],.stApp{font-family:'Noto Sans TC',sans-serif!important;background:var(--bg)!important;color:var(--tx)!important}
+html,body,[class*="css"],.stApp{font-family:'Twemoji Country Flags','Noto Sans TC',sans-serif!important;background:var(--bg)!important;color:var(--tx)!important}
 header[data-testid="stHeader"]{display:none!important}
 section[data-testid="stSidebar"],button[data-testid="collapsedControl"]{display:none!important}
 .main .block-container,[data-testid="stMain"] .block-container{padding-top:8px!important;padding-bottom:30px!important;max-width:1320px!important}
@@ -2718,6 +2718,21 @@ _READ_JS = """
     if (panel) target = Math.max(0, panel.getBoundingClientRect().top - base + cur - list.getBoundingClientRect().height);
     if (cur > target) { if (isDoc) P.scrollTo(0, target); else sc.scrollTop = target; }
   }
+  // ── 國旗 emoji 補丁：Windows 的 Chrome／Edge 會把 🇹🇼 顯示成「TW」字母。偵測到不支援才載入 78KB 的國旗字型；手機（原生支援）不受影響 ──
+  function flagFill(){
+    try {
+      if (D.getElementById('fn-flagfont')) return;
+      var fam = '"Twemoji Mozilla","Apple Color Emoji","Segoe UI Emoji","Segoe UI Symbol","Noto Color Emoji","EmojiOne Color","Android Emoji",sans-serif';
+      var mk = function(){ var o = D.createElement('canvas'); o.width = o.height = 1; var t = o.getContext('2d', {willReadFrequently: true}); t.textBaseline = 'top'; t.font = '100px ' + fam; t.scale(.01, .01); return t; };
+      var px = function(c, t, f){ c.clearRect(0, 0, 100, 100); c.fillStyle = f; c.fillText(t, 0, 0); return c.getImageData(0, 0, 1, 1).data.join(','); };
+      var colored = function(t){ var c = mk(), a = px(c, t, '#fff'), b = px(c, t, '#000'); return a === b && b.indexOf('0,0,0,') !== 0; };
+      if (colored('😊') && !colored('🇨🇭')) {
+        var st = D.createElement('style'); st.id = 'fn-flagfont';
+        st.textContent = '@font-face{font-family:"Twemoji Country Flags";unicode-range:U+1F1E6-1F1FF,U+1F3F4,U+E0062-E0063,U+E0065,U+E0067,U+E006C,U+E006E,U+E0073-E0074,U+E0077,U+E007F;src:url("https://cdn.jsdelivr.net/npm/country-flag-emoji-polyfill@0.1/dist/TwemojiCountryFlags.woff2") format("woff2");font-display:swap}';
+        D.head.appendChild(st);
+      }
+    } catch(x) {}
+  }
   // ── 社群分頁：PTT／微博／Reddit 固定跳轉列 ──
   var snBar = null, snPick = '', snRaf = 0;
   function snVis(el){ return !!(el && el.getClientRects().length); }
@@ -2878,7 +2893,7 @@ _READ_JS = """
   P.addEventListener('resize', onSnScroll);
   P.__fnCleanup = function(){ D.removeEventListener('scroll', onSnScroll, true); P.removeEventListener('resize', onSnScroll); if (snBar) { snBar.remove(); snBar = null; } obs.disconnect(); D.removeEventListener('click', onClick, true); P.removeEventListener('popstate', onPop); if (ov) { ov.remove(); ov = null; } D.removeEventListener('visibilitychange', onVis); clearInterval(tt); if (io) io.disconnect(); D.documentElement.removeAttribute('data-fnjs'); };
   D.documentElement.setAttribute('data-fnjs', '1');
-  initBase(); touch(); snavInit();
+  initBase(); touch(); snavInit(); flagFill();
   var tt = setInterval(touch, 60000);
   D.addEventListener('visibilitychange', onVis);
   markRead(); buildReco(); markFav(); buildFav(); applyDens(); markNew(); ensureLazy(); tagChips(); snavUpdate();
