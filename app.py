@@ -1806,9 +1806,9 @@ def _ptt_board(board: str, pages: int = 2) -> tuple:
     return posts, err
 
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def fetch_ptt_live() -> dict:
-    """各看板平行抓取，快取 10 分鐘。回傳 {'posts': [...], 'errors': [...], 'at': 'HH:MM'}"""
+    """各看板平行抓取，快取 30 分鐘。回傳 {'posts': [...], 'errors': [...], 'at': 'HH:MM'}"""
     posts, errs = [], []
     with ThreadPoolExecutor(max_workers=8) as ex:
         for ps, er in ex.map(lambda b: _ptt_board(b[0], 3 if b[0] in PTT_BIG else 2),
@@ -1859,7 +1859,8 @@ gen_str, gen_age = _gen_time_str(sync.get("generated_at", ""))
 if sync["ok"] and gen_age is not None and gen_age <= 3:
     status = f'<span class="pill pill-ok">● 自動更新正常</span>'
 elif sync["ok"]:
-    status = '<span class="pill pill-warn">⚠ 自動更新已超過 3 小時</span>'
+    _ago = f"{int(gen_age)} 小時" if gen_age is not None and gen_age < 48 else (f"{int(gen_age // 24)} 天" if gen_age is not None else "數小時")
+    status = f'<span class="pill pill-warn">⚠ 資料已 {_ago}沒更新</span>'
 else:
     status = '<span class="pill pill-warn">⚠ 未連到 GitHub 資料</span>'
 
@@ -2164,7 +2165,7 @@ with tab_soc:
                 '<span class="sn-b" data-snav="weibo">🇨🇳 微博</span>'
                 '<span class="sn-b" data-snav="reddit">👽 Reddit</span></div>', unsafe_allow_html=True)
 
-    # ── PTT（台灣）：Streamlit 即時抓，快取 10 分鐘 ──
+    # ── PTT（台灣）：Streamlit 即時抓，快取 30 分鐘 ──
     st.markdown('<div class="sec" data-sn="ptt">🇹🇼 PTT 熱門（台灣）</div>', unsafe_allow_html=True)
     _pc1, _pc2, _pc3 = st.columns([4, 2, 1.2])
     with _pc3:
