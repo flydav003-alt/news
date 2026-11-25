@@ -46,6 +46,14 @@ def _secret(name: str, default: str = "") -> str:
     return os.environ.get(name, default)
 
 
+# extras.py 讀環境變數（Actions 用）；Streamlit 的 Secrets 要先轉成環境變數，再 import
+for _k in ("PROXY_URL", "PROXY_KEY", "GROQ_API_KEY"):
+    _v = _secret(_k)
+    if _v:
+        os.environ.setdefault(_k, _v)
+import extras as _ex
+
+
 def _h(s: str) -> str:
     """去掉每行縮排與換行：避免 Streamlit markdown 把縮排 HTML 當成程式碼區塊"""
     return "".join(line.strip() for line in s.splitlines())
@@ -1806,9 +1814,8 @@ def _ptt_board(board: str, pages: int = 2) -> tuple:
     return posts, err
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
-def fetch_ptt_live() -> dict:
-    """各看板平行抓取，快取 30 分鐘。回傳 {'posts': [...], 'errors': [...], 'at': 'HH:MM'}"""
+def _ptt_all() -> dict:
+    """各看板平行抓取。回傳 {'posts': [...], 'errors': [...], 'at': 'HH:MM'}"""
     posts, errs = [], []
     with ThreadPoolExecutor(max_workers=8) as ex:
         for ps, er in ex.map(lambda b: _ptt_board(b[0], 3 if b[0] in PTT_BIG else 2),
@@ -1830,6 +1837,43 @@ def fetch_ptt_live() -> dict:
         age_h = max((now - x["p"]) / 3600, 0) if x["p"] else 24
         x["h"] = max(x["n"], 0) / ref[x["b"]] / ((age_h + 2) ** 0.7)
     return {"posts": posts, "errors": errs, "at": datetime.now(TZ_TW).strftime("%H:%M")}
+
+
+LIVE_DEADLINE = 30     # 三個來源合起來最多等幾秒
+
+
+def _reddit_all(prev_rd: dict):
+    red, errs = _ex.fetch_reddit()
+    _ex.reddit_trends(red, prev_rd)
+    _ex.translate_reddit(red, prev_rd)
+    return red, errs
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_live_bundle(_prev_wb, _prev_rd) -> dict:
+    """PTT、微博、Reddit 三個同時抓（平行，總時間約等於最慢的那個），快取 5 分鐘。
+    _prev_wb / _prev_rd 是 extras.json 裡上一輪的資料，用來算「新上榜／名次躍升」（底線開頭＝不參與快取鍵）。
+    任何一個失敗都不影響其他：微博失敗回 None、Reddit 失敗的板不在結果裡，畫面會退回 extras.json 的舊資料。"""
+    empty_ptt = {"posts": [], "errors": ["PTT 抓取例外"], "at": datetime.now(TZ_TW).strftime("%H:%M")}
+    # 不用 with：with 結束時會等所有執行緒跑完，Reddit 卡住就會拖住整個頁面（所有分頁共用同一次重跑）。
+    # 這裡整體最多等 LIVE_DEADLINE 秒，超過的來源當作失敗、畫面沿用 extras.json 的舊資料，背景執行緒自己收尾。
+    ex = ThreadPoolExecutor(max_workers=3)
+    futs = ((ex.submit(_ptt_all), empty_ptt), (ex.submit(_ex.fetch_weibo), None),
+            (ex.submit(_reddit_all, _prev_rd or {}), ({}, [])))
+    t_end = time.time() + LIVE_DEADLINE
+    out = []
+    for f, dflt in futs:
+        try:
+            out.append(f.result(timeout=max(0.5, t_end - time.time())))
+        except Exception as e:
+            logging.getLogger("live").warning(f"即時抓取逾時或失敗：{type(e).__name__}: {e}")
+            out.append(dflt)
+    ex.shutdown(wait=False)
+    ptt, wb, (red, rerr) = out
+    if wb:
+        wb = _ex.add_trends(wb, _prev_wb or [], int(time.time()))
+    return {"ptt": ptt, "weibo": wb, "reddit": red, "reddit_err": rerr,
+            "at": datetime.now(TZ_TW).strftime("%H:%M")}
 
 
 def ptt_html(posts: list, n: int = 20, by: str = "h") -> str:
@@ -2175,10 +2219,14 @@ with tab_soc:
         _pb = st.radio("分類", ["全部"] + PTT_CATS, horizontal=True, key="ptt_board",
                        label_visibility="collapsed")
     with _pc2:
-        if st.button("🔄 重新抓取", key="ptt_refresh"):
-            fetch_ptt_live.clear()
-    with st.spinner("抓取 PTT 中…"):
-        _ptt = fetch_ptt_live()
+        if st.button("🔄 全部重新抓取", key="soc_refresh", help="PTT／微博／Reddit 一起重抓"):
+            fetch_live_bundle.clear()
+            load_remote_json.clear()
+    _prev_soc = EXTRAS.get("social") or {}
+    with st.spinner("抓取 PTT／微博／Reddit 中…"):
+        _live = fetch_live_bundle(_prev_soc.get("weibo") or [],
+                                  _prev_soc.get("reddit") if isinstance(_prev_soc.get("reddit"), dict) else {})
+    _ptt = _live["ptt"]
     _pp = sorted([x for x in _ptt["posts"] if _pb == "全部" or x.get("c") == _pb],
                  key=lambda x: x["n"] if _psort == "推文數" else x["h"], reverse=True)
     if _ptt["posts"]:
@@ -2192,8 +2240,19 @@ with tab_soc:
                + (f" · 部分看板失敗：{'；'.join(_ptt['errors'])}" if _ptt["errors"] and _ptt["posts"] else ""))
     st.divider()
 
-    _sc = EXTRAS.get("social")
-    if not _sc:
+    # 即時抓到的微博／Reddit 蓋過 extras.json（Actions 產生、可能晚 1 小時以上）；即時抓失敗的部分才沿用舊資料
+    _sc = dict(EXTRAS.get("social") or {})
+    _nowiso = datetime.now(TZ_TW).isoformat(timespec="seconds")
+    if _live.get("weibo"):
+        _sc.update(weibo=_live["weibo"], weibo_at=_nowiso, weibo_stale=False)
+    _rd = dict(_sc.get("reddit") or {})
+    _rat = dict(_sc.get("reddit_at") or {})
+    _stl = set(_sc.get("reddit_stale") or [])
+    for _s, _lst in (_live.get("reddit") or {}).items():
+        _rd[_s], _rat[_s] = _lst, _nowiso
+        _stl.discard(_s)
+    _sc.update(reddit=_rd, reddit_at=_rat, reddit_stale=sorted(_stl))
+    if not _sc.get("weibo") and not _rd:
         st.markdown(f'<div class="empty">💬 {_NO_EXTRAS}</div>', unsafe_allow_html=True)
     else:
         _l, _r = social_html(_sc)
