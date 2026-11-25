@@ -872,6 +872,86 @@ def fetch_weibo():
     return out or None
 
 
+LEMMY_HOSTS = ("lemmy.world", "lemmy.ml")
+
+
+def _iso_epoch(s) -> int:
+    try:
+        s = re.sub(r"(\.\d{6})\d+", r"\1", str(s or "").replace("Z", "+00:00"))
+        d = datetime.fromisoformat(s)
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=timezone.utc)
+        return int(d.timestamp())
+    except Exception:
+        return 0
+
+
+def _lemmy_parse(j, host: str):
+    """Lemmy 的 post/list 回應 → 統一格式。同時容忍舊版（counts 另放）與新版（欄位直接在 post 裡）。"""
+    out = []
+    for it in (j or {}).get("posts") or []:
+        p = it.get("post") or it
+        c = it.get("community") or {}
+        ct = it.get("counts") or {}
+        if p.get("nsfw") or c.get("nsfw"):
+            continue
+        name = _tags(p.get("name") or "")
+        pid = p.get("id")
+        if not name or pid is None:
+            continue
+        disc = f"https://{host}/post/{pid}"
+        url = str(p.get("url") or "")
+        out.append({"t": name, "u": url if url.startswith("http") else disc, "d": disc,
+                    "n": int(ct.get("score", p.get("score", 0)) or 0),
+                    "c": int(ct.get("comments", p.get("comments", 0)) or 0),
+                    "p": _iso_epoch(p.get("published")), "cm": _tags(c.get("title") or c.get("name") or ""),
+                    "i": str(p.get("thumbnail_url") or "")})
+    return out
+
+
+def fetch_lemmy(n: int = 25):
+    """Lemmy（開源聯邦式論壇，最接近 Reddit 的替代品）熱門首頁。公開 API 免登入，有真實分數與留言數。
+    依序試：v3 → v4（新版）→ RSS（沒有分數，只當最後備援）。失敗回 None。"""
+    for host in LEMMY_HOSTS:
+        for ver, params in (("v3", {"sort": "Hot", "type_": "All", "limit": n}),
+                            ("v4", {"sort": "hot", "type_": "all", "limit": n})):
+            rows = _lemmy_parse(_json(f"https://{host}/api/{ver}/post/list", params, gap=0.5), host)
+            if rows:
+                rows.sort(key=lambda x: x["n"], reverse=True)
+                return rows[:n]
+        ent = _feed(f"https://{host}/feeds/all.xml?sort=Hot", gap=0.5)
+        if ent:
+            return [{"t": _tags(x.get("title", "")), "u": x.get("link", ""), "d": x.get("link", ""), "n": 0, "c": 0,
+                     "p": _ts(x), "cm": "", "i": ""} for x in ent[:n] if x.get("title") and x.get("link")] or None
+    return None
+
+
+MASTODON_HOST = "mastodon.social"
+
+
+def fetch_mastodon(n: int = 20):
+    """Mastodon 熱門貼文（官方公開端點 /api/v1/trends/statuses，免登入）。失敗回 None。"""
+    j = _json(f"https://{MASTODON_HOST}/api/v1/trends/statuses", {"limit": min(n * 2, 40)}, gap=0.5)
+    if not isinstance(j, list):
+        return None
+    out = []
+    for s in j:
+        if s.get("sensitive"):
+            continue
+        txt = _tags((s.get("content") or "").replace("</p>", " ").replace("<br>", " ").replace("<br />", " "))
+        if not txt:
+            txt = _tags((s.get("card") or {}).get("title") or "")
+        txt = re.sub(r"https?://\S+", "", txt).strip()
+        if not txt or not s.get("url"):
+            continue
+        acc = s.get("account") or {}
+        fav, rb = int(s.get("favourites_count") or 0), int(s.get("reblogs_count") or 0)
+        out.append({"t": txt[:140], "u": s["url"], "n": fav + rb, "f": fav, "r": rb, "c": int(s.get("replies_count") or 0),
+                    "p": _iso_epoch(s.get("created_at")), "a": _tags(acc.get("display_name") or acc.get("acct") or "")})
+    out.sort(key=lambda x: x["n"], reverse=True)
+    return out[:n] or None
+
+
 def translate_reddit(red: dict, old: dict) -> None:
     """替 Reddit 標題加上 z（繁體中文）；已翻過的沿用上次結果。先用 Groq，失敗再用 Google 翻譯。"""
     cache = {p["u"]: p.get("z", "") for lst in old.values() for p in lst if p.get("z")}
@@ -984,7 +1064,18 @@ def build_social(prev: dict, now: datetime) -> dict:
     out["reddit_at"], out["reddit_stale"] = rat, stale
     translate_reddit(red, old)
     out["reddit"] = red
-    parts["reddit"] = "ok" if not errs else f"error: {', '.join(errs)} 抓不到（Reddit 常擋雲端 IP）"
+    parts["reddit"] = "ok" if not errs else f"error: {', '.join(errs)} 抓不到（Reddit 已於 2026-11-13 終止 RSS，預期失敗）"
+
+    # Lemmy／Mastodon（取代已失效的 Reddit RSS）：失敗沿用上次；標題翻成繁中
+    for key, fn in (("lm", fetch_lemmy), ("md", fetch_mastodon)):
+        rows = fn()
+        old_rows = prev.get(key) if isinstance(prev.get(key), list) else []
+        if rows:
+            translate_reddit({key: rows}, {key: old_rows})
+        out[key] = rows or old_rows
+        out[key + "_at"] = now_iso if rows else (prev.get(key + "_at") or "")
+        out[key + "_stale"] = not rows
+        parts[key] = "ok" if rows else f"error: {'Lemmy' if key == 'lm' else 'Mastodon'} 抓不到（保留上次內容）"
 
     wb = fetch_weibo()
     if wb:
