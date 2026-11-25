@@ -901,7 +901,11 @@ def _lemmy_parse(j, host: str):
             continue
         disc = f"https://{host}/post/{pid}"
         url = str(p.get("url") or "")
-        out.append({"t": name, "u": url if url.startswith("http") else disc, "d": disc,
+        isimg = (str(p.get("url_content_type") or "").startswith("image")
+                 or url.lower().split("?")[0].endswith(_IMG_EXT) or "/pictrs/image/" in url)
+        # u＝標題連結，一律開 Lemmy 討論串（想看的是討論）；x＝外部原文（圖片檔不算原文）；im＝圖片貼文
+        out.append({"t": name, "u": disc, "d": disc,
+                    "x": url if (url.startswith("http") and not isimg) else "", "im": 1 if isimg else 0,
                     "n": int(ct.get("score", p.get("score", 0)) or 0),
                     "c": int(ct.get("comments", p.get("comments", 0)) or 0),
                     "p": _iso_epoch(p.get("published")), "cm": _tags(c.get("title") or c.get("name") or ""),
