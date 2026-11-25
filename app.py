@@ -1697,10 +1697,36 @@ def weibo_cards(sc: dict, n=20) -> str:
     return out
 
 
+def _empty_msg(sc: dict, key: str) -> str:
+    err = (sc.get("live_err") or {}).get(key, "")
+    return f'<div class="rk-e">（目前沒有資料{"：" + esc(err) if err else ""}）</div>'
+
+
+def gt_cards(sc: dict, n=20) -> str:
+    gt = (sc.get("gt") or [])[:n]
+    if not gt:
+        return _empty_msg(sc, "gt")
+    mx = max(int(p.get("n") or 0) for p in gt) or 1
+    out = ""
+    for i, p in enumerate(gt, 1):
+        v = int(p.get("n") or 0)
+        ratio = v / mx
+        w = max(6.0, ratio ** 0.6 * 100) if v else 0
+        lvl = "" if ratio >= 0.66 else (" h2" if ratio >= 0.33 else " h3")
+        heat = (f'<div class="sc-h"><span class="sc-bar{lvl}"><i style="width:{w:.0f}%"></i></span>'
+                f'<span class="sc-n">🔥 {esc(str(p.get("tl") or _fmt_n(v)))} 搜尋</span></div>') if v else ""
+        bd = f'<span class="bd bd-n">📰 {esc(p["ns"])}</span>' if p.get("ns") else ""
+        meta = ((f'<span>{esc(rel_epoch(p["p"]))}上榜</span> · ' if p.get("p") else "")
+                + f'<a class="tk" href="{esc(p["d"], quote=True)}" target="_blank" rel="noopener">看趨勢</a>')
+        orig = p["t"] if p.get("z") else (p.get("nt") or "")
+        out += _sc_card(i, p.get("z") or p["t"], p["u"], orig=orig, heat_html=heat, badges=bd, meta=meta, medal=True)
+    return out
+
+
 def hn_cards(sc: dict, n=20) -> str:
     hn = (sc.get("hn") or [])[:n]
     if not hn:
-        return '<div class="rk-e">（目前沒有資料）</div>'
+        return _empty_msg(sc, "hn")
     mx = max(int(p.get("n") or 0) for p in hn) or 1
     out = ""
     for i, p in enumerate(hn, 1):
@@ -1768,7 +1794,10 @@ def social_html(sc: dict) -> tuple:
     left = ('<div class="sec" data-sn="weibo">🇨🇳 微博熱搜（大陸）</div>'
             + (_stale_note(sc.get("weibo_at", "")) if sc.get("weibo_stale") and sc.get("weibo") else "")
             + weibo_cards(sc))
-    right = ('<div class="sec" data-sn="reddit">💻 Hacker News（科技／全球）</div>'
+    right = ('<div class="sec" data-sn="reddit">🔍 Google 熱搜（美國）</div>'
+             + (_stale_note(sc.get("gt_at", "")) if sc.get("gt_stale") and sc.get("gt") else "")
+             + gt_cards(sc)
+             + '<div class="sec">💻 Hacker News（科技圈）</div>'
              + (_stale_note(sc.get("hn_at", "")) if sc.get("hn_stale") and sc.get("hn") else "")
              + hn_cards(sc))
     rd = sc.get("reddit") or {}
@@ -1866,6 +1895,13 @@ def _ptt_all() -> dict:
     return {"posts": posts, "errors": errs, "at": datetime.now(TZ_TW).strftime("%H:%M")}
 
 
+def _gt_all(prev_gt: list):
+    gt = _ex.fetch_gt_us()
+    if gt:
+        _ex.translate_reddit({"gt": gt}, {"gt": prev_gt or []})
+    return gt
+
+
 def _hn_all(prev_hn: list):
     hn = _ex.fetch_hn()
     if hn:
@@ -1884,29 +1920,38 @@ def _reddit_all(prev_rd: dict):
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def fetch_live_bundle(_prev_wb, _prev_rd, _prev_hn=None) -> dict:
+def fetch_live_bundle(_prev_wb, _prev_rd, _prev_hn=None, _prev_gt=None) -> dict:
     """PTT、微博、Reddit 三個同時抓（平行，總時間約等於最慢的那個），快取 5 分鐘。
     _prev_wb / _prev_rd 是 extras.json 裡上一輪的資料，用來算「新上榜／名次躍升」（底線開頭＝不參與快取鍵）。
     任何一個失敗都不影響其他：微博失敗回 None、Reddit 失敗的板不在結果裡，畫面會退回 extras.json 的舊資料。"""
     empty_ptt = {"posts": [], "errors": ["PTT 抓取例外"], "at": datetime.now(TZ_TW).strftime("%H:%M")}
     # 不用 with：with 結束時會等所有執行緒跑完，Reddit 卡住就會拖住整個頁面（所有分頁共用同一次重跑）。
     # 這裡整體最多等 LIVE_DEADLINE 秒，超過的來源當作失敗、畫面沿用 extras.json 的舊資料，背景執行緒自己收尾。
-    ex = ThreadPoolExecutor(max_workers=4)
-    futs = ((ex.submit(_ptt_all), empty_ptt), (ex.submit(_ex.fetch_weibo), None),
-            (ex.submit(_reddit_all, _prev_rd or {}), ({}, [])), (ex.submit(_hn_all, _prev_hn or []), None))
+    ex = ThreadPoolExecutor(max_workers=5)
+    # 用 lambda：attribute 不存在（例如 extras.py 沒更新成新版）時，錯誤發生在執行緒裡、會被記下並顯示在畫面，不會整個崩掉
+    jobs = (("ptt", lambda: _ptt_all(), empty_ptt),
+            ("weibo", lambda: _ex.fetch_weibo(), None),
+            ("reddit", lambda: _reddit_all(_prev_rd or {}), ({}, [])),
+            ("hn", lambda: _hn_all(_prev_hn or []), None),
+            ("gt", lambda: _gt_all(_prev_gt or []), None))
+    futs = [(k, ex.submit(fn), d) for k, fn, d in jobs]
     t_end = time.time() + LIVE_DEADLINE
-    out = []
-    for f, dflt in futs:
+    res, errmap = {}, {}
+    for k, f, d in futs:
         try:
-            out.append(f.result(timeout=max(0.5, t_end - time.time())))
+            res[k] = f.result(timeout=max(0.5, t_end - time.time()))
         except Exception as e:
-            logging.getLogger("live").warning(f"即時抓取逾時或失敗：{type(e).__name__}: {e}")
-            out.append(dflt)
+            res[k] = d
+            errmap[k] = f"{type(e).__name__}: {e}" if str(e) else "逾時"
+            logging.getLogger("live").warning(f"即時抓取 {k} 失敗：{errmap[k]}")
+        else:
+            if res[k] is None and k in ("weibo", "hn", "gt"):
+                errmap[k] = "請求失敗或回傳格式不符（詳見 Streamlit 後台 log）"
     ex.shutdown(wait=False)
-    ptt, wb, (red, rerr), hn = out
+    ptt, wb, (red, rerr), hn, gt = res["ptt"], res["weibo"], res["reddit"], res["hn"], res["gt"]
     if wb:
         wb = _ex.add_trends(wb, _prev_wb or [], int(time.time()))
-    return {"ptt": ptt, "weibo": wb, "reddit": red, "reddit_err": rerr, "hn": hn,
+    return {"ptt": ptt, "weibo": wb, "reddit": red, "reddit_err": rerr, "hn": hn, "gt": gt, "err": errmap,
             "at": datetime.now(TZ_TW).strftime("%H:%M")}
 
 
@@ -2241,7 +2286,7 @@ with tab_soc:
     # 快速跳轉列：往下捲離開畫面後，JS 會在分頁列下方顯示同樣的固定列（見 _READ_JS 的 snav）
     st.markdown('<div class="fn-snav"><span class="sn-b" data-snav="ptt">🇹🇼 PTT</span>'
                 '<span class="sn-b" data-snav="weibo">🇨🇳 微博</span>'
-                '<span class="sn-b" data-snav="reddit">💻 HN</span></div>', unsafe_allow_html=True)
+                '<span class="sn-b" data-snav="reddit">🔍 美國</span></div>', unsafe_allow_html=True)
 
     # ── PTT（台灣）：Streamlit 即時抓，快取 30 分鐘 ──
     st.markdown('<div class="sec" data-sn="ptt">🇹🇼 PTT 熱門（台灣）</div>', unsafe_allow_html=True)
@@ -2260,7 +2305,7 @@ with tab_soc:
     with st.spinner("抓取 PTT／微博／Reddit 中…"):
         _live = fetch_live_bundle(_prev_soc.get("weibo") or [],
                                   _prev_soc.get("reddit") if isinstance(_prev_soc.get("reddit"), dict) else {},
-                                  _prev_soc.get("hn") or [])
+                                  _prev_soc.get("hn") or [], _prev_soc.get("gt") or [])
     _ptt = _live["ptt"]
     _pp = sorted([x for x in _ptt["posts"] if _pb == "全部" or x.get("c") == _pb],
                  key=lambda x: x["n"] if _psort == "推文數" else x["h"], reverse=True)
@@ -2282,6 +2327,9 @@ with tab_soc:
         _sc.update(weibo=_live["weibo"], weibo_at=_nowiso, weibo_stale=False)
     if _live.get("hn"):
         _sc.update(hn=_live["hn"], hn_at=_nowiso, hn_stale=False)
+    if _live.get("gt"):
+        _sc.update(gt=_live["gt"], gt_at=_nowiso, gt_stale=False)
+    _sc["live_err"] = _live.get("err") or {}
     _rd = dict(_sc.get("reddit") or {})
     _rat = dict(_sc.get("reddit_at") or {})
     _stl = set(_sc.get("reddit_stale") or [])
@@ -2289,7 +2337,7 @@ with tab_soc:
         _rd[_s], _rat[_s] = _lst, _nowiso
         _stl.discard(_s)
     _sc.update(reddit=_rd, reddit_at=_rat, reddit_stale=sorted(_stl))
-    if not _sc.get("weibo") and not _rd and not _sc.get("hn"):
+    if not _sc.get("weibo") and not _rd and not _sc.get("hn") and not _sc.get("gt"):
         st.markdown(f'<div class="empty">💬 {_NO_EXTRAS}</div>', unsafe_allow_html=True)
     else:
         _l, _r = social_html(_sc)
@@ -2838,7 +2886,7 @@ _READ_JS = """
   function snavInit(){
     var old = D.getElementById('fn-snav-fix'); if (old) old.remove();
     snBar = D.createElement('div'); snBar.id = 'fn-snav-fix';
-    snBar.innerHTML = '<span class="sn-b" data-snav="ptt">🇹🇼 PTT</span><span class="sn-b" data-snav="weibo">🇨🇳 微博</span><span class="sn-b" data-snav="reddit">💻 HN</span>';
+    snBar.innerHTML = '<span class="sn-b" data-snav="ptt">🇹🇼 PTT</span><span class="sn-b" data-snav="weibo">🇨🇳 微博</span><span class="sn-b" data-snav="reddit">🔍 美國</span>';
     D.body.appendChild(snBar);
   }
   function snavUpdate(){
