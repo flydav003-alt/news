@@ -893,6 +893,73 @@ def fetch_hn(n: int = 25):
     return out[:n] or None
 
 
+def _traffic_n(s) -> int:
+    """'500K+' → 500000、'2M+' → 2000000、'20,000+' → 20000"""
+    m = re.match(r"\s*([\d,.]+)\s*([KMB]?)", str(s or "").upper())
+    if not m:
+        return 0
+    try:
+        v = float(m.group(1).replace(",", ""))
+    except ValueError:
+        return 0
+    return int(v * {"": 1, "K": 1e3, "M": 1e6, "B": 1e9}[m.group(2)])
+
+
+GT_URLS = ("https://trends.google.com/trending/rss", "https://trends.google.com/trends/trendingsearches/daily/rss")
+
+
+def fetch_gt_us(n: int = 20):
+    """Google Trends 美國當下熱搜（官方公開 RSS，免金鑰）。每項有大約搜尋量與相關新聞。失敗回 None。
+    先試新網址，再試舊網址（Google 2025 年改版過）。"""
+    import xml.etree.ElementTree as ET
+    from email.utils import parsedate_to_datetime
+    from urllib.parse import quote
+    root = None
+    for u in GT_URLS:
+        r = _get(u, params={"geo": "US"}, headers=HTML_HDR, gap=0.5)
+        if r is None:
+            continue
+        try:
+            root = ET.fromstring(r.content)
+            break
+        except Exception:
+            continue
+    if root is None:
+        return None
+    ln = lambda el: el.tag.rsplit("}", 1)[-1]
+    out = []
+    for it in root.iter("item"):
+        d = {"t": "", "tl": "", "n": 0, "p": 0, "nt": "", "ns": "", "nu": ""}
+        for ch in it:
+            k = ln(ch)
+            if k == "title":
+                d["t"] = _tags(ch.text)
+            elif k == "approx_traffic":
+                d["tl"] = (ch.text or "").strip()
+                d["n"] = _traffic_n(d["tl"])
+            elif k == "pubDate":
+                try:
+                    d["p"] = int(parsedate_to_datetime(ch.text).timestamp())
+                except Exception:
+                    pass
+            elif k == "news_item" and not d["nt"]:
+                for g in ch:
+                    gk = ln(g)
+                    if gk == "news_item_title":
+                        d["nt"] = _tags(g.text)
+                    elif gk == "news_item_url":
+                        d["nu"] = (g.text or "").strip()
+                    elif gk == "news_item_source":
+                        d["ns"] = _tags(g.text)
+        if not d["t"]:
+            continue
+        d["d"] = f"https://trends.google.com/trends/explore?q={quote(d['t'])}&geo=US"
+        d["u"] = d.pop("nu") or d["d"]
+        out.append(d)
+    out.sort(key=lambda x: x["n"], reverse=True)
+    return out[:n] or None
+
+
 def translate_reddit(red: dict, old: dict) -> None:
     """替 Reddit 標題加上 z（繁體中文）；已翻過的沿用上次結果。先用 Groq，失敗再用 Google 翻譯。"""
     cache = {p["u"]: p.get("z", "") for lst in old.values() for p in lst if p.get("z")}
@@ -1006,6 +1073,16 @@ def build_social(prev: dict, now: datetime) -> dict:
     translate_reddit(red, old)
     out["reddit"] = red
     parts["reddit"] = "ok" if not errs else f"error: {', '.join(errs)} 抓不到（Reddit 已於 2026-11-13 終止 RSS，預期失敗）"
+
+    # Google Trends 美國熱搜：失敗沿用上次；詞條翻成繁中
+    gt = fetch_gt_us()
+    old_gt = prev.get("gt") if isinstance(prev.get("gt"), list) else []
+    if gt:
+        translate_reddit({"gt": gt}, {"gt": old_gt})
+    out["gt"] = gt or old_gt
+    out["gt_at"] = now_iso if gt else (prev.get("gt_at") or "")
+    out["gt_stale"] = not gt
+    parts["gt"] = "ok" if gt else "error: Google Trends 抓不到（保留上次內容）"
 
     # Hacker News（取代已失效的 Reddit RSS）：失敗沿用上次；標題翻成繁中（沿用 translate_reddit 的快取與 Groq 流程）
     hn = fetch_hn()
