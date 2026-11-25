@@ -34,7 +34,7 @@ UA = {
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
 }
-REFRESH_MIN = {"chips": 40, "calendar": 170, "social": 20}      # 各區塊最短更新間隔（分鐘）
+REFRESH_MIN = {"chips": 40, "calendar": 170, "social": 10}      # 各區塊最短更新間隔（分鐘）
 _last_call = [0.0]
 
 
@@ -656,7 +656,10 @@ STICKY_MODE = "hide"                    # "hide"＝直接濾掉；"mark"＝保�
 STICKY_RE = re.compile(r"discussion thread|live thread|megathread|mega thread|daily thread|daily discussion|"
                        r"weekly thread|weekly discussion|moderator|rules? (?:update|reminder)", re.I)
 STICKY_MAX_AGE_H = 48                   # 發文超過幾小時還在熱門榜 → 視為置頂（0＝不用這條規則）
-REDDIT_BUDGET = 20                      # 整段 Reddit 抓取最多花幾秒，用完就放棄、沿用舊資料
+REDDIT_BUDGET = 40                      # 整段 Reddit 抓取最多花幾秒，用完就放棄、沿用舊資料
+REDDIT_PER_SUB = 12                     # 每個板最多花幾秒（以前共用 20 秒，第一個板失敗就把時間燒光，後面的板直接被略過）
+# 先試「今日最高票」（top, t=day：看得到的就是過去 24 小時真正最熱的），失敗再退回 hot
+REDDIT_PATHS = ("top/.rss?t=day&limit=25", "hot/.rss?limit=25")
 
 
 def _feed(url, gap=1.0, **kw):
@@ -797,9 +800,13 @@ def fetch_reddit():
     for sub, n in REDDIT_SUBS:
         ent = None
         if time.time() < deadline:
+            sub_deadline = min(deadline, time.time() + REDDIT_PER_SUB)
             for host in REDDIT_HOSTS:
-                ent = _feed(f"https://{host}/r/{sub}/hot/.rss?limit=25", gap=REDDIT_GAP,
-                            timeout=REDDIT_TIMEOUT, deadline=deadline, proxy_extra=0)
+                for path in REDDIT_PATHS:
+                    ent = _feed(f"https://{host}/r/{sub}/{path}", gap=REDDIT_GAP,
+                                timeout=REDDIT_TIMEOUT, deadline=sub_deadline, proxy_extra=0)
+                    if ent:
+                        break
                 if ent:
                     break
         else:
