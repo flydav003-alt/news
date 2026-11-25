@@ -872,6 +872,27 @@ def fetch_weibo():
     return out or None
 
 
+def fetch_hn(n: int = 25):
+    """Hacker News 首頁熱門（Algolia 官方公開 API，免金鑰、不擋雲端 IP；有真實分數 n 與留言數 c）。失敗回 None。
+    Reddit 已在 2026-11-13 終止 RSS、雲端 IP 一律 403，所以右欄改用這個。"""
+    j = _json("https://hn.algolia.com/api/v1/search", {"tags": "front_page", "hitsPerPage": n}, gap=0.5)
+    try:
+        hits = j["hits"]
+    except Exception:
+        return None
+    out = []
+    for h in hits:
+        t = _tags(h.get("title") or "")
+        oid = str(h.get("objectID") or "")
+        if not t or not oid:
+            continue
+        out.append({"t": t, "u": h.get("url") or f"https://news.ycombinator.com/item?id={oid}",
+                    "d": f"https://news.ycombinator.com/item?id={oid}",
+                    "n": int(h.get("points") or 0), "c": int(h.get("num_comments") or 0),
+                    "p": int(h.get("created_at_i") or 0)})
+    return out[:n] or None
+
+
 def translate_reddit(red: dict, old: dict) -> None:
     """替 Reddit 標題加上 z（繁體中文）；已翻過的沿用上次結果。先用 Groq，失敗再用 Google 翻譯。"""
     cache = {p["u"]: p.get("z", "") for lst in old.values() for p in lst if p.get("z")}
@@ -984,7 +1005,17 @@ def build_social(prev: dict, now: datetime) -> dict:
     out["reddit_at"], out["reddit_stale"] = rat, stale
     translate_reddit(red, old)
     out["reddit"] = red
-    parts["reddit"] = "ok" if not errs else f"error: {', '.join(errs)} 抓不到（Reddit 常擋雲端 IP）"
+    parts["reddit"] = "ok" if not errs else f"error: {', '.join(errs)} 抓不到（Reddit 已於 2026-11-13 終止 RSS，預期失敗）"
+
+    # Hacker News（取代已失效的 Reddit RSS）：失敗沿用上次；標題翻成繁中（沿用 translate_reddit 的快取與 Groq 流程）
+    hn = fetch_hn()
+    old_hn = prev.get("hn") if isinstance(prev.get("hn"), list) else []
+    if hn:
+        translate_reddit({"hn": hn}, {"hn": old_hn})
+    out["hn"] = hn or old_hn
+    out["hn_at"] = now_iso if hn else (prev.get("hn_at") or "")
+    out["hn_stale"] = not hn
+    parts["hn"] = "ok" if hn else "error: Hacker News 抓不到（保留上次內容）"
 
     wb = fetch_weibo()
     if wb:
