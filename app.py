@@ -1715,10 +1715,12 @@ def lm_cards(sc: dict, n=20) -> str:
         lvl = "" if ratio >= 0.66 else (" h2" if ratio >= 0.33 else " h3")
         heat = (f'<div class="sc-h"><span class="sc-bar{lvl}"><i style="width:{w:.0f}%"></i></span>'
                 f'<span class="sc-n">🔥 {_fmt_n(v)} 分</span></div>') if v else ""
-        bd = (f'<span class="bd bd-n">{esc(p["cm"])}</span>' if p.get("cm") else "") + \
-             (f'<span class="bd bd-n">💬 {int(p.get("c") or 0):,}</span>' if p.get("c") else "")
-        meta = ((f'<span>{esc(rel_epoch(p["p"]))}發文</span> · ' if p.get("p") else "")
-                + f'<a class="tk" href="{esc(p.get("d") or p["u"], quote=True)}" target="_blank" rel="noopener">看討論</a>')
+        bd = (('<span class="bd bd-g">🖼 圖片</span>' if p.get("im") else "")
+              + (f'<span class="bd bd-n">{esc(p["cm"])}</span>' if p.get("cm") else "")
+              + (f'<span class="bd bd-n">💬 {int(p.get("c") or 0):,}</span>' if p.get("c") else ""))
+        meta = ((f'<span>{esc(rel_epoch(p["p"]))}發文</span>' if p.get("p") else "")
+                + (f' · <a class="tk" href="{esc(p["x"], quote=True)}" target="_blank" rel="noopener">原文 ↗</a>'
+                   if p.get("x") else ""))
         out += _sc_card(i, p.get("z") or p["t"], p["u"], orig=(p["t"] if p.get("z") else ""), heat_html=heat,
                         badges=bd, meta=meta, img=p.get("i", ""), medal=True)
     return out
